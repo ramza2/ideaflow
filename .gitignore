@@ -31,3 +31,7 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# Python packaging
+*.egg-info/
+dist/
