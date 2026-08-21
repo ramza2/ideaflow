@@ -24,3 +24,10 @@ IdeaFlow is a natural-language idea-management product. This repo currently cont
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (e.g. `/w/personal/home`, `/w/personal/ideas`).
 - The Vite config includes a custom `figma:asset/` import resolver and aliases `@` to `frontend/src`.
 - `.env.example` at the repo root references future backend concerns (DATABASE_URL, LLM_API_URL, WEB_SEARCH_API_*). These are not consumed by the current frontend and are not required to run it.
+
+### UI preservation
+
+- The current frontend was generated from the approved Figma Make prototype and is the visual/UX baseline for IdeaFlow.
+- Preserve the existing layout, navigation, typography, colors, component styling, and user flows unless a task explicitly requests a design change.
+- When replacing mock behavior with real backend/API behavior, prefer adapting data and state layers rather than redesigning the UI.
+- Do not perform large-scale frontend refactoring solely for stylistic or architectural preference.
