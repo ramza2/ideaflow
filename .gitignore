@@ -15,6 +15,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+*.egg-info/
 
 # IDE
 .vscode/
@@ -31,7 +32,3 @@ logs/
 # Temporary files
 *.tmp
 *.temp
-
-# Python packaging
-*.egg-info/
-dist/

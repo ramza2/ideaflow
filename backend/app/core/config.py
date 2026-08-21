@@ -1,16 +1,31 @@
 """Application settings via pydantic-settings."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/app/core/config.py -> repository root is three levels up
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_ENV_FILE = _REPO_ROOT / ".env"
+
+
+def repo_root() -> Path:
+    """Return the IdeaFlow repository root (absolute)."""
+    return _REPO_ROOT
+
+
+def env_file_path() -> Path:
+    """Return the repository-root `.env` path (absolute, cwd-independent)."""
+    return _ENV_FILE
 
 
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
