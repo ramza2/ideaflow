@@ -7,10 +7,13 @@
 ```text
 IdeaFlow/
 ├─ frontend/   # Figma Make 기반 Vite/React UI
-├─ backend/    # 추후 Backend API 구현
+├─ backend/    # FastAPI Backend (Step 1 foundation)
 └─ docs/       # 설계 및 프로젝트 문서
 ```
 
 ## 현재 상태
 
-프로젝트 초기 구조 생성 / Figma frontend 반영 예정
+- Frontend: Figma Make Prototype (Mock UI)
+- Backend: Step 1 foundation (`GET /api/v1/health`) — DB/Auth/LLM 미구현
+
+자세한 Backend 실행 방법은 `backend/README.md`를 참고하십시오.
