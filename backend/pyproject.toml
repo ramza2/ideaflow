@@ -1,7 +1,7 @@
 [project]
 name = "ideaflow-backend"
 version = "0.1.0"
-description = "IdeaFlow API — Step 1 foundation"
+description = "IdeaFlow API — Step 2 database core schema"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,9 @@ dependencies = [
   "uvicorn[standard]>=0.32.0",
   "pydantic>=2.0",
   "pydantic-settings>=2.0",
+  "SQLAlchemy>=2.0.36",
+  "alembic>=1.14.0",
+  "psycopg[binary]>=3.2.0",
 ]
 
 [project.optional-dependencies]

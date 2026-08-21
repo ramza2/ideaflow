@@ -4,10 +4,10 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently provides a Step 1 foundation (health/config/logging only). `docs/` is still a placeholder. Database, Auth, Workspace, Idea, and LLM features are not implemented yet.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1 foundation plus Step 2 PostgreSQL/SQLAlchemy/Alembic core schema. Auth, Workspace/Idea APIs, and LLM features are not implemented yet.
 
 - `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components).
-- `backend/` — FastAPI foundation (`GET /api/v1/health`). No DB/Auth/LLM yet.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic core schema (`GET /api/v1/health`). No Auth/API domain services yet.
 
 ### Frontend service
 
@@ -21,8 +21,16 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Python **3.11+**. Work from the `backend/` directory.
 - Install: `pip install -e ".[dev]"`
 - Dev server: `uvicorn app.main:app --reload` (default `http://127.0.0.1:8000`)
-- Tests: `pytest`
+- Tests: `pytest` (DB integration tests require `DATABASE_URL`)
 - Health: `GET /api/v1/health`
+- Migrations (PostgreSQL required):
+
+```text
+cd backend
+export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
+alembic upgrade head
+pytest
+```
 
 ### Non-obvious behavior
 
@@ -31,7 +39,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
   - Saving a new idea (`handleSave` in `src/pages/ideas/IdeaEditPage.tsx`) only shows a success toast (`아이디어가 등록되었습니다`) and navigates to a hardcoded idea (`/w/.../ideas/idea-001`). Nothing is persisted and the ideas count does not change. This is expected behavior, not a bug.
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (e.g. `/w/personal/home`, `/w/personal/ideas`).
 - The Vite config includes a custom `figma:asset/` import resolver and aliases `@` to `frontend/src`.
-- Root `.env.example` includes shared app/backend placeholders (DATABASE_URL, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet; the backend Step 1 app uses APP_* / LOG_LEVEL / CORS_ORIGINS / API_V1_PREFIX only.
+- Root `.env.example` includes shared app/backend placeholders (`DATABASE_URL` as `postgresql+psycopg://…`, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet. Backend Settings load the repository-root `.env` (cwd-independent); environment variables override file values.
 
 ### UI preservation
 
