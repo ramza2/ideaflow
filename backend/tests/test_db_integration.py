@@ -264,3 +264,25 @@ def test_idea_code_unique_and_relations(db: Session) -> None:
     with pytest.raises(IntegrityError):
         db.add(IdeaParticipant(idea_id=idea.id, user_id=owner.id))
         db.flush()
+
+
+def test_composite_pk_tables_have_no_redundant_unique(engine) -> None:
+    """idea_tags / idea_participants: PK only — no duplicate UNIQUE on same columns."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+
+    for table, pk_cols in (
+        ("idea_tags", {"idea_id", "tag_id"}),
+        ("idea_participants", {"idea_id", "user_id"}),
+    ):
+        unique_constraints = insp.get_unique_constraints(table)
+        redundant = [
+            uc
+            for uc in unique_constraints
+            if set(uc["column_names"]) == pk_cols
+        ]
+        assert redundant == [], f"{table} has redundant UNIQUE: {redundant}"
+
+        index_names = {ix["name"] for ix in insp.get_indexes(table)}
+        assert f"ix_{table}_idea_id" not in index_names

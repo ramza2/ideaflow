@@ -23,13 +23,13 @@ from app.models.mixins import UUIDPrimaryKeyMixin
 
 
 class IdeaTag(Base):
-    """Composite PK already enforces UNIQUE(idea_id, tag_id)."""
+    """Composite PK (idea_id, tag_id) enforces uniqueness and idea_id lookup.
+
+    Keep ix_idea_tags_tag_id for Tag → Idea reverse lookups only.
+    """
 
     __tablename__ = "idea_tags"
-    __table_args__ = (
-        Index("ix_idea_tags_idea_id", "idea_id"),
-        Index("ix_idea_tags_tag_id", "tag_id"),
-    )
+    __table_args__ = (Index("ix_idea_tags_tag_id", "tag_id"),)
 
     idea_id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True),
@@ -83,14 +83,12 @@ class IdeaShare(UUIDPrimaryKeyMixin, Base):
 class IdeaParticipant(Base):
     """Collaboration membership — not an ACL table.
 
-    Composite PK already enforces UNIQUE(idea_id, user_id).
+    Composite PK (idea_id, user_id) enforces uniqueness and idea_id lookup.
+    Keep ix_idea_participants_user_id for User → Idea reverse lookups only.
     """
 
     __tablename__ = "idea_participants"
-    __table_args__ = (
-        Index("ix_idea_participants_idea_id", "idea_id"),
-        Index("ix_idea_participants_user_id", "user_id"),
-    )
+    __table_args__ = (Index("ix_idea_participants_user_id", "user_id"),)
 
     idea_id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True),
