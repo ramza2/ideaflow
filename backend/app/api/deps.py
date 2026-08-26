@@ -36,8 +36,11 @@ def get_current_session(
     result = auth_service.get_session_by_raw_token(db, raw, settings=settings)
     if result is None:
         raise AppError("Authentication required.", code="AUTH_REQUIRED", status_code=401)
-    session, user = result
-    return AuthContext(user=user, session=session)
+    # Persist sliding expiration only when this request actually touched the session.
+    # Keep this commit scoped to auth so future domain transactions stay independent.
+    if result.touched:
+        db.commit()
+    return AuthContext(user=result.user, session=result.session)
 
 
 def get_current_user(ctx: Annotated[AuthContext, Depends(get_current_session)]) -> User:

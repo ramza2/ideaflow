@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -101,6 +102,37 @@ def _login(client: TestClient, email: str, password: str, csrf: str | None = Non
     )
 
 
+def _set_cookie_headers(response) -> list[str]:
+    headers = response.headers
+    if hasattr(headers, "get_list"):
+        values = headers.get_list("set-cookie")
+        if values:
+            return values
+    raw = headers.get("set-cookie")
+    return [raw] if raw else []
+
+
+def _cookie_header(headers: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for header in headers:
+        if header.startswith(prefix) or header.lower().startswith(prefix.lower()):
+            return header
+    return None
+
+
+def _has_flag(header: str, flag: str) -> bool:
+    return re.search(rf"(?:^|;\s*){re.escape(flag)}(?:;|$)", header, flags=re.IGNORECASE) is not None
+
+
+def _attr_value(header: str, attr: str) -> str | None:
+    match = re.search(
+        rf"(?:^|;\s*){re.escape(attr)}=([^;]+)",
+        header,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
 def test_csrf_endpoint(client: TestClient) -> None:
     token = _csrf(client)
     assert isinstance(token, str) and len(token) > 10
@@ -113,11 +145,26 @@ def test_login_success_sets_http_only_session(client: TestClient, db: Session) -
     body = r.json()
     assert body["user"]["email"] == user.email
     assert "token" not in body
-    assert "session" not in str(body.get("session", {})).lower() or "expires_at" in body["session"]
-
+    assert "raw" not in body
+    dumped = str(body)
     settings = get_settings()
     raw = client.cookies.get(settings.auth_session_cookie_name)
     assert raw
+    assert raw not in dumped
+
+    set_cookies = _set_cookie_headers(r)
+    session_header = _cookie_header(set_cookies, settings.auth_session_cookie_name)
+    csrf_header = _cookie_header(set_cookies, settings.auth_csrf_cookie_name)
+    assert session_header is not None
+    assert csrf_header is not None
+    assert _has_flag(session_header, "HttpOnly")
+    assert _attr_value(session_header, "SameSite") is not None
+    assert _attr_value(session_header, "SameSite").lower() == "lax"
+    assert _attr_value(session_header, "Path") == "/"
+    assert not _has_flag(csrf_header, "HttpOnly")
+    assert _attr_value(csrf_header, "SameSite").lower() == "lax"
+    assert _attr_value(csrf_header, "Path") == "/"
+
     # Cookie jar doesn't expose HttpOnly; verify DB stores hash only
     session = db.scalar(select(AuthSession).where(AuthSession.user_id == user.id))
     assert session is not None
@@ -173,6 +220,36 @@ def test_temporary_lock_and_reset(client: TestClient, db: Session, monkeypatch: 
     reset_engine()
 
 
+def test_expired_temporary_lock_resets_failure_count(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_LOGIN_MAX_FAILURES", "3")
+    monkeypatch.setenv("AUTH_LOGIN_LOCK_SECONDS", "900")
+    get_settings.cache_clear()
+    reset_engine()
+
+    user, _password = _create_user(db, email=f"exlock-{uuid.uuid4().hex[:8]}@example.com")
+    for _ in range(3):
+        assert _login(client, user.email, "bad-password-x").status_code == 401
+    db.refresh(user)
+    assert user.failed_login_count >= 3
+    assert user.locked_until is not None
+
+    user.locked_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    # Leave failed_login_count at threshold; expired lock must reset before counting.
+
+    r = _login(client, user.email, "still-wrong-password")
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "INVALID_CREDENTIALS"
+    db.refresh(user)
+    assert user.failed_login_count == 1
+    assert user.locked_until is None
+
+    get_settings.cache_clear()
+    reset_engine()
+
+
 def test_me_and_logout(client: TestClient, db: Session) -> None:
     user, password = _create_user(db)
     assert _login(client, user.email, password).status_code == 200
@@ -180,9 +257,28 @@ def test_me_and_logout(client: TestClient, db: Session) -> None:
     assert me.status_code == 200
     assert me.json()["email"] == user.email
 
-    csrf = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    settings = get_settings()
+    csrf = client.cookies.get(settings.auth_csrf_cookie_name)
     logout = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
     assert logout.status_code == 204
+
+    set_cookies = _set_cookie_headers(logout)
+    session_header = _cookie_header(set_cookies, settings.auth_session_cookie_name)
+    csrf_header = _cookie_header(set_cookies, settings.auth_csrf_cookie_name)
+    assert session_header is not None
+    assert csrf_header is not None
+    # delete_cookie should expire cookies (Max-Age=0 and/or past Expires)
+    session_max_age = _attr_value(session_header, "Max-Age")
+    csrf_max_age = _attr_value(csrf_header, "Max-Age")
+    assert session_max_age == "0" or (
+        _attr_value(session_header, "Expires") is not None and session_max_age in {None, "0"}
+    )
+    assert csrf_max_age == "0" or (
+        _attr_value(csrf_header, "Expires") is not None and csrf_max_age in {None, "0"}
+    )
+
+    assert settings.auth_session_cookie_name not in client.cookies
+    assert settings.auth_csrf_cookie_name not in client.cookies
     assert client.get("/api/v1/auth/me").status_code == 401
 
 
@@ -234,6 +330,47 @@ def test_password_change_revokes_other_sessions(client: TestClient, db: Session)
 
     db.refresh(user)
     assert user.must_change_password is False
+
+
+def test_sliding_expiration_persists(
+    client: TestClient, engine, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_SESSION_TOUCH_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("AUTH_SESSION_IDLE_SECONDS", "3600")
+    get_settings.cache_clear()
+    reset_engine()
+
+    user, password = _create_user(db)
+    assert _login(client, user.email, password).status_code == 200
+    settings = get_settings()
+    raw = client.cookies.get(settings.auth_session_cookie_name)
+    assert raw
+
+    session = db.scalar(select(AuthSession).where(AuthSession.token_hash == sha256_hex(raw)))
+    assert session is not None
+    session_id = session.id
+    absolute = session.absolute_expires_at
+
+    now = datetime.now(timezone.utc)
+    session.last_seen_at = now - timedelta(seconds=120)
+    session.expires_at = now + timedelta(seconds=1800)
+    db.commit()
+    before_last_seen = session.last_seen_at
+    before_expires = session.expires_at
+
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as fresh_db:
+        refreshed = fresh_db.get(AuthSession, session_id)
+        assert refreshed is not None
+        assert refreshed.last_seen_at > before_last_seen
+        assert refreshed.expires_at > before_expires
+        assert refreshed.expires_at <= refreshed.absolute_expires_at
+        assert refreshed.absolute_expires_at == absolute
+
+    get_settings.cache_clear()
+    reset_engine()
 
 
 def test_expired_and_revoked_session(client: TestClient, db: Session) -> None:

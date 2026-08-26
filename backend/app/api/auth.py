@@ -36,7 +36,7 @@ def get_csrf(
         token,
         httponly=False,
         secure=settings.auth_cookie_secure,
-        samesite=settings.auth_cookie_samesite.lower(),
+        samesite=settings.auth_cookie_samesite,
         path="/",
         max_age=settings.auth_session_absolute_seconds,
     )
@@ -101,7 +101,7 @@ def change_password(
     body: PasswordChangeRequest,
     db: Annotated[Session, Depends(get_db)],
     ctx: Annotated[AuthContext, Depends(require_csrf)],
-) -> Response:
+) -> None:
     try:
         auth_service.change_password(
             db,
@@ -117,7 +117,6 @@ def change_password(
     except Exception:
         db.rollback()
         raise
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -126,12 +125,12 @@ def logout(
     db: Annotated[Session, Depends(get_db)],
     ctx: Annotated[AuthContext, Depends(require_csrf)],
     settings: Annotated[Settings, Depends(get_current_settings)],
-) -> Response:
+) -> None:
     try:
         auth_service.revoke_session(ctx.session)
         db.commit()
     except Exception:
         db.rollback()
         raise
+    # Use the injected Response so delete_cookie Set-Cookie headers are kept.
     auth_service.clear_auth_cookies(response, settings=settings)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

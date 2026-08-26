@@ -2,8 +2,9 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/core/config.py -> repository root is three levels up
@@ -58,6 +59,16 @@ class Settings(BaseSettings):
     auth_login_lock_seconds: int = Field(default=900, alias="AUTH_LOGIN_LOCK_SECONDS")
     auth_cookie_secure: bool = Field(default=False, alias="AUTH_COOKIE_SECURE")
     auth_cookie_samesite: str = Field(default="lax", alias="AUTH_COOKIE_SAMESITE")
+
+    @field_validator("auth_cookie_samesite", mode="before")
+    @classmethod
+    def normalize_cookie_samesite(cls, value: Any) -> str:
+        if value is None:
+            return "lax"
+        normalized = str(value).strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            return "lax"
+        return normalized
 
     @property
     def cors_origin_list(self) -> list[str]:

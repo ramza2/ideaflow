@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -36,15 +37,21 @@ class SessionTokens:
     session: AuthSession
 
 
+@dataclass
+class SessionLookupResult:
+    session: AuthSession
+    user: User
+    touched: bool = False
+
+
 def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-def _cookie_samesite(settings: Settings) -> str:
-    value = settings.auth_cookie_samesite.lower()
-    if value not in {"lax", "strict", "none"}:
-        return "lax"
-    return value
+def _tokens_match(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    return secrets.compare_digest(left, right)
 
 
 def set_auth_cookies(
@@ -55,7 +62,7 @@ def set_auth_cookies(
     settings: Settings | None = None,
 ) -> None:
     settings = settings or get_settings()
-    samesite = _cookie_samesite(settings)
+    samesite = settings.auth_cookie_samesite
     response.set_cookie(
         settings.auth_session_cookie_name,
         session_token,
@@ -87,7 +94,7 @@ def issue_preauth_csrf() -> str:
 
 
 def validate_preauth_csrf(cookie_token: str | None, header_token: str | None) -> None:
-    if not cookie_token or not header_token or cookie_token != header_token:
+    if not _tokens_match(cookie_token, header_token):
         raise AppError("Invalid CSRF token.", code="CSRF_INVALID", status_code=403)
 
 
@@ -96,9 +103,9 @@ def validate_session_csrf(
     cookie_token: str | None,
     header_token: str | None,
 ) -> None:
-    if not cookie_token or not header_token or cookie_token != header_token:
+    if not _tokens_match(cookie_token, header_token):
         raise AppError("Invalid CSRF token.", code="CSRF_INVALID", status_code=403)
-    if sha256_hex(cookie_token) != session.csrf_token_hash:
+    if not secrets.compare_digest(sha256_hex(cookie_token), session.csrf_token_hash):
         raise AppError("Invalid CSRF token.", code="CSRF_INVALID", status_code=403)
 
 
@@ -179,7 +186,7 @@ def get_session_by_raw_token(
     settings: Settings | None = None,
     now: datetime | None = None,
     touch: bool = True,
-) -> tuple[AuthSession, User] | None:
+) -> SessionLookupResult | None:
     if not raw_token:
         return None
     settings = settings or get_settings()
@@ -191,6 +198,7 @@ def get_session_by_raw_token(
     user = db.get(User, session.user_id)
     if user is None or not _is_session_valid(session, user, now):
         return None
+    touched = False
     if touch:
         elapsed = (now - session.last_seen_at).total_seconds()
         if elapsed >= settings.auth_session_touch_interval_seconds:
@@ -199,7 +207,8 @@ def get_session_by_raw_token(
             candidate = now + idle
             session.expires_at = min(candidate, session.absolute_expires_at)
             db.flush()
-    return session, user
+            touched = True
+    return SessionLookupResult(session=session, user=user, touched=touched)
 
 
 def login(
@@ -224,6 +233,11 @@ def login(
     if user.locked_until is not None and user.locked_until > now:
         verify_password(password, DUMMY_PASSWORD_HASH)
         raise AppError("Invalid email or password.", code="INVALID_CREDENTIALS", status_code=401)
+
+    # Temporary lock expired — clear counters before password verification.
+    if user.locked_until is not None and user.locked_until <= now:
+        user.failed_login_count = 0
+        user.locked_until = None
 
     if user.deleted_at is not None or user.status != UserStatus.ACTIVE.value:
         verify_password(password, DUMMY_PASSWORD_HASH)
