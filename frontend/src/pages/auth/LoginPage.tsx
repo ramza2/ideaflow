@@ -16,7 +16,6 @@ export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [remember, setRemember] = useState(false);
   const [status, setStatus] = useState<LoginState>(
     searchParams.get("expired") === "1" ? "expired" : "idle",
   );
@@ -170,17 +169,16 @@ export function LoginPage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={remember}
-                    onChange={(e) => setRemember(e.target.checked)}
-                    className="w-4 h-4 rounded accent-[#4f46e5]"
-                  />
-                  <span className="text-sm text-[#6b6b80]">로그인 유지</span>
-                </label>
-                <button type="button" className="text-sm text-[#4f46e5] hover:underline">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-[#9ca3af] leading-snug">
+                  현재 세션 정책에 따라 로그인이 자동 유지됩니다.
+                </p>
+                <button
+                  type="button"
+                  disabled
+                  title="추후 제공 예정"
+                  className="text-sm text-[#9ca3af] cursor-not-allowed whitespace-nowrap"
+                >
                   비밀번호 찾기
                 </button>
               </div>
@@ -199,10 +197,9 @@ export function LoginPage() {
             </form>
 
             <div className="mt-6 text-center">
-              <span className="text-sm text-[#6b6b80]">계정이 없으신가요? </span>
-              <button className="text-sm text-[#4f46e5] font-medium hover:underline">
-                회원가입
-              </button>
+              <p className="text-sm text-[#6b6b80]">
+                계정이 필요하신 경우 관리자에게 문의하세요.
+              </p>
             </div>
           </div>
         </div>

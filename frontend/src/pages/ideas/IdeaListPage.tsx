@@ -56,15 +56,6 @@ interface Filters {
 const PAGE_SIZE = 50;
 const EMPTY_FILTERS: Filters = { stage_id: "", priority: "", category_id: "", author_id: "" };
 
-function useDebounce<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(t);
-  }, [value, delayMs]);
-  return debounced;
-}
-
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
     stage_id: params.get("stage_id") ?? "",
@@ -88,8 +79,10 @@ export function IdeaListPage() {
 
   const [tab, setTab] = useState<Tab>("all");
   const [view, setView] = useState<ViewMode>("list");
-  const [searchInput, setSearchInput] = useState(searchParams.get("q") ?? "");
-  const debouncedSearch = useDebounce(searchInput, 300);
+  // URL q is the persisted search Source of Truth for API requests.
+  const urlQuery = searchParams.get("q") ?? "";
+  // Local draft while the user types; debounced writes go back to URL q.
+  const [searchInput, setSearchInput] = useState(urlQuery);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
   const [activeFilters, setActiveFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
@@ -139,12 +132,36 @@ export function IdeaListPage() {
     [searchParams, setSearchParams],
   );
 
-  // Debounced search → reset to page 1 and sync URL
+  // External URL q changes (Global Search, Back/Forward) → sync input draft.
   useEffect(() => {
-    const currentQ = searchParams.get("q") ?? "";
-    if (debouncedSearch === currentQ) return;
-    syncSearchParams({ q: debouncedSearch, offset: 0 });
-  }, [debouncedSearch]); // eslint-disable-line react-hooks/exhaustive-deps
+    setSearchInput((prev) => (prev === urlQuery ? prev : urlQuery));
+  }, [urlQuery]);
+
+  // Debounced local input → URL q (resets offset).
+  // Depend only on searchInput so an external URL change cannot re-schedule a
+  // push of the previous draft. Compare against the live URL at fire time.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSearchParams((prev) => {
+        const currentQ = prev.get("q") ?? "";
+        if (searchInput === currentQ) return prev;
+
+        const params = new URLSearchParams();
+        if (searchInput) params.set("q", searchInput);
+        const stageId = prev.get("stage_id");
+        const priority = prev.get("priority");
+        const categoryId = prev.get("category_id");
+        const authorId = prev.get("author_id");
+        if (stageId) params.set("stage_id", stageId);
+        if (priority) params.set("priority", priority);
+        if (categoryId) params.set("category_id", categoryId);
+        if (authorId) params.set("author_id", authorId);
+        // Omit offset → reset to 0 when q changes from local input.
+        return params;
+      }, { replace: true });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput, setSearchParams]);
 
   // Keep local filter draft in sync when URL filters change (e.g. refresh)
   useEffect(() => {
@@ -169,7 +186,7 @@ export function IdeaListPage() {
       limit: PAGE_SIZE,
       offset,
     };
-    if (debouncedSearch) params.q = debouncedSearch;
+    if (urlQuery) params.q = urlQuery;
     if (activeFilters.stage_id) params.stage_id = activeFilters.stage_id;
     if (activeFilters.priority) params.priority = activeFilters.priority;
     if (activeFilters.category_id) params.category_id = activeFilters.category_id;
@@ -201,7 +218,7 @@ export function IdeaListPage() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, user, debouncedSearch, activeFilters, tab, offset]);
+  }, [workspaceId, user, urlQuery, activeFilters, tab, offset]);
 
   const activeFilterCount = Object.values(activeFilters).filter(Boolean).length;
   const pageStart = total === 0 ? 0 : offset + 1;
@@ -212,7 +229,7 @@ export function IdeaListPage() {
   function applyFilters(next: Filters, nextOffset = 0) {
     setFilters(next);
     setActiveFilters(next);
-    syncSearchParams({ filters: next, offset: nextOffset, q: debouncedSearch });
+    syncSearchParams({ filters: next, offset: nextOffset, q: urlQuery });
   }
 
   function removeFilterKey(key: keyof Filters) {
@@ -232,12 +249,12 @@ export function IdeaListPage() {
 
   function goPrev() {
     if (!canPrev) return;
-    syncSearchParams({ offset: Math.max(0, offset - PAGE_SIZE), q: debouncedSearch, filters: activeFilters });
+    syncSearchParams({ offset: Math.max(0, offset - PAGE_SIZE), q: urlQuery, filters: activeFilters });
   }
 
   function goNext() {
     if (!canNext) return;
-    syncSearchParams({ offset: offset + PAGE_SIZE, q: debouncedSearch, filters: activeFilters });
+    syncSearchParams({ offset: offset + PAGE_SIZE, q: urlQuery, filters: activeFilters });
   }
 
   function handleDisabledTab(id: string) {
@@ -295,7 +312,7 @@ export function IdeaListPage() {
                   return;
                 }
                 setTab(t.id as Tab);
-                syncSearchParams({ offset: 0, q: debouncedSearch, filters: activeFilters });
+                syncSearchParams({ offset: 0, q: urlQuery, filters: activeFilters });
               }}
               className={clsx(
                 "px-3 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
@@ -405,12 +422,12 @@ export function IdeaListPage() {
         ) : items.length === 0 ? (
           <EmptyState
             icon={<Sparkles className="w-6 h-6" />}
-            title={searchInput || activeFilterCount > 0 ? "검색/필터 결과가 없습니다" : "등록된 아이디어가 없습니다"}
-            description={searchInput || activeFilterCount > 0 ? "검색어나 필터 조건을 변경해 보세요." : "첫 번째 아이디어를 등록해 보세요."}
+            title={urlQuery || activeFilterCount > 0 ? "검색/필터 결과가 없습니다" : "등록된 아이디어가 없습니다"}
+            description={urlQuery || activeFilterCount > 0 ? "검색어나 필터 조건을 변경해 보세요." : "첫 번째 아이디어를 등록해 보세요."}
             action={
               activeFilterCount > 0 ? (
                 <Button variant="secondary" size="sm" onClick={handleClearFilters}>필터 초기화</Button>
-              ) : !searchInput ? (
+              ) : !urlQuery ? (
                 <Button variant="primary" size="sm" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate(`/w/${workspaceId}/ideas/new`)}>
                   새 아이디어
                 </Button>
