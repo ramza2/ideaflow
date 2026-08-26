@@ -1,38 +1,65 @@
 import { useState } from "react";
-import { useNavigate } from "react-router";
-import { clsx } from "clsx";
+import { useNavigate, useSearchParams } from "react-router";
 import { Eye, EyeOff, Sparkles, ArrowRight, Lightbulb } from "lucide-react";
 import { Button } from "../../components/common/Button";
 import { Input } from "../../components/common/Input";
+import { ApiError } from "../../api/client";
+import { useAuth } from "../../auth/AuthProvider";
+import { isSafeReturnPath } from "../../utils/routing";
 
-type LoginState = "idle" | "loading" | "error" | "inactive" | "expired";
+type LoginState = "idle" | "loading" | "error" | "expired";
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const [email, setEmail] = useState("changhyun@openlink.kr");
+  const [searchParams] = useSearchParams();
+  const { login } = useAuth();
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [remember, setRemember] = useState(false);
-  const [status, setStatus] = useState<LoginState>("idle");
+  const [status, setStatus] = useState<LoginState>(
+    searchParams.get("expired") === "1" ? "expired" : "idle",
+  );
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  function handleLogin(e: React.FormEvent) {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setStatus("loading");
-    setTimeout(() => {
-      if (password === "wrong") {
-        setStatus("error");
-      } else {
-        setStatus("idle");
-        navigate("/w/personal/home");
+    setErrorMessage(null);
+
+    try {
+      const user = await login(email.trim(), password);
+      const returnTo = searchParams.get("returnTo");
+
+      if (user.must_change_password) {
+        navigate("/change-password", { replace: true });
+        return;
       }
-    }, 1200);
+
+      if (returnTo && isSafeReturnPath(returnTo)) {
+        navigate(returnTo, { replace: true });
+        return;
+      }
+
+      navigate("/w/personal/home", { replace: true });
+    } catch (err) {
+      setStatus("error");
+      if (err instanceof ApiError) {
+        if (err.code === "INVALID_CREDENTIALS" || err.status === 401) {
+          setErrorMessage("이메일 또는 비밀번호를 확인해주세요.");
+        } else if (err.code === "CSRF_INVALID") {
+          setErrorMessage("보안 세션 오류가 발생했습니다. 페이지를 새로고침 후 다시 시도해 주세요.");
+        } else {
+          setErrorMessage(err.message);
+        }
+      } else {
+        setErrorMessage("로그인에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+      }
+    }
   }
 
   return (
     <div className="min-h-screen flex">
-      {/* Left brand panel */}
       <div className="hidden lg:flex w-1/2 bg-[#111118] text-white flex-col justify-between p-12 relative overflow-hidden">
-        {/* Decorative grid */}
         <div
           className="absolute inset-0 opacity-5"
           style={{
@@ -41,13 +68,12 @@ export function LoginPage() {
             backgroundSize: "40px 40px",
           }}
         />
-        {/* Floating cards illustration */}
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="relative w-80 h-80">
             {[
-              { top: "0%", left: "10%", rotate: "-6deg", delay: "0s", label: "AI로 빠르게 정리하기" },
-              { top: "25%", left: "35%", rotate: "3deg", delay: "0.2s", label: "구조화 완료 ✓" },
-              { top: "50%", left: "5%", rotate: "-3deg", delay: "0.4s", label: "웹 검색으로 보완" },
+              { top: "0%", left: "10%", rotate: "-6deg", label: "AI로 빠르게 정리하기" },
+              { top: "25%", left: "35%", rotate: "3deg", label: "구조화 완료 ✓" },
+              { top: "50%", left: "5%", rotate: "-3deg", label: "웹 검색으로 보완" },
             ].map((card, i) => (
               <div
                 key={i}
@@ -56,7 +82,6 @@ export function LoginPage() {
                   top: card.top,
                   left: card.left,
                   transform: `rotate(${card.rotate})`,
-                  animationDelay: card.delay,
                 }}
               >
                 {card.label}
@@ -68,7 +93,6 @@ export function LoginPage() {
           </div>
         </div>
 
-        {/* Logo */}
         <div className="relative flex items-center gap-2.5 z-10">
           <div className="w-8 h-8 rounded-lg bg-[#4f46e5] flex items-center justify-center">
             <Lightbulb className="w-4.5 h-4.5 text-white" />
@@ -76,7 +100,6 @@ export function LoginPage() {
           <span className="text-lg font-bold">IdeaFlow</span>
         </div>
 
-        {/* Tagline */}
         <div className="relative z-10">
           <p className="text-3xl font-bold leading-snug mb-3">
             생각나는 대로 적으세요.
@@ -91,10 +114,8 @@ export function LoginPage() {
         </div>
       </div>
 
-      {/* Right login panel */}
       <div className="flex-1 flex items-center justify-center p-8 bg-[#f8f8f9]">
         <div className="w-full max-w-sm">
-          {/* Mobile logo */}
           <div className="flex items-center gap-2 mb-8 lg:hidden">
             <div className="w-7 h-7 rounded-lg bg-[#4f46e5] flex items-center justify-center">
               <Lightbulb className="w-4 h-4 text-white" />
@@ -106,12 +127,12 @@ export function LoginPage() {
             <h1 className="text-xl font-bold text-[#111118] mb-1.5">IdeaFlow에 로그인</h1>
             <p className="text-sm text-[#6b6b80] mb-6">계정에 로그인하여 아이디어를 관리하세요</p>
 
-            {status === "error" && (
+            {(status === "error" || errorMessage) && (
               <div className="mb-4 p-3 rounded-lg bg-[#fef2f2] border border-[#fecaca] text-sm text-[#b91c1c]">
-                이메일 또는 비밀번호가 올바르지 않습니다.
+                {errorMessage ?? "이메일 또는 비밀번호가 올바르지 않습니다."}
               </div>
             )}
-            {status === "expired" && (
+            {status === "expired" && !errorMessage && (
               <div className="mb-4 p-3 rounded-lg bg-[#fffbeb] border border-[#fde68a] text-sm text-[#b45309]">
                 세션이 만료되었습니다. 다시 로그인해 주세요.
               </div>
@@ -125,6 +146,7 @@ export function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="이메일 주소"
                 required
+                autoComplete="email"
               />
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium text-[#111118]">비밀번호</label>
@@ -134,6 +156,7 @@ export function LoginPage() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="비밀번호"
+                    autoComplete="current-password"
                     className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 pr-10 text-sm text-[#111118] placeholder:text-[#9ca3af] focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20 focus:border-[#4f46e5] transition-colors"
                   />
                   <button
@@ -146,17 +169,16 @@ export function LoginPage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={remember}
-                    onChange={(e) => setRemember(e.target.checked)}
-                    className="w-4 h-4 rounded accent-[#4f46e5]"
-                  />
-                  <span className="text-sm text-[#6b6b80]">로그인 유지</span>
-                </label>
-                <button type="button" className="text-sm text-[#4f46e5] hover:underline">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-[#9ca3af] leading-snug">
+                  현재 세션 정책에 따라 로그인이 자동 유지됩니다.
+                </p>
+                <button
+                  type="button"
+                  disabled
+                  title="추후 제공 예정"
+                  className="text-sm text-[#9ca3af] cursor-not-allowed whitespace-nowrap"
+                >
                   비밀번호 찾기
                 </button>
               </div>
@@ -166,6 +188,7 @@ export function LoginPage() {
                 variant="primary"
                 size="lg"
                 loading={status === "loading"}
+                disabled={status === "loading"}
                 className="w-full"
                 icon={<ArrowRight className="w-4 h-4" />}
               >
@@ -174,16 +197,11 @@ export function LoginPage() {
             </form>
 
             <div className="mt-6 text-center">
-              <span className="text-sm text-[#6b6b80]">계정이 없으신가요? </span>
-              <button className="text-sm text-[#4f46e5] font-medium hover:underline">
-                회원가입
-              </button>
+              <p className="text-sm text-[#6b6b80]">
+                계정이 필요하신 경우 관리자에게 문의하세요.
+              </p>
             </div>
           </div>
-
-          <p className="text-center text-xs text-[#9ca3af] mt-6">
-            테스트: 아무 비밀번호로 로그인하세요 (wrong 입력 시 오류 표시)
-          </p>
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, FormEvent } from "react";
 import { useNavigate } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -11,16 +11,20 @@ import {
   ChevronDown,
   Check,
   Menu,
-  X,
   LogOut,
   User,
   Shield,
 } from "lucide-react";
-import { MOCK_WORKSPACES, getWorkspaceById } from "../../mocks/workspaces";
-import { CURRENT_USER } from "../../mocks/users";
 import { MOCK_NOTIFICATIONS } from "../../mocks/notifications";
 import { Avatar } from "../common/Avatar";
 import { Button } from "../common/Button";
+import { toast } from "../common/Toast";
+import { useAuth } from "../../auth/AuthProvider";
+import { useWorkspace } from "../../workspace/WorkspaceProvider";
+import { createTeamWorkspace } from "../../api/workspaces";
+import { apiErrorMessage } from "../../api/client";
+import { toDisplayUser } from "../../utils/avatar";
+import { workspaceIcon } from "../../utils/mappers";
 
 interface TopHeaderProps {
   workspaceId: string;
@@ -30,12 +34,19 @@ interface TopHeaderProps {
 
 export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }: TopHeaderProps) {
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
+  const { workspaces, refreshWorkspaces } = useWorkspace();
   const [wsOpen, setWsOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createWsOpen, setCreateWsOpen] = useState(false);
+  const [newWsName, setNewWsName] = useState("");
+  const [creatingWs, setCreatingWs] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState("");
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  const ws = getWorkspaceById(workspaceId);
+  const ws = workspaces.find((w) => w.id === workspaceId);
+  const displayUser = user ? toDisplayUser({ id: user.id, name: user.name, email: user.email }) : null;
   const unreadCount = MOCK_NOTIFICATIONS.filter((n) => !n.read).length;
 
   const wsRef = useRef<HTMLDivElement>(null);
@@ -54,6 +65,42 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  async function handleLogout() {
+    setProfileOpen(false);
+    try {
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "로그아웃에 실패했습니다."));
+    }
+  }
+
+  function handleGlobalSearch(e: FormEvent) {
+    e.preventDefault();
+    const q = globalSearch.trim();
+    if (!workspaceId) return;
+    navigate(q ? `/w/${workspaceId}/ideas?q=${encodeURIComponent(q)}` : `/w/${workspaceId}/ideas`);
+  }
+
+  async function handleCreateWorkspace() {
+    const name = newWsName.trim();
+    if (!name) return;
+    setCreatingWs(true);
+    try {
+      const created = await createTeamWorkspace({ name });
+      await refreshWorkspaces();
+      setCreateWsOpen(false);
+      setNewWsName("");
+      setWsOpen(false);
+      toast.success("작업공간이 생성되었습니다.");
+      onWorkspaceChange(created.id);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "작업공간 생성에 실패했습니다."));
+    } finally {
+      setCreatingWs(false);
+    }
+  }
+
   return (
     <header className="h-16 bg-white border-b border-[rgba(0,0,0,0.07)] flex items-center px-4 gap-3 shrink-0 z-20 relative">
       {/* Mobile menu */}
@@ -70,11 +117,11 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
           onClick={() => setWsOpen(!wsOpen)}
           className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-[#f4f4f8] transition-colors"
         >
-          <span className="text-base">{ws?.icon}</span>
+          <span className="text-base">{ws ? workspaceIcon(ws.type) : "🏠"}</span>
           <div className="text-left hidden sm:block">
-            <p className="text-sm font-semibold text-[#111118] leading-tight">{ws?.name}</p>
+            <p className="text-sm font-semibold text-[#111118] leading-tight">{ws?.name ?? "작업공간"}</p>
             <p className="text-xs text-[#6b6b80] leading-tight">
-              {ws?.type === "personal" ? "개인" : "팀"}
+              {ws?.type === "PERSONAL" ? "개인" : "팀"}
             </p>
           </div>
           <ChevronDown className="w-3.5 h-3.5 text-[#6b6b80]" />
@@ -83,51 +130,59 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
         {wsOpen && (
           <div className="absolute top-full left-0 mt-1 w-56 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1 z-50">
             <p className="text-xs font-medium text-[#6b6b80] px-3 py-1.5 uppercase tracking-wider">개인 작업공간</p>
-            {MOCK_WORKSPACES.filter((w) => w.type === "personal").map((w) => (
+            {workspaces.filter((w) => w.type === "PERSONAL").map((w) => (
               <button
                 key={w.id}
                 onClick={() => { onWorkspaceChange(w.id); setWsOpen(false); }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#f4f4f8] text-sm"
               >
-                <span>{w.icon}</span>
+                <span>{workspaceIcon(w.type)}</span>
                 <span className="flex-1 text-left">{w.name}</span>
                 {w.id === workspaceId && <Check className="w-3.5 h-3.5 text-[#4f46e5]" />}
               </button>
             ))}
             <p className="text-xs font-medium text-[#6b6b80] px-3 py-1.5 mt-1 uppercase tracking-wider">팀 작업공간</p>
-            {MOCK_WORKSPACES.filter((w) => w.type === "team").map((w) => (
+            {workspaces.filter((w) => w.type === "TEAM").map((w) => (
               <button
                 key={w.id}
                 onClick={() => { onWorkspaceChange(w.id); setWsOpen(false); }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#f4f4f8] text-sm"
               >
-                <span>{w.icon}</span>
+                <span>{workspaceIcon(w.type)}</span>
                 <span className="flex-1 text-left">{w.name}</span>
                 {w.id === workspaceId && <Check className="w-3.5 h-3.5 text-[#4f46e5]" />}
               </button>
             ))}
             <div className="border-t border-[rgba(0,0,0,0.06)] mt-1 pt-1">
-              <button className="w-full text-left px-3 py-2 text-sm text-[#6b6b80] hover:bg-[#f4f4f8]">+ 새 작업공간 만들기</button>
-              <button className="w-full text-left px-3 py-2 text-sm text-[#6b6b80] hover:bg-[#f4f4f8]">작업공간 관리</button>
+              <button
+                type="button"
+                onClick={() => { setCreateWsOpen(true); setWsOpen(false); }}
+                className="w-full text-left px-3 py-2 text-sm text-[#6b6b80] hover:bg-[#f4f4f8]"
+              >
+                + 새 작업공간 만들기
+              </button>
             </div>
           </div>
         )}
       </div>
 
       {/* Search */}
-      <div className="flex-1 max-w-lg mx-auto hidden md:block">
+      <form onSubmit={handleGlobalSearch} className="flex-1 max-w-lg mx-auto hidden md:block">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#9ca3af]" />
           <input
             type="text"
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
             placeholder="아이디어를 검색하거나 자연어로 질문하세요"
-            className="w-full h-9 pl-9 pr-12 rounded-lg bg-[#f4f4f8] border border-transparent text-sm text-[#111118] placeholder:text-[#9ca3af] focus:outline-none focus:bg-white focus:border-[rgba(0,0,0,0.1)] focus:ring-2 focus:ring-[#4f46e5]/10 transition-all"
+            disabled={!workspaceId}
+            className="w-full h-9 pl-9 pr-12 rounded-lg bg-[#f4f4f8] border border-transparent text-sm text-[#111118] placeholder:text-[#9ca3af] focus:outline-none focus:bg-white focus:border-[rgba(0,0,0,0.1)] focus:ring-2 focus:ring-[#4f46e5]/10 transition-all disabled:opacity-50"
           />
           <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center">
             <kbd className="text-[10px] font-mono text-[#9ca3af] bg-white border border-[rgba(0,0,0,0.1)] px-1.5 py-0.5 rounded">/</kbd>
           </div>
         </div>
-      </div>
+      </form>
 
       <div className="flex items-center gap-1.5 ml-auto">
         {/* Create button */}
@@ -214,16 +269,18 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
         {/* Profile */}
         <div ref={profileRef} className="relative">
           <button
+            type="button"
+            aria-label="프로필 메뉴"
             onClick={() => setProfileOpen(!profileOpen)}
             className="rounded-full hover:ring-2 hover:ring-[#4f46e5]/20 transition-all"
           >
-            <Avatar user={CURRENT_USER} size="sm" />
+            {displayUser && <Avatar user={displayUser} size="sm" />}
           </button>
           {profileOpen && (
             <div className="absolute top-full right-0 mt-1 w-52 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1 z-50">
               <div className="px-3 py-2.5 border-b border-[rgba(0,0,0,0.06)]">
-                <p className="text-sm font-semibold text-[#111118]">{CURRENT_USER.name}</p>
-                <p className="text-xs text-[#6b6b80]">{CURRENT_USER.email}</p>
+                <p className="text-sm font-semibold text-[#111118]">{displayUser?.name ?? user?.name ?? ""}</p>
+                <p className="text-xs text-[#6b6b80]">{displayUser?.email ?? user?.email ?? ""}</p>
               </div>
               <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]">
                 <User className="w-4 h-4 text-[#6b6b80]" /> 프로필
@@ -236,7 +293,9 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
               </button>
               <div className="border-t border-[rgba(0,0,0,0.06)] mt-1 pt-1">
                 <button
-                  onClick={() => navigate("/login")}
+                  type="button"
+                  aria-label="로그아웃"
+                  onClick={() => void handleLogout()}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#dc2626] hover:bg-[#fef2f2]"
                 >
                   <LogOut className="w-4 h-4" /> 로그아웃
@@ -246,6 +305,33 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
           )}
         </div>
       </div>
+
+      {createWsOpen && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.08)] shadow-xl w-full max-w-md p-6">
+            <h3 className="text-base font-bold text-[#111118] mb-4">새 팀 작업공간</h3>
+            <input
+              type="text"
+              value={newWsName}
+              onChange={(e) => setNewWsName(e.target.value)}
+              placeholder="작업공간 이름"
+              className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] px-3 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+            />
+            <div className="flex gap-2">
+              <Button variant="ghost" className="flex-1" onClick={() => setCreateWsOpen(false)}>취소</Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                loading={creatingWs}
+                disabled={creatingWs || !newWsName.trim()}
+                onClick={() => void handleCreateWorkspace()}
+              >
+                만들기
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
