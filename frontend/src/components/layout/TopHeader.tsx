@@ -269,16 +269,18 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
         {/* Profile */}
         <div ref={profileRef} className="relative">
           <button
+            type="button"
+            aria-label="프로필 메뉴"
             onClick={() => setProfileOpen(!profileOpen)}
             className="rounded-full hover:ring-2 hover:ring-[#4f46e5]/20 transition-all"
           >
             {displayUser && <Avatar user={displayUser} size="sm" />}
           </button>
-          {profileOpen && displayUser && (
+          {profileOpen && (
             <div className="absolute top-full right-0 mt-1 w-52 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1 z-50">
               <div className="px-3 py-2.5 border-b border-[rgba(0,0,0,0.06)]">
-                <p className="text-sm font-semibold text-[#111118]">{displayUser.name}</p>
-                <p className="text-xs text-[#6b6b80]">{displayUser.email}</p>
+                <p className="text-sm font-semibold text-[#111118]">{displayUser?.name ?? user?.name ?? ""}</p>
+                <p className="text-xs text-[#6b6b80]">{displayUser?.email ?? user?.email ?? ""}</p>
               </div>
               <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]">
                 <User className="w-4 h-4 text-[#6b6b80]" /> 프로필
@@ -292,6 +294,7 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
               <div className="border-t border-[rgba(0,0,0,0.06)] mt-1 pt-1">
                 <button
                   type="button"
+                  aria-label="로그아웃"
                   onClick={() => void handleLogout()}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#dc2626] hover:bg-[#fef2f2]"
                 >

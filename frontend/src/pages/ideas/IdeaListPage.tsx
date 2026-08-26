@@ -93,7 +93,9 @@ export function IdeaListPage() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
   const [activeFilters, setActiveFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
-  const [offset, setOffset] = useState(() => offsetFromSearchParams(searchParams));
+
+  // URL is source of truth for pagination offset
+  const offset = offsetFromSearchParams(searchParams);
 
   const [items, setItems] = useState<IdeaListItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -123,9 +125,9 @@ export function IdeaListPage() {
   const syncSearchParams = useCallback(
     (next: { q?: string; filters?: Filters; offset?: number }) => {
       const params = new URLSearchParams();
-      const q = next.q ?? debouncedSearch;
-      const f = next.filters ?? activeFilters;
-      const nextOffset = next.offset ?? offset;
+      const q = next.q !== undefined ? next.q : (searchParams.get("q") ?? "");
+      const f = next.filters ?? filtersFromSearchParams(searchParams);
+      const nextOffset = next.offset !== undefined ? next.offset : offsetFromSearchParams(searchParams);
       if (q) params.set("q", q);
       if (f.stage_id) params.set("stage_id", f.stage_id);
       if (f.priority) params.set("priority", f.priority);
@@ -134,19 +136,27 @@ export function IdeaListPage() {
       if (nextOffset > 0) params.set("offset", String(nextOffset));
       setSearchParams(params, { replace: true });
     },
-    [activeFilters, debouncedSearch, offset, setSearchParams],
+    [searchParams, setSearchParams],
   );
 
   // Debounced search → reset to page 1 and sync URL
   useEffect(() => {
-    setOffset(0);
+    const currentQ = searchParams.get("q") ?? "";
+    if (debouncedSearch === currentQ) return;
     syncSearchParams({ q: debouncedSearch, offset: 0 });
   }, [debouncedSearch]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reset page when workspace changes
+  // Keep local filter draft in sync when URL filters change (e.g. refresh)
   useEffect(() => {
-    setOffset(0);
-  }, [workspaceId]);
+    const fromUrl = filtersFromSearchParams(searchParams);
+    setActiveFilters(fromUrl);
+    setFilters(fromUrl);
+  }, [
+    searchParams.get("stage_id"),
+    searchParams.get("priority"),
+    searchParams.get("category_id"),
+    searchParams.get("author_id"),
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!workspaceId || !user) return;
@@ -202,8 +212,7 @@ export function IdeaListPage() {
   function applyFilters(next: Filters, nextOffset = 0) {
     setFilters(next);
     setActiveFilters(next);
-    setOffset(nextOffset);
-    syncSearchParams({ filters: next, offset: nextOffset });
+    syncSearchParams({ filters: next, offset: nextOffset, q: debouncedSearch });
   }
 
   function removeFilterKey(key: keyof Filters) {
@@ -223,16 +232,12 @@ export function IdeaListPage() {
 
   function goPrev() {
     if (!canPrev) return;
-    const nextOffset = Math.max(0, offset - PAGE_SIZE);
-    setOffset(nextOffset);
-    syncSearchParams({ offset: nextOffset });
+    syncSearchParams({ offset: Math.max(0, offset - PAGE_SIZE), q: debouncedSearch, filters: activeFilters });
   }
 
   function goNext() {
     if (!canNext) return;
-    const nextOffset = offset + PAGE_SIZE;
-    setOffset(nextOffset);
-    syncSearchParams({ offset: nextOffset });
+    syncSearchParams({ offset: offset + PAGE_SIZE, q: debouncedSearch, filters: activeFilters });
   }
 
   function handleDisabledTab(id: string) {
@@ -290,8 +295,7 @@ export function IdeaListPage() {
                   return;
                 }
                 setTab(t.id as Tab);
-                setOffset(0);
-                syncSearchParams({ offset: 0 });
+                syncSearchParams({ offset: 0, q: debouncedSearch, filters: activeFilters });
               }}
               className={clsx(
                 "px-3 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
