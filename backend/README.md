@@ -1,18 +1,19 @@
 # IdeaFlow Backend
 
-## Current scope (Step 4)
+## Current scope (Step 5)
 
 - FastAPI application + health API (Step 1)
 - PostgreSQL connection (SQLAlchemy 2.x sync + psycopg 3)
 - Alembic migrations + core ORM entities (Step 2)
 - Server-side session authentication (Step 3)
 - Workspace provisioning + WorkspaceMember RBAC (Step 4)
-  - Personal workspace ensure / Team workspace create
-  - Member add / role / deactivate / reactivate
-  - Default Stage (10) + Category (8) per workspace
-  - Stage / Category read APIs
+- Idea CRUD + ACL + ILIKE/FTS search (Step 5)
+  - PRIVATE / WORKSPACE / SELECTED_USERS
+  - IdeaShare READ/EDIT
+  - Workspace-scoped `IF-NNN` idea codes (advisory lock)
+  - Tags, filters, pagination
 
-Idea CRUD, Frontend auth/workspace wiring, and LLM features are **not** implemented yet.
+Frontend API wiring and LLM features are **not** implemented yet.
 
 ## Requirements
 
@@ -51,9 +52,6 @@ Health check: `http://127.0.0.1:8000/api/v1/health`
 
 ## Bootstrap SYSTEM_ADMIN
 
-Self-signup is off. Create the first admin interactively (password via `getpass`, not argv).
-Creates User + Personal Workspace + owner ADMIN membership + default stages/categories:
-
 ```bash
 cd backend
 export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
@@ -61,7 +59,7 @@ alembic upgrade head
 python -m app.cli.create_admin
 ```
 
-Backfill Personal workspaces for existing users (no login side effects):
+Backfill Personal workspaces:
 
 ```bash
 python -m app.cli.ensure_personal_workspaces
@@ -77,55 +75,36 @@ alembic current
 alembic check
 ```
 
-Step 4 does not add a new Alembic revision (Step 2 schema is sufficient).
+Step 5 does not add a new Alembic revision.
 
 ## Tests
 
 ```bash
 cd backend
-pytest
-```
-
-PostgreSQL integration tests (auth + workspace) run when `DATABASE_URL` is set:
-
-```bash
 export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
 pytest
 ```
 
-## Endpoints
+## Idea Endpoints
 
-### Health / Auth
+Prefix: `/api/v1/workspaces/{workspace_id}/ideas`
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/health` | Liveness / service metadata |
-| GET | `/api/v1/auth/csrf` | Issue pre-auth CSRF cookie + token |
-| POST | `/api/v1/auth/login` | Login (CSRF required); sets session cookie |
-| GET | `/api/v1/auth/me` | Current user from session cookie |
-| PATCH | `/api/v1/auth/password` | Change password (CSRF); revokes other sessions |
-| POST | `/api/v1/auth/logout` | Logout (CSRF); revokes session |
+Requires ACTIVE WorkspaceMember + `must_change_password=false`. Mutations require CSRF.
 
-### Workspaces (requires auth + password changed)
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/ideas` | List/search (`q`, filters, `limit`/`offset`); ACL in SQL |
+| POST | `/ideas` | Create (author = current user); default PRIVATE / memo stage |
+| GET | `/ideas/{idea_id}` | Detail; unauthorized → `404 IDEA_NOT_FOUND` |
+| PATCH | `/ideas/{idea_id}` | Author or EDIT share (visibility owner-only) |
+| DELETE | `/ideas/{idea_id}` | Soft delete; author only |
+| GET | `/ideas/{idea_id}/shares` | Author only |
+| PUT | `/ideas/{idea_id}/shares` | Full replace; author only |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/workspaces` | List ACTIVE memberships (PERSONAL first) |
-| POST | `/api/v1/workspaces` | Create TEAM workspace (CSRF; ADMIN owner) |
-| GET | `/api/v1/workspaces/{id}` | Detail (ACTIVE member; else 404) |
-| PATCH | `/api/v1/workspaces/{id}` | Update name/flags (ADMIN + CSRF) |
-| GET | `/api/v1/workspaces/{id}/members` | Members (ADMIN sees all statuses) |
-| POST | `/api/v1/workspaces/{id}/members` | Add/reactivate existing user (ADMIN + CSRF) |
-| PATCH | `/api/v1/workspaces/{id}/members/{user_id}` | Change role (ADMIN + CSRF) |
-| DELETE | `/api/v1/workspaces/{id}/members/{user_id}` | Deactivate member (ADMIN + CSRF) |
-| GET | `/api/v1/workspaces/{id}/stages` | Default stages (read) |
-| GET | `/api/v1/workspaces/{id}/categories` | Default categories (read) |
+### ACL (summary)
 
-Session token is never returned in JSON. Cookie: `ideaflow_session` (HttpOnly). CSRF: `ideaflow_csrf` + `X-CSRF-Token`.
+- **PRIVATE**: author only (no Workspace ADMIN / SYSTEM_ADMIN bypass)
+- **WORKSPACE**: ACTIVE members read; author only edit/delete
+- **SELECTED_USERS**: author + IdeaShare READ/EDIT read; EDIT may edit content; author only delete/shares/visibility
 
-### RBAC notes
-
-- Access is based on `WorkspaceMember` only — `SYSTEM_ADMIN` does **not** bypass membership.
-- PERSONAL workspace membership mutations are blocked (`PERSONAL_WORKSPACE_MEMBERSHIP_IMMUTABLE`).
-- Workspace owner role/membership cannot be demoted or removed.
-- `must_change_password=true` blocks all Workspace APIs (`403 PASSWORD_CHANGE_REQUIRED`).
+Leaving SELECTED_USERS clears IdeaShare rows (no stale ACL on re-entry).
