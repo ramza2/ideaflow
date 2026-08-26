@@ -19,11 +19,12 @@ export async function login(
     body: { email, password },
     csrf: true,
     csrfToken: csrf.csrf_token,
+    handleUnauthorized: false,
   });
 }
 
 export async function fetchMe(): Promise<UserPublic> {
-  return apiRequest<UserPublic>("/auth/me");
+  return apiRequest<UserPublic>("/auth/me", { handleUnauthorized: false });
 }
 
 export async function logout(): Promise<void> {

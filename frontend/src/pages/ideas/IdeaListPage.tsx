@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -9,12 +9,12 @@ import {
   LayoutList,
   Download,
   Plus,
-  Star,
   StarOff,
   MoreHorizontal,
   Sparkles,
   X,
-  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { listIdeas } from "../../api/ideas";
 import { listCategories, listMembers, listStages } from "../../api/workspaces";
@@ -26,18 +26,17 @@ import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
 import { toDisplayUser } from "../../utils/avatar";
-import type { CategoryPublic, IdeaListItem, StagePublic } from "../../types/api";
-import type { IdeaFeasibility, IdeaPriority } from "../../types/api";
+import type { CategoryPublic, IdeaListItem, IdeaPriority, StagePublic } from "../../types/api";
 
-type Tab = "all" | "mine" | "participating" | "assigned" | "favorite";
+type Tab = "all" | "mine" | "assigned";
 type ViewMode = "list" | "card";
 
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Tab | "participating" | "favorite"; label: string; disabled?: boolean }[] = [
   { id: "all", label: "전체" },
   { id: "mine", label: "내가 작성" },
-  { id: "participating", label: "참여 중" },
+  { id: "participating", label: "참여 중", disabled: true },
   { id: "assigned", label: "담당" },
-  { id: "favorite", label: "즐겨찾기" },
+  { id: "favorite", label: "즐겨찾기", disabled: true },
 ];
 
 const PRIORITY_OPTIONS: { value: IdeaPriority | ""; label: string }[] = [
@@ -55,6 +54,7 @@ interface Filters {
 }
 
 const PAGE_SIZE = 50;
+const EMPTY_FILTERS: Filters = { stage_id: "", priority: "", category_id: "", author_id: "" };
 
 function useDebounce<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -63,6 +63,21 @@ function useDebounce<T>(value: T, delayMs: number): T {
     return () => clearTimeout(t);
   }, [value, delayMs]);
   return debounced;
+}
+
+function filtersFromSearchParams(params: URLSearchParams): Filters {
+  return {
+    stage_id: params.get("stage_id") ?? "",
+    priority: (params.get("priority") as IdeaPriority | "") || "",
+    category_id: params.get("category_id") ?? "",
+    author_id: params.get("author_id") ?? "",
+  };
+}
+
+function offsetFromSearchParams(params: URLSearchParams): number {
+  const raw = Number(params.get("offset") ?? "0");
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return Math.floor(raw / PAGE_SIZE) * PAGE_SIZE;
 }
 
 export function IdeaListPage() {
@@ -76,15 +91,9 @@ export function IdeaListPage() {
   const [searchInput, setSearchInput] = useState(searchParams.get("q") ?? "");
   const debouncedSearch = useDebounce(searchInput, 300);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [filters, setFilters] = useState<Filters>({
-    stage_id: searchParams.get("stage_id") ?? "",
-    priority: (searchParams.get("priority") as IdeaPriority | "") ?? "",
-    category_id: searchParams.get("category_id") ?? "",
-    author_id: searchParams.get("author_id") ?? "",
-  });
-  const [activeFilters, setActiveFilters] = useState<Filters>({ ...filters });
-  const [favorites, setFavorites] = useState<Set<string>>(new Set());
-  const [sortOpen, setSortOpen] = useState(false);
+  const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
+  const [activeFilters, setActiveFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
+  const [offset, setOffset] = useState(() => offsetFromSearchParams(searchParams));
 
   const [items, setItems] = useState<IdeaListItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -112,23 +121,32 @@ export function IdeaListPage() {
   }, [workspaceId]);
 
   const syncSearchParams = useCallback(
-    (next: { q?: string; filters?: Filters }) => {
+    (next: { q?: string; filters?: Filters; offset?: number }) => {
       const params = new URLSearchParams();
       const q = next.q ?? debouncedSearch;
       const f = next.filters ?? activeFilters;
+      const nextOffset = next.offset ?? offset;
       if (q) params.set("q", q);
       if (f.stage_id) params.set("stage_id", f.stage_id);
       if (f.priority) params.set("priority", f.priority);
       if (f.category_id) params.set("category_id", f.category_id);
       if (f.author_id) params.set("author_id", f.author_id);
+      if (nextOffset > 0) params.set("offset", String(nextOffset));
       setSearchParams(params, { replace: true });
     },
-    [activeFilters, debouncedSearch, setSearchParams],
+    [activeFilters, debouncedSearch, offset, setSearchParams],
   );
 
+  // Debounced search → reset to page 1 and sync URL
   useEffect(() => {
-    syncSearchParams({ q: debouncedSearch });
+    setOffset(0);
+    syncSearchParams({ q: debouncedSearch, offset: 0 });
   }, [debouncedSearch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset page when workspace changes
+  useEffect(() => {
+    setOffset(0);
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !user) return;
@@ -139,7 +157,7 @@ export function IdeaListPage() {
 
     const params: Parameters<typeof listIdeas>[1] = {
       limit: PAGE_SIZE,
-      offset: 0,
+      offset,
     };
     if (debouncedSearch) params.q = debouncedSearch;
     if (activeFilters.stage_id) params.stage_id = activeFilters.stage_id;
@@ -173,54 +191,58 @@ export function IdeaListPage() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, user, debouncedSearch, activeFilters, tab]);
-
-  const displayed = useMemo(() => {
-    let result = [...items];
-    if (tab === "participating" && user) {
-      result = result.filter(
-        (i) =>
-          i.author.id === user.id ||
-          i.assignee?.id === user.id ||
-          i.current_user_access !== "READ",
-      );
-    }
-    if (tab === "favorite") {
-      result = result.filter((i) => favorites.has(i.id));
-    }
-    return result;
-  }, [items, tab, user, favorites]);
+  }, [workspaceId, user, debouncedSearch, activeFilters, tab, offset]);
 
   const activeFilterCount = Object.values(activeFilters).filter(Boolean).length;
+  const pageStart = total === 0 ? 0 : offset + 1;
+  const pageEnd = Math.min(offset + PAGE_SIZE, total);
+  const canPrev = offset > 0;
+  const canNext = offset + PAGE_SIZE < total;
 
-  function toggleFavorite(id: string, e: React.MouseEvent) {
-    e.stopPropagation();
-    const isAdding = !favorites.has(id);
-    setFavorites((prev) => {
-      const next = new Set(prev);
-      isAdding ? next.add(id) : next.delete(id);
-      return next;
-    });
-    toast.info(isAdding ? "즐겨찾기에 추가되었습니다" : "즐겨찾기에서 제거되었습니다");
+  function applyFilters(next: Filters, nextOffset = 0) {
+    setFilters(next);
+    setActiveFilters(next);
+    setOffset(nextOffset);
+    syncSearchParams({ filters: next, offset: nextOffset });
+  }
+
+  function removeFilterKey(key: keyof Filters) {
+    applyFilters({ ...activeFilters, [key]: "" });
   }
 
   function handleApplyFilters() {
-    setActiveFilters({ ...filters });
-    syncSearchParams({ filters });
+    applyFilters({ ...filters });
     setFilterOpen(false);
     toast.info("필터가 적용되었습니다");
   }
 
   function handleClearFilters() {
-    const empty: Filters = { stage_id: "", priority: "", category_id: "", author_id: "" };
-    setFilters(empty);
-    setActiveFilters(empty);
-    syncSearchParams({ filters: empty });
+    applyFilters({ ...EMPTY_FILTERS });
     toast.info("필터가 초기화되었습니다");
   }
 
-  function handleExport() {
-    toast.info("Excel 파일 준비 중...", "잠시 후 다운로드가 시작됩니다.");
+  function goPrev() {
+    if (!canPrev) return;
+    const nextOffset = Math.max(0, offset - PAGE_SIZE);
+    setOffset(nextOffset);
+    syncSearchParams({ offset: nextOffset });
+  }
+
+  function goNext() {
+    if (!canNext) return;
+    const nextOffset = offset + PAGE_SIZE;
+    setOffset(nextOffset);
+    syncSearchParams({ offset: nextOffset });
+  }
+
+  function handleDisabledTab(id: string) {
+    if (id === "participating") {
+      toast.info("참여자 기능은 추후 제공됩니다");
+      return;
+    }
+    if (id === "favorite") {
+      toast.info("즐겨찾기 기능은 추후 제공됩니다");
+    }
   }
 
   const stageLabel = (id: string) => stages.find((s) => s.id === id)?.label ?? id;
@@ -235,7 +257,14 @@ export function IdeaListPage() {
             <p className="text-sm text-[#6b6b80]">총 {total}건</p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={handleExport} className="hidden sm:inline-flex">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Download className="w-3.5 h-3.5" />}
+              disabled
+              title="추후 제공 예정"
+              className="hidden sm:inline-flex"
+            >
               내보내기
             </Button>
             <Button
@@ -253,13 +282,25 @@ export function IdeaListPage() {
           {TABS.map((t) => (
             <button
               key={t.id}
-              onClick={() => setTab(t.id)}
+              type="button"
+              disabled={t.disabled}
+              onClick={() => {
+                if (t.disabled) {
+                  handleDisabledTab(t.id);
+                  return;
+                }
+                setTab(t.id as Tab);
+                setOffset(0);
+                syncSearchParams({ offset: 0 });
+              }}
               className={clsx(
                 "px-3 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
-                tab === t.id
+                t.disabled && "opacity-50 cursor-not-allowed",
+                !t.disabled && tab === t.id
                   ? "border-[#4f46e5] text-[#4f46e5]"
                   : "border-transparent text-[#6b6b80] hover:text-[#111118]",
               )}
+              title={t.disabled ? "추후 제공 예정" : undefined}
             >
               {t.label}
             </button>
@@ -294,11 +335,12 @@ export function IdeaListPage() {
           )}
         </Button>
 
-        <div className="relative">
-          <Button variant="ghost" size="sm" icon={<SlidersHorizontal className="w-3.5 h-3.5" />} onClick={() => setSortOpen(!sortOpen)}>
-            최종 수정일
-            <ChevronDown className="w-3 h-3 ml-0.5" />
-          </Button>
+        <div
+          className="inline-flex items-center gap-1.5 px-2.5 h-8 text-sm text-[#6b6b80]"
+          title="정렬은 최종 수정일 기준입니다"
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">최종 수정일</span>
         </div>
 
         {activeFilterCount > 0 && (
@@ -306,19 +348,25 @@ export function IdeaListPage() {
             {activeFilters.stage_id && (
               <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-[#ede9fe] text-xs text-[#4f46e5]">
                 단계: {stageLabel(activeFilters.stage_id)}
-                <button type="button" onClick={() => setActiveFilters((p) => ({ ...p, stage_id: "" }))}><X className="w-3 h-3" /></button>
+                <button type="button" onClick={() => removeFilterKey("stage_id")}><X className="w-3 h-3" /></button>
               </span>
             )}
             {activeFilters.priority && (
               <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-[#ede9fe] text-xs text-[#4f46e5]">
                 우선순위: {PRIORITY_OPTIONS.find((o) => o.value === activeFilters.priority)?.label}
-                <button type="button" onClick={() => setActiveFilters((p) => ({ ...p, priority: "" }))}><X className="w-3 h-3" /></button>
+                <button type="button" onClick={() => removeFilterKey("priority")}><X className="w-3 h-3" /></button>
               </span>
             )}
             {activeFilters.category_id && (
               <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-[#ede9fe] text-xs text-[#4f46e5]">
                 분야: {categoryName(activeFilters.category_id)}
-                <button type="button" onClick={() => setActiveFilters((p) => ({ ...p, category_id: "" }))}><X className="w-3 h-3" /></button>
+                <button type="button" onClick={() => removeFilterKey("category_id")}><X className="w-3 h-3" /></button>
+              </span>
+            )}
+            {activeFilters.author_id && (
+              <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-[#ede9fe] text-xs text-[#4f46e5]">
+                작성자: {memberOptions.find((m) => m.id === activeFilters.author_id)?.name ?? "선택됨"}
+                <button type="button" onClick={() => removeFilterKey("author_id")}><X className="w-3 h-3" /></button>
               </span>
             )}
             <button type="button" onClick={handleClearFilters} className="text-xs text-[#6b6b80] hover:text-[#dc2626] underline">전체 초기화</button>
@@ -350,7 +398,7 @@ export function IdeaListPage() {
           <div className="py-16 text-center text-sm text-[#6b6b80]">불러오는 중...</div>
         ) : error ? (
           <EmptyState title="아이디어를 불러올 수 없습니다" description={error} />
-        ) : displayed.length === 0 ? (
+        ) : items.length === 0 ? (
           <EmptyState
             icon={<Sparkles className="w-6 h-6" />}
             title={searchInput || activeFilterCount > 0 ? "검색/필터 결과가 없습니다" : "등록된 아이디어가 없습니다"}
@@ -373,7 +421,7 @@ export function IdeaListPage() {
                   <span key={i} className="text-xs font-medium text-[#6b6b80]">{h}</span>
                 ))}
               </div>
-              {displayed.map((idea) => {
+              {items.map((idea) => {
                 const author = toDisplayUser(idea.author);
                 const assignee = idea.assignee ? toDisplayUser(idea.assignee) : null;
                 return (
@@ -385,8 +433,16 @@ export function IdeaListPage() {
                     <span className="text-xs font-mono text-[#9ca3af]">{idea.idea_code}</span>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <button type="button" onClick={(e) => toggleFavorite(idea.id, e)} className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                          {favorites.has(idea.id) ? <Star className="w-3 h-3 text-[#d97706] fill-[#d97706]" /> : <StarOff className="w-3 h-3 text-[#9ca3af]" />}
+                        <button
+                          type="button"
+                          title="즐겨찾기 기능은 추후 제공됩니다"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toast.info("즐겨찾기 기능은 추후 제공됩니다");
+                          }}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-[#9ca3af]"
+                        >
+                          <StarOff className="w-3 h-3" />
                         </button>
                         <p className="text-sm font-medium text-[#111118] truncate">{idea.title}</p>
                       </div>
@@ -408,7 +464,7 @@ export function IdeaListPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {displayed.map((idea) => {
+            {items.map((idea) => {
               const author = toDisplayUser(idea.author);
               return (
                 <div
@@ -431,6 +487,21 @@ export function IdeaListPage() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {!loading && !error && total > 0 && (
+          <div className="flex items-center justify-center gap-3 mt-6 pb-2">
+            <Button variant="secondary" size="sm" icon={<ChevronLeft className="w-3.5 h-3.5" />} disabled={!canPrev} onClick={goPrev}>
+              이전
+            </Button>
+            <span className="text-sm text-[#6b6b80]">
+              {pageStart}–{pageEnd} / {total}
+            </span>
+            <Button variant="secondary" size="sm" disabled={!canNext} onClick={goNext}>
+              다음
+              <ChevronRight className="w-3.5 h-3.5 ml-1" />
+            </Button>
           </div>
         )}
       </div>

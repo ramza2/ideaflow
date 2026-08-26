@@ -58,8 +58,6 @@ export function IdeaDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [aiDrawer, setAiDrawer] = useState(false);
-  const [comment, setComment] = useState("");
-  const [isFav, setIsFav] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -96,12 +94,6 @@ export function IdeaDetailPage() {
   function handleShare() {
     navigator.clipboard?.writeText(window.location.href).catch(() => {});
     toast.success("링크가 복사되었습니다");
-  }
-
-  function handleCommentSubmit() {
-    if (!comment.trim()) return;
-    setComment("");
-    toast.success("댓글이 게시되었습니다");
   }
 
   async function handleDelete() {
@@ -197,8 +189,12 @@ export function IdeaDetailPage() {
               </div>
             </div>
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-              <Button variant="icon" onClick={() => setIsFav(!isFav)} title="즐겨찾기">
-                <Star className={clsx("w-4 h-4", isFav && "fill-[#d97706] text-[#d97706]")} />
+              <Button
+                variant="icon"
+                title="즐겨찾기 기능은 추후 제공됩니다"
+                onClick={() => toast.info("즐겨찾기 기능은 추후 제공됩니다")}
+              >
+                <Star className="w-4 h-4" />
               </Button>
               <Button variant="icon" title="공유" onClick={handleShare} className="hidden sm:flex"><Share2 className="w-4 h-4" /></Button>
               {canEdit && (
@@ -302,13 +298,13 @@ export function IdeaDetailPage() {
                 <Avatar user={author} size="sm" />
                 <div className="flex-1">
                   <textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    placeholder="댓글을 작성하세요..."
-                    className="w-full h-20 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20 focus:border-[#4f46e5]"
+                    value=""
+                    disabled
+                    placeholder="댓글 기능은 추후 제공됩니다"
+                    className="w-full h-20 rounded-lg border border-[rgba(0,0,0,0.1)] bg-[#f4f4f8] px-3 py-2 text-sm resize-none text-[#9ca3af] cursor-not-allowed"
                   />
                   <div className="flex justify-end mt-2">
-                    <Button variant="primary" size="sm" icon={<Send className="w-3.5 h-3.5" />} disabled={!comment.trim()} onClick={handleCommentSubmit}>
+                    <Button variant="primary" size="sm" icon={<Send className="w-3.5 h-3.5" />} disabled>
                       게시
                     </Button>
                   </div>

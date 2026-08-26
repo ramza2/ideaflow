@@ -35,6 +35,12 @@ export interface ApiRequestOptions {
   /** Use pre-auth CSRF token from response body instead of cookie */
   csrfToken?: string;
   headers?: Record<string, string>;
+  /**
+   * When true (default), 401 responses invoke the global unauthorized handler
+   * (session-expired → login). Set false for expected unauthenticated responses
+   * such as POST /auth/login and GET /auth/me bootstrap.
+   */
+  handleUnauthorized?: boolean;
 }
 
 type UnauthorizedHandler = () => void;
@@ -90,7 +96,14 @@ export async function apiRequest<T>(
   path: string,
   options: ApiRequestOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, csrf = false, csrfToken, headers = {} } = options;
+  const {
+    method = "GET",
+    body,
+    csrf = false,
+    csrfToken,
+    headers = {},
+    handleUnauthorized = true,
+  } = options;
 
   const requestHeaders: Record<string, string> = {
     Accept: "application/json",
@@ -118,7 +131,7 @@ export async function apiRequest<T>(
     body: payload,
   });
 
-  if (response.status === 401) {
+  if (response.status === 401 && handleUnauthorized) {
     unauthorizedHandler?.();
   }
 

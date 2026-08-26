@@ -80,10 +80,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     try {
       await authApi.logout();
-    } catch {
-      // Session may already be invalid; still clear local state.
+      clearAuth();
+    } catch (err) {
+      // Unexpected 401 is handled by the global unauthorized handler.
+      // Network / 500 / CSRF_INVALID must not look like a successful logout.
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuth();
+        return;
+      }
+      throw err instanceof Error
+        ? err
+        : new Error("로그아웃에 실패했습니다.");
     }
-    clearAuth();
   }, [clearAuth]);
 
   const value = useMemo(

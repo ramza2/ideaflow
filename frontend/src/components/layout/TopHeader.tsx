@@ -67,8 +67,12 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
 
   async function handleLogout() {
     setProfileOpen(false);
-    await logout();
-    navigate("/login", { replace: true });
+    try {
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "로그아웃에 실패했습니다."));
+    }
   }
 
   function handleGlobalSearch(e: FormEvent) {
