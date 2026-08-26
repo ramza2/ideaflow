@@ -11,7 +11,6 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
-import { MOCK_IDEAS } from "../../mocks/ideas";
 
 interface SidebarProps {
   workspaceId: string;
@@ -19,9 +18,7 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
-const reviewCount = MOCK_IDEAS.filter(
-  (i) => i.stage === "reviewing"
-).length;
+const reviewCount = 0;
 
 export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
   const base = `/w/${workspaceId}`;
@@ -33,7 +30,7 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
       label: "검토함",
       icon: ClipboardCheck,
       to: `${base}/reviews`,
-      badge: reviewCount,
+      badge: reviewCount > 0 ? reviewCount : undefined,
     },
     { label: "작업공간", icon: Building2, to: `${base}/settings/members` },
     { label: "설정", icon: Settings, to: `${base}/settings` },

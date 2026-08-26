@@ -7,13 +7,43 @@
 ```text
 IdeaFlow/
 ├─ frontend/   # Figma Make 기반 Vite/React UI
-├─ backend/    # FastAPI Backend (Step 5: Idea CRUD/ACL)
+├─ backend/    # FastAPI Backend
 └─ docs/       # 설계 및 프로젝트 문서
 ```
 
 ## 현재 상태
 
-- Frontend: Figma Make Prototype (Mock UI; API 연동은 Step 6)
-- Backend: Step 5 — Idea CRUD + ACL + search (LLM/Frontend 연동 미구현)
+- Frontend: Figma Make UI + **Backend API 연동 (Step 6)** — Login, Workspace, Members, Manual Idea CRUD/Search
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search (LLM/AI workflow 미구현)
+
+## 개발 실행
+
+PostgreSQL과 Backend를 먼저 실행한 뒤 Frontend dev server를 띄웁니다.
+
+```bash
+# Backend (터미널 1)
+cd backend
+export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn app.main:app --reload
+
+# Frontend (터미널 2)
+cd frontend
+npm install
+npm run dev
+```
+
+브라우저: `http://localhost:5173`
+
+Frontend는 `/api/v1/...`를 호출하며, Vite dev server가 `/api`를 `http://127.0.0.1:8000`으로 프록시합니다. Auth는 HttpOnly session cookie + JS-readable CSRF cookie(`ideaflow_csrf`) + `X-CSRF-Token` 헤더를 사용합니다.
+
+Frontend 검증:
+
+```bash
+cd frontend
+npm run typecheck
+npm run build
+```
 
 자세한 Backend 실행 방법은 `backend/README.md`를 참고하십시오.

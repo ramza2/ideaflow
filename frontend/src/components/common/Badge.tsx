@@ -1,5 +1,19 @@
 import { clsx } from "clsx";
 import type { IdeaStage, Priority, Feasibility, Visibility, SourceBadgeType, MemberStatus, MemberRole } from "../../types";
+import type {
+  IdeaFeasibility,
+  IdeaPriority,
+  IdeaVisibility,
+  WorkspaceMemberStatus,
+  WorkspaceRole,
+} from "../../types/api";
+import {
+  FEASIBILITY_LABELS,
+  MEMBER_STATUS_LABELS,
+  PRIORITY_LABELS,
+  VISIBILITY_LABELS,
+  WORKSPACE_ROLE_LABELS,
+} from "../../utils/mappers";
 
 interface BadgeProps {
   children: React.ReactNode;
@@ -108,4 +122,72 @@ const memberRoleConfig: Record<MemberRole, { label: string }> = {
 
 export function MemberRoleBadge({ role }: { role: MemberRole }) {
   return <span className="text-sm text-[#6b6b80]">{memberRoleConfig[role].label}</span>;
+}
+
+/** Backend API stage — uses label from API response. */
+export function StageLabelBadge({ label }: { label: string }) {
+  return <Badge className="bg-[#f0f0f5] text-[#6b6b80]">{label}</Badge>;
+}
+
+const apiPriorityConfig: Record<IdeaPriority, { className: string; dot: string }> = {
+  HIGH: { className: "bg-[#fef2f2] text-[#dc2626]", dot: "bg-[#dc2626]" },
+  MEDIUM: { className: "bg-[#fffbeb] text-[#d97706]", dot: "bg-[#d97706]" },
+  LOW: { className: "bg-[#f0f0f5] text-[#6b6b80]", dot: "bg-[#9ca3af]" },
+};
+
+export function ApiPriorityBadge({ priority }: { priority: IdeaPriority }) {
+  const cfg = apiPriorityConfig[priority];
+  return (
+    <Badge className={cfg.className}>
+      <span className={clsx("w-1.5 h-1.5 rounded-full", cfg.dot)} />
+      {PRIORITY_LABELS[priority]}
+    </Badge>
+  );
+}
+
+const apiFeasibilityConfig: Record<IdeaFeasibility, string> = {
+  HIGH: "bg-[#f0fdf4] text-[#16a34a]",
+  MEDIUM: "bg-[#fffbeb] text-[#d97706]",
+  LOW: "bg-[#fef2f2] text-[#dc2626]",
+  UNKNOWN: "bg-[#f0f0f5] text-[#6b6b80]",
+};
+
+export function ApiFeasibilityBadge({ feasibility }: { feasibility: IdeaFeasibility }) {
+  return (
+    <Badge className={apiFeasibilityConfig[feasibility]}>
+      {FEASIBILITY_LABELS[feasibility]}
+    </Badge>
+  );
+}
+
+const apiVisibilityConfig: Record<IdeaVisibility, string> = {
+  PRIVATE: "bg-[#f0f0f5] text-[#6b6b80]",
+  WORKSPACE: "bg-[#ede9fe] text-[#7c3aed]",
+  SELECTED_USERS: "bg-[#dbeafe] text-[#2563eb]",
+};
+
+export function ApiVisibilityBadge({ visibility }: { visibility: IdeaVisibility }) {
+  return (
+    <Badge className={apiVisibilityConfig[visibility]}>
+      {VISIBILITY_LABELS[visibility]}
+    </Badge>
+  );
+}
+
+const apiMemberStatusConfig: Record<WorkspaceMemberStatus, string> = {
+  ACTIVE: "bg-[#f0fdf4] text-[#16a34a]",
+  PENDING: "bg-[#fffbeb] text-[#d97706]",
+  INACTIVE: "bg-[#f0f0f5] text-[#6b6b80]",
+};
+
+export function ApiMemberStatusBadge({ status }: { status: WorkspaceMemberStatus }) {
+  return (
+    <Badge className={apiMemberStatusConfig[status]}>
+      {MEMBER_STATUS_LABELS[status]}
+    </Badge>
+  );
+}
+
+export function ApiMemberRoleBadge({ role }: { role: WorkspaceRole }) {
+  return <span className="text-sm text-[#6b6b80]">{WORKSPACE_ROLE_LABELS[role]}</span>;
 }

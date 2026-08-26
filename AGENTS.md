@@ -4,17 +4,18 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1–5: foundation, core schema, authentication, Workspace RBAC, and Idea CRUD/ACL/search. Frontend API wiring and LLM features are not implemented yet.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API (Step 6). The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search.
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components).
-- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`). Frontend wiring is Step 6.
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, and Manual Idea CRUD use real APIs; AI/Review pages remain mock.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`).
 
 ### Frontend service
 
 - Package manager is **npm** (there is a `frontend/package-lock.json`). Although a `pnpm-workspace.yaml` and a `pnpm` overrides block also exist in `frontend/`, the committed lockfile is npm's, so use `npm` to stay consistent. All commands must be run from the `frontend/` directory.
-- Dev server: `npm run dev` (Vite, serves on `http://localhost:5173`).
+- Dev server: `npm run dev` (Vite, serves on `http://localhost:5173`; proxies `/api` → Backend).
+- Typecheck: `npm run typecheck` (`tsc --noEmit`).
 - Production build: `npm run build` (outputs to `frontend/dist/`).
-- There are **no lint or test scripts** defined in `package.json` (only `dev` and `build`), and there is no ESLint/TypeScript config file — Vite/esbuild transpiles `.tsx` without type-checking. Do not expect `npm run lint` or `npm test` to exist.
+- There is **no lint or test script** in `package.json`. Do not expect `npm run lint` or `npm test` to exist.
 
 ### Backend service
 
@@ -37,13 +38,11 @@ pytest
 
 ### Non-obvious behavior
 
-- **The frontend is still a mock-only prototype with no backend persistence wired.** Data comes from static fixtures in `frontend/src/mocks/`. Actions like login and saving an idea are simulated:
-  - The login page (`/login`) accepts **any password except the literal string `wrong`** (which triggers an error state) and then navigates to `/w/personal/home`.
-  - Saving a new idea (`handleSave` in `src/pages/ideas/IdeaEditPage.tsx`) only shows a success toast (`아이디어가 등록되었습니다`) and navigates to a hardcoded idea (`/w/.../ideas/idea-001`). Nothing is persisted and the ideas count does not change. This is expected behavior, not a bug.
-- Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (e.g. `/w/personal/home`, `/w/personal/ideas`).
-- The Vite config includes a custom `figma:asset/` import resolver and aliases `@` to `frontend/src`.
-- Root `.env.example` includes shared app/backend placeholders (`DATABASE_URL` as `postgresql+psycopg://…`, `AUTH_*`, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet. Backend Settings load the repository-root `.env` (cwd-independent); environment variables override file values.
-- Backend auth, Workspace RBAC, and Idea APIs are complete; the frontend remains mock-only until Step 6.
+- **Auth / Workspace / Manual Idea flows use the real Backend** (HttpOnly session + CSRF cookie). Dev: Browser calls `http://localhost:5173/api/v1/...` via Vite proxy. Legacy route `/w/personal/*` redirects to the user's PERSONAL workspace UUID.
+- **AI Input / Analyzing / Review, Reviews inbox, notifications, and help content remain mock/prototype** until later steps.
+- Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (workspaceId is a Backend UUID; `/w/personal/*` is legacy-compatible).
+- The Vite config includes a custom `figma:asset/` import resolver, `@` alias, and `/api` dev proxy.
+- Root `.env.example` includes `VITE_API_BASE_URL`, `VITE_AUTH_CSRF_COOKIE_NAME`, `VITE_DEV_API_PROXY_TARGET`, plus backend placeholders. Backend Settings load the repository-root `.env` (cwd-independent).
 
 ### UI preservation
 
