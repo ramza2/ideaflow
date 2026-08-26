@@ -519,6 +519,93 @@ def test_skip_locked_claim(db: Session, session_factory: sessionmaker, client: T
     assert claimed[0] == db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one().id
 
 
+def test_stale_worker_result_discarded_after_reclaim(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """Worker A loses lease; Worker B reclaims; A's late persistence must not overwrite."""
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    r = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions",
+        json={"input_text": "lease fencing"},
+        headers=_headers(client),
+    )
+    session_id = uuid.UUID(r.json()["id"])
+    settings = get_settings()
+
+    db_a = session_factory()
+    job_a = ai_worker.claim_next_job(db_a, worker_id="worker-A", settings=settings)
+    assert job_a is not None
+    job_id = job_a.id
+    db_a.close()
+
+    # Expire lease while A is "still calling the LLM"
+    job = db.get(AiJob, job_id)
+    job.lease_until = datetime.now(timezone.utc) - timedelta(seconds=5)
+    db.commit()
+
+    recovered = ai_worker.recover_stale_jobs(session_factory())
+    assert recovered == 1
+
+    db_b = session_factory()
+    job_b = ai_worker.claim_next_job(db_b, worker_id="worker-B", settings=settings)
+    assert job_b is not None
+    assert job_b.id == job_id
+    assert job_b.worker_id == "worker-B"
+    db_b.close()
+
+    # Late persistence from A with a distinct draft title must be ignored.
+    class DelayedProvider:
+        provider_name = "fake-a"
+        model_name = "a-model"
+        prompt_version = "v1"
+
+        def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
+            return _ready_result("FromWorkerA")
+
+    db_persist = session_factory()
+    try:
+        ai_worker.process_claimed_job(
+            db_persist,
+            job_id=job_id,
+            worker_id="worker-A",
+            provider=DelayedProvider(),
+            settings=settings,
+        )
+    finally:
+        db_persist.close()
+
+    db.expire_all()
+    job = db.get(AiJob, job_id)
+    assert job.worker_id == "worker-B"
+    assert job.status == AiJobStatus.RUNNING.value
+    session = db.get(IdeaAiSession, session_id)
+    assert session.status == IdeaAiSessionStatus.PROCESSING.value
+    assert session.draft_payload is None
+
+    # B can still succeed with its own result.
+    db_b2 = session_factory()
+    try:
+        ai_worker.process_claimed_job(
+            db_b2,
+            job_id=job_id,
+            worker_id="worker-B",
+            provider=FakeProvider([_ready_result("FromWorkerB")]),
+            settings=settings,
+        )
+    finally:
+        db_b2.close()
+    db.expire_all()
+    job = db.get(AiJob, job_id)
+    assert job.status == AiJobStatus.SUCCEEDED.value
+    session = db.get(IdeaAiSession, session_id)
+    assert session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
+    assert session.draft_payload["title"] == "FromWorkerB"
+
+
 def test_confirm_and_idempotency(
     client: TestClient,
     db: Session,

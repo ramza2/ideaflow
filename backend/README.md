@@ -43,7 +43,15 @@ LLM_API_URL=https://alzi-llm.openlink.kr
 LLM_CHAT_COMPLETIONS_PATH=/v1/chat/completions
 LLM_MODEL_NAME=Qwen3-14B
 LLM_API_KEY=
+LLM_ENABLE_THINKING=false
 ```
+
+`LLM_ENABLE_THINKING` is optional/tri-state for OpenAI-compatible servers that honor
+`chat_template_kwargs.enable_thinking` (e.g. Qwen/vLLM):
+
+- empty / unset → omit `chat_template_kwargs`
+- `false` → send `{"enable_thinking": false}` (IdeaFlow default for strict JSON structuring)
+- `true` → send `{"enable_thinking": true}`
 
 Environment variables override `.env` values. See root `.env.example` for Auth, LLM, and AI Worker knobs.
 

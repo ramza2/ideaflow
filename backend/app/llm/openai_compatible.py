@@ -71,6 +71,11 @@ class OpenAICompatibleLlmProvider:
             "temperature": self._settings.llm_temperature,
             "max_tokens": self._settings.llm_max_tokens,
         }
+        # Tri-state: unset → omit; true/false → chat_template_kwargs.enable_thinking
+        if self._settings.llm_enable_thinking is not None:
+            body["chat_template_kwargs"] = {
+                "enable_thinking": bool(self._settings.llm_enable_thinking),
+            }
 
         try:
             response = self._client.post(url, headers=headers, json=body)

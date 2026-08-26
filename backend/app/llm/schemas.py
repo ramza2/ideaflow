@@ -91,6 +91,16 @@ class IdeaStructuringResult(BaseModel):
     research_recommended: bool = False
     research_topics: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_ready_questions(cls, value: Any) -> Any:
+        # Models sometimes still emit questions with READY; keep decision and drop them.
+        if isinstance(value, dict) and value.get("decision") == AiLlmDecision.READY_FOR_REVIEW.value:
+            data = dict(value)
+            data["clarifying_questions"] = []
+            return data
+        return value
+
     @field_validator("research_topics", mode="before")
     @classmethod
     def coerce_topics(cls, value: Any) -> list[str]:
@@ -109,7 +119,6 @@ class IdeaStructuringResult(BaseModel):
             if not self.clarifying_questions:
                 raise ValueError("NEEDS_CLARIFICATION requires at least one question")
         if self.decision == AiLlmDecision.READY_FOR_REVIEW:
-            # Questions may be empty; if present, ignore is not allowed — reject extras.
             if self.clarifying_questions:
                 raise ValueError("READY_FOR_REVIEW must not include clarifying_questions")
         return self

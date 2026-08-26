@@ -35,6 +35,7 @@ def make_settings(**overrides) -> Settings:
         llm_connect_timeout_seconds=5.0,
         llm_temperature=0.2,
         llm_max_tokens=1000,
+        llm_enable_thinking=False,
         ai_worker_enabled=False,
         ai_job_lease_seconds=60,
         ai_job_max_attempts=3,
@@ -208,3 +209,48 @@ def test_url_join_no_double_slash() -> None:
         llm_chat_completions_path="/v1/chat/completions",
     )
     assert settings.llm_chat_completions_url == "https://llm.example.test/v1/chat/completions"
+
+
+def test_enable_thinking_false_sends_chat_template_kwargs() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode())
+        return _ok_handler(request)
+
+    provider = OpenAICompatibleLlmProvider(
+        make_settings(llm_enable_thinking=False),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.structure_idea(IdeaStructuringRequest(input_text="x"))
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_enable_thinking_unset_omits_field() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode())
+        return _ok_handler(request)
+
+    provider = OpenAICompatibleLlmProvider(
+        make_settings(llm_enable_thinking=None),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.structure_idea(IdeaStructuringRequest(input_text="x"))
+    assert "chat_template_kwargs" not in captured["json"]
+
+
+def test_enable_thinking_true_sends_true() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode())
+        return _ok_handler(request)
+
+    provider = OpenAICompatibleLlmProvider(
+        make_settings(llm_enable_thinking=True),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.structure_idea(IdeaStructuringRequest(input_text="x"))
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": True}

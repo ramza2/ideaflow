@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     llm_connect_timeout_seconds: float = Field(default=10.0, alias="LLM_CONNECT_TIMEOUT_SECONDS")
     llm_temperature: float = Field(default=0.2, alias="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(default=2500, alias="LLM_MAX_TOKENS")
+    # Optional OpenAI-compatible chat_template_kwargs.enable_thinking (Qwen/vLLM).
+    # None/unset → omit field; False/True → send explicit boolean.
+    # IdeaFlow default False disables thinking for strict JSON structuring.
+    llm_enable_thinking: bool | None = Field(default=False, alias="LLM_ENABLE_THINKING")
 
     # AI worker / job queue
     ai_worker_enabled: bool = Field(default=True, alias="AI_WORKER_ENABLED")
@@ -78,6 +82,22 @@ class Settings(BaseSettings):
     ai_job_lease_seconds: int = Field(default=300, alias="AI_JOB_LEASE_SECONDS")
     ai_job_max_attempts: int = Field(default=3, alias="AI_JOB_MAX_ATTEMPTS")
     ai_job_retry_base_seconds: float = Field(default=2.0, alias="AI_JOB_RETRY_BASE_SECONDS")
+
+    @field_validator("llm_enable_thinking", mode="before")
+    @classmethod
+    def parse_enable_thinking(cls, value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text == "":
+            return None
+        if text in {"true", "1", "yes", "on"}:
+            return True
+        if text in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("LLM_ENABLE_THINKING must be true, false, or empty")
 
     @field_validator("auth_cookie_samesite", mode="before")
     @classmethod

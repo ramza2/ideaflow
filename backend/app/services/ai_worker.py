@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory
 from app.llm.base import LlmProvider
-from app.llm.exceptions import LlmError
+from app.llm.exceptions import LlmError, LlmUnavailableError
 from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
 from app.llm.schemas import IdeaStructuringRequest
@@ -44,20 +44,28 @@ def backoff_seconds(base: float, attempt: int) -> float:
 
 
 def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
-    """Requeue or fail RUNNING jobs whose lease expired."""
+    """Requeue or fail RUNNING jobs whose lease expired (lock-safe)."""
     cfg = settings or get_settings()
     now = utcnow()
-    stale = list(
-        db.scalars(
-            select(AiJob).where(
+    recovered = 0
+
+    # Claim stale rows one-by-one with SKIP LOCKED so concurrent recoveries
+    # cannot both rewrite the same RUNNING job.
+    while True:
+        job = db.execute(
+            select(AiJob)
+            .where(
                 AiJob.status == AiJobStatus.RUNNING.value,
                 AiJob.lease_until.is_not(None),
                 AiJob.lease_until < now,
             )
-        )
-    )
-    recovered = 0
-    for job in stale:
+            .order_by(AiJob.lease_until.asc())
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        ).scalar_one_or_none()
+        if job is None:
+            break
+
         session = db.get(IdeaAiSession, job.session_id)
         if job.attempts < job.max_attempts:
             job.status = AiJobStatus.QUEUED.value
@@ -68,9 +76,6 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
             job.started_at = None
             job.last_error_code = "LLM_LEASE_EXPIRED"
             job.last_error_message = "Worker lease expired; job requeued."
-            if session is not None and session.status == IdeaAiSessionStatus.FAILED.value:
-                # Keep processing if somehow failed; normally stays PROCESSING
-                pass
             recovered += 1
         else:
             job.status = AiJobStatus.FAILED.value
@@ -85,8 +90,11 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
                 session.failure_code = "LLM_UNAVAILABLE"
                 session.failure_message = "AI 처리 중 일시적인 오류가 발생했습니다."
             recovered += 1
+
     if recovered:
         db.commit()
+    else:
+        db.rollback()
     return recovered
 
 
@@ -133,6 +141,19 @@ def _load_categories(db: Session, workspace_id: UUID) -> list[WorkspaceCategory]
             )
         )
     )
+
+
+def _job_owned_by_worker(job: AiJob, *, worker_id: str, now: datetime) -> bool:
+    if job.status != AiJobStatus.RUNNING.value:
+        return False
+    if job.worker_id != worker_id:
+        return False
+    if job.lease_until is None:
+        return False
+    lease = job.lease_until
+    if lease.tzinfo is None:
+        lease = lease.replace(tzinfo=timezone.utc)
+    return lease >= now
 
 
 def _apply_success(
@@ -219,13 +240,16 @@ def process_claimed_job(
     db: Session,
     *,
     job_id: UUID,
+    worker_id: str,
     provider: LlmProvider,
     settings: Settings | None = None,
 ) -> None:
-    """Run LLM outside prior claim txn; persist results in a new short txn."""
+    """Run LLM outside prior claim txn; persist only if lease ownership holds."""
     cfg = settings or get_settings()
     job = db.get(AiJob, job_id)
     if job is None or job.status != AiJobStatus.RUNNING.value:
+        return
+    if job.worker_id != worker_id:
         return
 
     session = db.get(IdeaAiSession, job.session_id)
@@ -264,27 +288,38 @@ def process_claimed_job(
     except LlmError as exc:
         result = None
         llm_error = exc
-    except Exception:  # noqa: BLE001
-        from app.llm.exceptions import LlmUnavailableError
-
-        logger.exception("unexpected_llm_error job_id=%s", job_id)
+    except Exception as exc:  # noqa: BLE001
+        # Do not log exception message / traceback locals (may contain prompts).
+        logger.error(
+            "unexpected_llm_error job_id=%s session_id=%s category=%s",
+            job_id,
+            session_id,
+            type(exc).__name__,
+        )
         result = None
         llm_error = LlmUnavailableError()
 
-    # Fresh transaction for result persistence
-    job = db.get(AiJob, job_id)
+    # Fresh transaction: fence on AiJob ownership before touching the session.
+    now = utcnow()
+    job = db.execute(
+        select(AiJob).where(AiJob.id == job_id).with_for_update()
+    ).scalar_one_or_none()
     if job is None:
         return
-    session = (
-        db.execute(
-            select(IdeaAiSession)
-            .where(IdeaAiSession.id == session_id)
-            .with_for_update()
-        ).scalar_one_or_none()
-    )
+    if not _job_owned_by_worker(job, worker_id=worker_id, now=now):
+        logger.info("ai_job_lease_lost job_id=%s", job_id)
+        db.rollback()
+        return
+
+    session = db.execute(
+        select(IdeaAiSession).where(IdeaAiSession.id == session_id).with_for_update()
+    ).scalar_one_or_none()
     if session is None or session.status != IdeaAiSessionStatus.PROCESSING.value:
+        # Ownership held but session moved — fail the job without applying LLM draft.
         job.status = AiJobStatus.FAILED.value
         job.finished_at = utcnow()
+        job.locked_at = None
+        job.lease_until = None
         job.last_error_code = "AI_SESSION_INVALID_STATE"
         job.last_error_message = "Session state changed during LLM call."
         db.commit()
@@ -325,25 +360,38 @@ def run_once(
     cfg = settings or get_settings()
     factory = session_factory or get_session_factory()
     wid = worker_id or make_worker_id()
+    owns_provider = provider is None
     llm = provider or get_llm_provider(cfg)
 
-    db = factory()
     try:
-        if recover:
-            recover_stale_jobs(db, settings=cfg)
-        job = claim_next_job(db, worker_id=wid, settings=cfg)
-        if job is None:
-            return False
-        job_id = job.id
-    finally:
-        db.close()
+        db = factory()
+        try:
+            if recover:
+                recover_stale_jobs(db, settings=cfg)
+            job = claim_next_job(db, worker_id=wid, settings=cfg)
+            if job is None:
+                return False
+            job_id = job.id
+        finally:
+            db.close()
 
-    db2 = factory()
-    try:
-        process_claimed_job(db2, job_id=job_id, provider=llm, settings=cfg)
-        return True
+        db2 = factory()
+        try:
+            process_claimed_job(
+                db2,
+                job_id=job_id,
+                worker_id=wid,
+                provider=llm,
+                settings=cfg,
+            )
+            return True
+        finally:
+            db2.close()
     finally:
-        db2.close()
+        if owns_provider:
+            close = getattr(llm, "close", None)
+            if callable(close):
+                close()
 
 
 class AiWorker:
@@ -358,7 +406,10 @@ class AiWorker:
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
-        self._provider_factory = provider_factory or (lambda: get_llm_provider(get_settings()))
+        if provider_factory is not None:
+            self._provider_factory = provider_factory
+        else:
+            self._provider_factory = lambda: get_llm_provider(self._settings or get_settings())
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.worker_id = make_worker_id()
@@ -382,19 +433,28 @@ class AiWorker:
         logger.info("ai_worker_stopped worker_id=%s", self.worker_id)
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            cfg = self._settings or get_settings()
-            try:
-                did_work = run_once(
-                    session_factory=self._session_factory,
-                    provider=self._provider_factory(),
-                    settings=cfg,
-                    worker_id=self.worker_id,
-                    recover=True,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("ai_worker_loop_error worker_id=%s", self.worker_id)
-                did_work = False
-            interval = (self._settings or get_settings()).ai_job_poll_interval_seconds
-            # If work was done, poll sooner; otherwise wait.
-            self._stop.wait(0 if did_work else interval)
+        cfg = self._settings or get_settings()
+        provider = self._provider_factory()
+        try:
+            while not self._stop.is_set():
+                try:
+                    did_work = run_once(
+                        session_factory=self._session_factory,
+                        provider=provider,
+                        settings=cfg,
+                        worker_id=self.worker_id,
+                        recover=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "ai_worker_loop_error worker_id=%s category=%s",
+                        self.worker_id,
+                        type(exc).__name__,
+                    )
+                    did_work = False
+                interval = cfg.ai_job_poll_interval_seconds
+                self._stop.wait(0 if did_work else interval)
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()

@@ -106,12 +106,13 @@ def test_web_evidence_provenance_rejected() -> None:
         IdeaStructuringResult.model_validate(payload)
 
 
-def test_ready_with_questions_rejected() -> None:
+def test_ready_with_extra_questions_normalized() -> None:
     payload = _ready_payload(
         clarifying_questions=[{"field": "x", "question": "why?"}],
     )
-    with pytest.raises(Exception):
-        IdeaStructuringResult.model_validate(payload)
+    result = IdeaStructuringResult.model_validate(payload)
+    assert result.decision == AiLlmDecision.READY_FOR_REVIEW
+    assert result.clarifying_questions == []
 
 
 def test_needs_clarification_requires_questions() -> None:

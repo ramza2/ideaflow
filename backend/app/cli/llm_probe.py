@@ -37,6 +37,7 @@ def main() -> int:
         print(f"latency_ms: {latency_ms}")
         print("parsed: true")
         print(f"decision: {result.decision.value}")
+        print(f"enable_thinking_setting: {settings.llm_enable_thinking}")
         return 0
     except LlmError as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -45,10 +46,11 @@ def main() -> int:
         print(f"retryable: {exc.retryable}")
         print(f"latency_ms: {latency_ms}")
         print("parsed: false")
+        print(f"enable_thinking_setting: {settings.llm_enable_thinking}")
         print(
             "note: endpoint may still be reachable; "
-            "strict JSON-only parsing rejected the message.content shape "
-            "(e.g. non-JSON prefix). No raw response is printed."
+            "strict JSON-only parsing rejected the message.content shape. "
+            "No raw response is printed."
         )
         # Do not print API keys, prompts, or raw responses.
         return 1
