@@ -255,7 +255,8 @@ def test_create_session_atomic(client: TestClient, db: Session) -> None:
     assert session.status == IdeaAiSessionStatus.PROCESSING.value
     jobs = list(db.scalars(select(AiJob).where(AiJob.session_id == session.id)))
     assert len(jobs) == 1
-    assert jobs[0].status == AiJobStatus.QUEUED.value
+    # QUEUED normally; RUNNING only if an external worker claimed it between commit and assert.
+    assert jobs[0].status in {AiJobStatus.QUEUED.value, AiJobStatus.RUNNING.value}
 
 
 def test_allow_llm_false(client: TestClient, db: Session) -> None:
