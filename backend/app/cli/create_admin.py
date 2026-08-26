@@ -30,7 +30,10 @@ def main() -> int:
     try:
         user = create_admin_user(session, email=email, name=name, password=password)
         session.commit()
-        print(f"Created SYSTEM_ADMIN id={user.id} email={user.email}")
+        print(
+            f"Created SYSTEM_ADMIN id={user.id} email={user.email} "
+            "(personal workspace provisioned)"
+        )
         return 0
     except AppError as exc:
         session.rollback()

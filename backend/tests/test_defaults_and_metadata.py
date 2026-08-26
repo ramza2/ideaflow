@@ -56,3 +56,9 @@ def test_default_workspace_categories() -> None:
     orders = [c["sort_order"] for c in cats]
     assert len(set(slugs)) == 8
     assert len(set(orders)) == 8
+
+
+def test_personal_workspace_default_name() -> None:
+    from app.services.workspace import PERSONAL_WORKSPACE_NAME
+
+    assert PERSONAL_WORKSPACE_NAME == "내 작업공간"
