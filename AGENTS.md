@@ -4,10 +4,10 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1 foundation plus Step 2 PostgreSQL/SQLAlchemy/Alembic core schema. Auth, Workspace/Idea APIs, and LLM features are not implemented yet.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1–3: foundation, PostgreSQL core schema, and server-side session authentication. Workspace/Idea APIs, Frontend auth wiring, and LLM features are not implemented yet.
 
 - `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components).
-- `backend/` — FastAPI + SQLAlchemy 2 + Alembic core schema (`GET /api/v1/health`). No Auth/API domain services yet.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth (`GET /api/v1/health`, `/api/v1/auth/*`). No Workspace/Idea APIs yet.
 
 ### Frontend service
 
@@ -23,6 +23,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Dev server: `uvicorn app.main:app --reload` (default `http://127.0.0.1:8000`)
 - Tests: `pytest` (DB integration tests require `DATABASE_URL`)
 - Health: `GET /api/v1/health`
+- Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin`
 - Migrations (PostgreSQL required):
 
 ```text
@@ -39,7 +40,8 @@ pytest
   - Saving a new idea (`handleSave` in `src/pages/ideas/IdeaEditPage.tsx`) only shows a success toast (`아이디어가 등록되었습니다`) and navigates to a hardcoded idea (`/w/.../ideas/idea-001`). Nothing is persisted and the ideas count does not change. This is expected behavior, not a bug.
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (e.g. `/w/personal/home`, `/w/personal/ideas`).
 - The Vite config includes a custom `figma:asset/` import resolver and aliases `@` to `frontend/src`.
-- Root `.env.example` includes shared app/backend placeholders (`DATABASE_URL` as `postgresql+psycopg://…`, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet. Backend Settings load the repository-root `.env` (cwd-independent); environment variables override file values.
+- Root `.env.example` includes shared app/backend placeholders (`DATABASE_URL` as `postgresql+psycopg://…`, `AUTH_*`, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet. Backend Settings load the repository-root `.env` (cwd-independent); environment variables override file values.
+- Backend auth is complete; the frontend login page remains mock-only until Step 6.
 
 ### UI preservation
 

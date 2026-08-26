@@ -1,5 +1,6 @@
 """ORM models package. Import all models here so Alembic sees metadata."""
 
+from app.models.auth import AuthSession
 from app.models.enums import (
     IdeaFeasibility,
     IdeaPriority,
@@ -26,6 +27,7 @@ __all__ = [
     "User",
     "UserStatus",
     "SystemRole",
+    "AuthSession",
     "Workspace",
     "WorkspaceType",
     "WorkspaceMember",

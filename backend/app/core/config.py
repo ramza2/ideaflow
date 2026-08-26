@@ -46,6 +46,19 @@ class Settings(BaseSettings):
         description="SQLAlchemy URL, e.g. postgresql+psycopg://user:pass@host:5432/ideaflow",
     )
 
+    # Auth / session cookies
+    auth_session_cookie_name: str = Field(default="ideaflow_session", alias="AUTH_SESSION_COOKIE_NAME")
+    auth_csrf_cookie_name: str = Field(default="ideaflow_csrf", alias="AUTH_CSRF_COOKIE_NAME")
+    auth_session_idle_seconds: int = Field(default=604800, alias="AUTH_SESSION_IDLE_SECONDS")
+    auth_session_absolute_seconds: int = Field(default=2592000, alias="AUTH_SESSION_ABSOLUTE_SECONDS")
+    auth_session_touch_interval_seconds: int = Field(
+        default=900, alias="AUTH_SESSION_TOUCH_INTERVAL_SECONDS"
+    )
+    auth_login_max_failures: int = Field(default=5, alias="AUTH_LOGIN_MAX_FAILURES")
+    auth_login_lock_seconds: int = Field(default=900, alias="AUTH_LOGIN_LOCK_SECONDS")
+    auth_cookie_secure: bool = Field(default=False, alias="AUTH_COOKIE_SECURE")
+    auth_cookie_samesite: str = Field(default="lax", alias="AUTH_COOKIE_SAMESITE")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
