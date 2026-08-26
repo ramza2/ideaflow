@@ -4,10 +4,10 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1–3: foundation, PostgreSQL core schema, and server-side session authentication. Workspace/Idea APIs, Frontend auth wiring, and LLM features are not implemented yet.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype. The `backend/` FastAPI service currently includes Step 1–4: foundation, PostgreSQL core schema, server-side session authentication, and Workspace provisioning/RBAC. Idea APIs, Frontend auth/workspace wiring, and LLM features are not implemented yet.
 
 - `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components).
-- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth (`GET /api/v1/health`, `/api/v1/auth/*`). No Workspace/Idea APIs yet.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`). No Idea APIs yet.
 
 ### Frontend service
 
@@ -23,7 +23,8 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Dev server: `uvicorn app.main:app --reload` (default `http://127.0.0.1:8000`)
 - Tests: `pytest` (DB integration tests require `DATABASE_URL`)
 - Health: `GET /api/v1/health`
-- Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin`
+- Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin` (also provisions Personal Workspace)
+- Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Migrations (PostgreSQL required):
 
 ```text
@@ -41,7 +42,7 @@ pytest
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (e.g. `/w/personal/home`, `/w/personal/ideas`).
 - The Vite config includes a custom `figma:asset/` import resolver and aliases `@` to `frontend/src`.
 - Root `.env.example` includes shared app/backend placeholders (`DATABASE_URL` as `postgresql+psycopg://…`, `AUTH_*`, LLM_*, WEB_SEARCH_*, CORS_ORIGINS). The frontend does not consume them yet. Backend Settings load the repository-root `.env` (cwd-independent); environment variables override file values.
-- Backend auth is complete; the frontend login page remains mock-only until Step 6.
+- Backend auth and Workspace RBAC are complete; the frontend login/workspace UI remains mock-only until Step 6.
 
 ### UI preservation
 

@@ -328,4 +328,8 @@ def create_admin_user(
     )
     db.add(user)
     db.flush()
+    # Personal workspace + owner ADMIN + default stages/categories (same transaction).
+    from app.services.workspace import ensure_personal_workspace_for_user
+
+    ensure_personal_workspace_for_user(db, user)
     return user
