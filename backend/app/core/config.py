@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/core/config.py -> repository root is three levels up
@@ -60,6 +60,25 @@ class Settings(BaseSettings):
     auth_cookie_secure: bool = Field(default=False, alias="AUTH_COOKIE_SECURE")
     auth_cookie_samesite: str = Field(default="lax", alias="AUTH_COOKIE_SAMESITE")
 
+    # LLM (OpenAI-compatible)
+    llm_api_url: str = Field(default="https://alzi-llm.openlink.kr", alias="LLM_API_URL")
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_model_name: str = Field(default="Qwen3-14B", alias="LLM_MODEL_NAME")
+    llm_chat_completions_path: str = Field(
+        default="/v1/chat/completions", alias="LLM_CHAT_COMPLETIONS_PATH"
+    )
+    llm_timeout_seconds: float = Field(default=120.0, alias="LLM_TIMEOUT_SECONDS")
+    llm_connect_timeout_seconds: float = Field(default=10.0, alias="LLM_CONNECT_TIMEOUT_SECONDS")
+    llm_temperature: float = Field(default=0.2, alias="LLM_TEMPERATURE")
+    llm_max_tokens: int = Field(default=2500, alias="LLM_MAX_TOKENS")
+
+    # AI worker / job queue
+    ai_worker_enabled: bool = Field(default=True, alias="AI_WORKER_ENABLED")
+    ai_job_poll_interval_seconds: float = Field(default=1.0, alias="AI_JOB_POLL_INTERVAL_SECONDS")
+    ai_job_lease_seconds: int = Field(default=300, alias="AI_JOB_LEASE_SECONDS")
+    ai_job_max_attempts: int = Field(default=3, alias="AI_JOB_MAX_ATTEMPTS")
+    ai_job_retry_base_seconds: float = Field(default=2.0, alias="AI_JOB_RETRY_BASE_SECONDS")
+
     @field_validator("auth_cookie_samesite", mode="before")
     @classmethod
     def normalize_cookie_samesite(cls, value: Any) -> str:
@@ -70,9 +89,51 @@ class Settings(BaseSettings):
             return "lax"
         return normalized
 
+    @field_validator(
+        "llm_timeout_seconds",
+        "llm_connect_timeout_seconds",
+        "ai_job_poll_interval_seconds",
+        "ai_job_retry_base_seconds",
+        mode="after",
+    )
+    @classmethod
+    def positive_float(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @field_validator("ai_job_lease_seconds", "ai_job_max_attempts", "llm_max_tokens", mode="after")
+    @classmethod
+    def positive_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be >= 1")
+        return value
+
+    @field_validator("llm_temperature", mode="after")
+    @classmethod
+    def temperature_range(cls, value: float) -> float:
+        if value < 0 or value > 2:
+            raise ValueError("LLM_TEMPERATURE must be between 0 and 2")
+        return value
+
+    @model_validator(mode="after")
+    def lease_vs_timeout(self) -> "Settings":
+        # Lease should outlive a single LLM call.
+        if self.ai_job_lease_seconds <= self.llm_timeout_seconds:
+            raise ValueError("AI_JOB_LEASE_SECONDS must be greater than LLM_TIMEOUT_SECONDS")
+        return self
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def llm_chat_completions_url(self) -> str:
+        base = self.llm_api_url.rstrip("/")
+        path = self.llm_chat_completions_path.strip() or "/v1/chat/completions"
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{base}{path}"
 
 
 @lru_cache

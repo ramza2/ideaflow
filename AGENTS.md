@@ -4,10 +4,10 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API (Step 6). The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API (Step 6). The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider (Frontend AI pages still mock).
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, and Manual Idea CRUD use real APIs; AI/Review pages remain mock.
-- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`).
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, and Manual Idea CRUD use real APIs; AI/Review pages remain mock until Step 8.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
 
 ### Frontend service
 
@@ -27,11 +27,13 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin` (also provisions Personal Workspace)
 - Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Ideas: workspace-scoped CRUD + ACL + `?q=` ILIKE/FTS search
+- AI (Step 7): `IdeaAiSession` + `AiJob` PostgreSQL queue; in-process worker (`AI_WORKER_ENABLED`); OpenAI-compatible LLM via `httpx`; probe with `python -m app.cli.llm_probe`. Tests should set `AI_WORKER_ENABLED=false`.
 - Migrations (PostgreSQL required):
 
 ```text
 cd backend
 export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
+export AI_WORKER_ENABLED=false
 alembic upgrade head
 pytest
 ```
