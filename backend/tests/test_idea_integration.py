@@ -357,6 +357,20 @@ def test_selected_users_acl_and_shares(client: TestClient, db: Session) -> None:
         ).status_code
         == 200
     )
+    # EDIT share may not change original_text (author provenance)
+    before = db.get(Idea, uuid.UUID(idea_id))
+    assert before is not None
+    original_before = before.original_text
+    r_orig = client.patch(
+        f"{_ideas_url(ws.id)}/{idea_id}",
+        json={"original_text": "해킹된 원문"},
+        headers=_headers(client),
+    )
+    assert r_orig.status_code == 403
+    assert r_orig.json()["error"]["code"] == "IDEA_OWNER_REQUIRED"
+    db.refresh(before)
+    assert before.original_text == original_before
+
     assert (
         client.patch(
             f"{_ideas_url(ws.id)}/{idea_id}",
@@ -379,6 +393,70 @@ def test_selected_users_acl_and_shares(client: TestClient, db: Session) -> None:
         i["id"] != idea_id
         for i in client.get(_ideas_url(ws.id), params={"q": "선택공유"}).json()["items"]
     )
+
+
+def test_patch_explicit_null_semantics(client: TestClient, db: Session) -> None:
+    author, password = _user(db)
+    assignee, _ = _user(db)
+    ws = _team_with_defaults(db, author)
+    _add_member(db, ws, assignee)
+    stage = db.scalar(
+        select(WorkspaceStage).where(
+            WorkspaceStage.workspace_id == ws.id,
+            WorkspaceStage.is_default.is_(True),
+        )
+    )
+    category = db.scalar(
+        select(WorkspaceCategory).where(WorkspaceCategory.workspace_id == ws.id)
+    )
+    assert stage is not None and category is not None
+
+    _login(client, author.email, password)
+    headers = _headers(client)
+    created = client.post(
+        _ideas_url(ws.id),
+        json={
+            "title": "null-test",
+            "original_text": "원문",
+            "visibility": "WORKSPACE",
+            "category_id": str(category.id),
+            "assignee_id": str(assignee.id),
+            "stage_id": str(stage.id),
+        },
+        headers=headers,
+    ).json()
+    idea_id = created["id"]
+    idea_uuid = uuid.UUID(idea_id)
+
+    for payload in (
+        {"title": None},
+        {"stage_id": None},
+        {"priority": None},
+        {"feasibility": None},
+        {"visibility": None},
+    ):
+        r = client.patch(f"{_ideas_url(ws.id)}/{idea_id}", json=payload, headers=headers)
+        assert r.status_code == 422, payload
+
+    row = db.get(Idea, idea_uuid)
+    assert row is not None
+    assert row.title == "null-test"
+    assert row.stage_id == stage.id
+    assert row.visibility == IdeaVisibility.WORKSPACE.value
+    assert row.priority == "MEDIUM"
+    assert row.feasibility == "UNKNOWN"
+
+    r = client.patch(
+        f"{_ideas_url(ws.id)}/{idea_id}",
+        json={"category_id": None, "assignee_id": None},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["category"] is None
+    assert r.json()["assignee"] is None
+    db.refresh(row)
+    assert row.category_id is None
+    assert row.assignee_id is None
 
 
 def test_inactive_member_cannot_use_share(client: TestClient, db: Session) -> None:

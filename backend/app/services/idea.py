@@ -40,7 +40,7 @@ _MAX_TAGS = 20
 _TAG_MAX_LEN = 64
 _IDEA_CODE_RE = re.compile(r"^IF-(\d+)$")
 
-EDIT_SHARE_FORBIDDEN_FIELDS = frozenset({"visibility"})
+EDIT_SHARE_FORBIDDEN_FIELDS = frozenset({"visibility", "original_text"})
 
 
 def utcnow() -> datetime:
@@ -417,7 +417,7 @@ def update_idea(
         forbidden = fields_set & EDIT_SHARE_FORBIDDEN_FIELDS
         if forbidden:
             raise AppError(
-                "Only the idea owner can change visibility.",
+                "Only the idea owner can change this field.",
                 code="IDEA_OWNER_REQUIRED",
                 status_code=403,
             )

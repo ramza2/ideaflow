@@ -146,6 +146,15 @@ class IdeaUpdate(BaseModel):
             raise ValueError("title must not be empty")
         return stripped
 
+    @model_validator(mode="after")
+    def reject_explicit_null_for_required_fields(self) -> IdeaUpdate:
+        """Distinguish omitted fields from explicit null for DB non-null columns."""
+        non_nullable = ("title", "stage_id", "priority", "feasibility", "visibility")
+        for name in non_nullable:
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
+
 
 class IdeaListItem(BaseModel):
     id: UUID
