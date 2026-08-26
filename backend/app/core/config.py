@@ -40,6 +40,11 @@ class Settings(BaseSettings):
         alias="CORS_ORIGINS",
         description="Comma-separated allowed CORS origins (no wildcard with credentials).",
     )
+    database_url: str = Field(
+        default="",
+        alias="DATABASE_URL",
+        description="SQLAlchemy URL, e.g. postgresql+psycopg://user:pass@host:5432/ideaflow",
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

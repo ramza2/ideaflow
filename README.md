@@ -14,6 +14,6 @@ IdeaFlow/
 ## 현재 상태
 
 - Frontend: Figma Make Prototype (Mock UI)
-- Backend: Step 1 foundation (`GET /api/v1/health`) — DB/Auth/LLM 미구현
+- Backend: Step 2 — PostgreSQL core schema + Alembic (Auth/API/LLM 미구현)
 
 자세한 Backend 실행 방법은 `backend/README.md`를 참고하십시오.
