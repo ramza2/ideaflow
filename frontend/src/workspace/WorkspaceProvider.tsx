@@ -105,20 +105,34 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [navigate],
   );
 
+  const isResolvingLegacy =
+    !!workspaceId &&
+    isLegacyPersonalWorkspaceId(workspaceId) &&
+    !loading &&
+    workspaces.some((w) => w.type === "PERSONAL");
+
   const value = useMemo(
     () => ({
       workspaces,
       currentWorkspace,
-      loading,
+      loading: loading || isResolvingLegacy,
       error,
       refreshWorkspaces,
       setCurrentWorkspaceId,
     }),
-    [workspaces, currentWorkspace, loading, error, refreshWorkspaces, setCurrentWorkspaceId],
+    [workspaces, currentWorkspace, loading, isResolvingLegacy, error, refreshWorkspaces, setCurrentWorkspaceId],
   );
 
   return (
-    <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>
+    <WorkspaceContext.Provider value={value}>
+      {loading || isResolvingLegacy ? (
+        <div className="min-h-screen flex items-center justify-center bg-[#f8f8f9]">
+          <p className="text-sm text-[#6b6b80]">작업공간 불러오는 중...</p>
+        </div>
+      ) : (
+        children
+      )}
+    </WorkspaceContext.Provider>
   );
 }
 
