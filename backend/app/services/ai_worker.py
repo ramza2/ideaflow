@@ -55,6 +55,40 @@ def backoff_seconds(base: float, attempt: int) -> float:
     return base * (2**exp)
 
 
+_ACTIVE_WEB_RESEARCH_RUN_STATUSES = {
+    WebResearchRunStatus.QUEUED.value,
+    WebResearchRunStatus.SEARCHING.value,
+    WebResearchRunStatus.REFINING.value,
+}
+
+
+def _web_research_retry_phase(run_status: str) -> str:
+    return (
+        "REFINE"
+        if run_status == WebResearchRunStatus.REFINING.value
+        else "SEARCH"
+    )
+
+
+def _apply_stale_web_research_run(
+    run: WebResearchRun,
+    *,
+    requeue: bool,
+    retry_phase: str,
+    now: datetime,
+) -> None:
+    if requeue:
+        run.status = WebResearchRunStatus.QUEUED.value
+        run.failure_phase = retry_phase
+        return
+
+    run.status = WebResearchRunStatus.FAILED.value
+    run.failure_phase = retry_phase
+    run.failure_code = "LLM_LEASE_EXPIRED"
+    run.failure_message = "Worker lease expired."
+    run.completed_at = now
+
+
 def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
     """Requeue or fail RUNNING jobs whose lease expired (lock-safe)."""
     cfg = settings or get_settings()
@@ -79,6 +113,14 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
             break
 
         session = db.get(IdeaAiSession, job.session_id)
+
+        run: WebResearchRun | None = None
+        retry_phase: str | None = None
+        if job.job_type == AiJobType.WEB_RESEARCH.value and job.research_run_id is not None:
+            run = db.get(WebResearchRun, job.research_run_id)
+            if run is not None and run.status in _ACTIVE_WEB_RESEARCH_RUN_STATUSES:
+                retry_phase = _web_research_retry_phase(run.status)
+
         if job.attempts < job.max_attempts:
             job.status = AiJobStatus.QUEUED.value
             job.available_at = now
@@ -88,6 +130,13 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
             job.started_at = None
             job.last_error_code = "LLM_LEASE_EXPIRED"
             job.last_error_message = "Worker lease expired; job requeued."
+            if run is not None and retry_phase is not None:
+                _apply_stale_web_research_run(
+                    run,
+                    requeue=True,
+                    retry_phase=retry_phase,
+                    now=now,
+                )
             recovered += 1
         else:
             job.status = AiJobStatus.FAILED.value
@@ -101,23 +150,13 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
                 session.status = IdeaAiSessionStatus.FAILED.value
                 session.failure_code = "LLM_UNAVAILABLE"
                 session.failure_message = "AI 처리 중 일시적인 오류가 발생했습니다."
-            if job.job_type == AiJobType.WEB_RESEARCH.value and job.research_run_id is not None:
-                run = db.get(WebResearchRun, job.research_run_id)
-                if run is not None and run.status in {
-                    WebResearchRunStatus.QUEUED.value,
-                    WebResearchRunStatus.SEARCHING.value,
-                    WebResearchRunStatus.REFINING.value,
-                }:
-                    previous_run_status = run.status
-                    run.status = WebResearchRunStatus.FAILED.value
-                    run.failure_phase = (
-                        "REFINE"
-                        if previous_run_status == WebResearchRunStatus.REFINING.value
-                        else "SEARCH"
-                    )
-                    run.failure_code = "LLM_LEASE_EXPIRED"
-                    run.failure_message = "Worker lease expired."
-                    run.completed_at = now
+            if run is not None and retry_phase is not None:
+                _apply_stale_web_research_run(
+                    run,
+                    requeue=False,
+                    retry_phase=retry_phase,
+                    now=now,
+                )
             recovered += 1
 
     if recovered:
@@ -467,6 +506,9 @@ def process_web_research_job(
             run.status = WebResearchRunStatus.READY.value
             run.research_summary = None
             run.completed_at = utcnow()
+            run.failure_phase = None
+            run.failure_code = None
+            run.failure_message = None
             session = db.execute(
                 select(IdeaAiSession).where(IdeaAiSession.id == session_id).with_for_update()
             ).scalar_one_or_none()
