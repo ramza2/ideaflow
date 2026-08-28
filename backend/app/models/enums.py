@@ -89,6 +89,17 @@ class IdeaAiSessionStatus(StrEnum):
 
 class AiJobType(StrEnum):
     STRUCTURE_IDEA = "STRUCTURE_IDEA"
+    WEB_RESEARCH = "WEB_RESEARCH"
+
+
+class WebResearchRunStatus(StrEnum):
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    QUEUED = "QUEUED"
+    SEARCHING = "SEARCHING"
+    REFINING = "REFINING"
+    READY = "READY"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class AiJobStatus(StrEnum):

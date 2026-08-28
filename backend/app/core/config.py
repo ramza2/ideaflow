@@ -83,6 +83,20 @@ class Settings(BaseSettings):
     ai_job_max_attempts: int = Field(default=3, alias="AI_JOB_MAX_ATTEMPTS")
     ai_job_retry_base_seconds: float = Field(default=2.0, alias="AI_JOB_RETRY_BASE_SECONDS")
 
+    # Web Search (Step 9+)
+    web_search_provider: str = Field(default="http_json", alias="WEB_SEARCH_PROVIDER")
+    web_search_api_url: str = Field(default="", alias="WEB_SEARCH_API_URL")
+    web_search_api_key: str = Field(default="", alias="WEB_SEARCH_API_KEY")
+    web_search_timeout_seconds: float = Field(default=20.0, alias="WEB_SEARCH_TIMEOUT_SECONDS")
+    web_search_connect_timeout_seconds: float = Field(
+        default=5.0, alias="WEB_SEARCH_CONNECT_TIMEOUT_SECONDS"
+    )
+    web_search_max_queries: int = Field(default=5, alias="WEB_SEARCH_MAX_QUERIES")
+    web_search_max_results_per_query: int = Field(
+        default=5, alias="WEB_SEARCH_MAX_RESULTS_PER_QUERY"
+    )
+    web_search_max_total_results: int = Field(default=20, alias="WEB_SEARCH_MAX_TOTAL_RESULTS")
+
     @field_validator("llm_enable_thinking", mode="before")
     @classmethod
     def parse_enable_thinking(cls, value: Any) -> bool | None:
@@ -114,6 +128,8 @@ class Settings(BaseSettings):
         "llm_connect_timeout_seconds",
         "ai_job_poll_interval_seconds",
         "ai_job_retry_base_seconds",
+        "web_search_timeout_seconds",
+        "web_search_connect_timeout_seconds",
         mode="after",
     )
     @classmethod
@@ -122,7 +138,15 @@ class Settings(BaseSettings):
             raise ValueError("must be > 0")
         return value
 
-    @field_validator("ai_job_lease_seconds", "ai_job_max_attempts", "llm_max_tokens", mode="after")
+    @field_validator(
+        "ai_job_lease_seconds",
+        "ai_job_max_attempts",
+        "llm_max_tokens",
+        "web_search_max_queries",
+        "web_search_max_results_per_query",
+        "web_search_max_total_results",
+        mode="after",
+    )
     @classmethod
     def positive_int(cls, value: int) -> int:
         if value < 1:
@@ -138,9 +162,23 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def lease_vs_timeout(self) -> "Settings":
-        # Lease should outlive a single LLM call.
+        # Lease should outlive a single LLM call and web search + refine attempt.
         if self.ai_job_lease_seconds <= self.llm_timeout_seconds:
             raise ValueError("AI_JOB_LEASE_SECONDS must be greater than LLM_TIMEOUT_SECONDS")
+        search_budget = (
+            self.web_search_timeout_seconds * max(self.web_search_max_queries, 1)
+            + self.llm_timeout_seconds
+        )
+        if self.ai_job_lease_seconds <= search_budget:
+            raise ValueError(
+                "AI_JOB_LEASE_SECONDS must exceed worst-case WEB_SEARCH + LLM timeout budget"
+            )
+        if self.web_search_max_queries < 1 or self.web_search_max_queries > 10:
+            raise ValueError("WEB_SEARCH_MAX_QUERIES must be between 1 and 10")
+        if self.web_search_max_results_per_query < 1 or self.web_search_max_results_per_query > 10:
+            raise ValueError("WEB_SEARCH_MAX_RESULTS_PER_QUERY must be between 1 and 10")
+        if self.web_search_max_total_results < 1:
+            raise ValueError("WEB_SEARCH_MAX_TOTAL_RESULTS must be >= 1")
         return self
 
     @property

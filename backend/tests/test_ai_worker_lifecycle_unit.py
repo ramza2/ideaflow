@@ -27,6 +27,9 @@ class CountingProvider:
     def structure_idea(self, request: IdeaStructuringRequest):
         raise AssertionError("no jobs expected in empty-poll lifecycle test")
 
+    def refine_idea_with_evidence(self, request):
+        raise AssertionError("no jobs expected in empty-poll lifecycle test")
+
     def close(self) -> None:
         if not self.closed_instance:
             self.closed_instance = True
@@ -47,7 +50,7 @@ def make_settings(**overrides) -> Settings:
         llm_max_tokens=1000,
         llm_enable_thinking=False,
         ai_worker_enabled=True,
-        ai_job_lease_seconds=60,
+        ai_job_lease_seconds=300,
         ai_job_max_attempts=3,
         ai_job_poll_interval_seconds=0.05,
         ai_job_retry_base_seconds=2.0,

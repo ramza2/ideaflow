@@ -25,7 +25,7 @@ const ANALYSIS_OPTIONS: {
   {
     id: "webSearch",
     label: "외부 웹 검색으로 보완",
-    note: "Step 9에서 제공",
+    note: "초안 검토 단계에서 선택 가능",
     icon: "globe",
   },
   {

@@ -109,22 +109,33 @@ class AiJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "ai_jobs"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('STRUCTURE_IDEA')",
+            "job_type IN ('STRUCTURE_IDEA', 'WEB_RESEARCH')",
             name="ai_job_type",
         ),
         CheckConstraint(
             "status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')",
             name="ai_job_status",
         ),
+        CheckConstraint(
+            "(job_type = 'STRUCTURE_IDEA' AND research_run_id IS NULL) OR "
+            "(job_type = 'WEB_RESEARCH' AND research_run_id IS NOT NULL)",
+            name="ai_job_research_run_type",
+        ),
         Index("ix_ai_jobs_session_id", "session_id"),
         Index("ix_ai_jobs_status_available_at", "status", "available_at"),
         Index("ix_ai_jobs_lease_until", "lease_until"),
+        Index("ix_ai_jobs_research_run_id", "research_run_id"),
     )
 
     session_id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("idea_ai_sessions.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    research_run_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("web_research_runs.id", ondelete="CASCADE"),
+        nullable=True,
     )
 
     job_type: Mapped[str] = mapped_column(

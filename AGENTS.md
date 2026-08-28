@@ -4,9 +4,9 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow and Step 9 Web Research approval flow. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider and Step 9 Web Research/Evidence.
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, and **AI Input/Analyzing/Review** use real APIs. Web Search/Evidence remain for later steps.
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, and **Web Search approval on Review** use real APIs. Idea Detail "조사 및 근거" tab uses real Evidence API.
 - `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
 
 ### Frontend service
@@ -28,6 +28,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Ideas: workspace-scoped CRUD + ACL + `?q=` ILIKE/FTS search
 - AI (Step 7): `IdeaAiSession` + `AiJob` PostgreSQL queue; in-process worker (`AI_WORKER_ENABLED`); OpenAI-compatible LLM via `httpx`; probe with `python -m app.cli.llm_probe`. Tests should set `AI_WORKER_ENABLED=false`.
+- Web Research (Step 9): `WebResearchRun` + `WebEvidence`; `AiJob` type `WEB_RESEARCH`; preview/approve APIs under `/ai-sessions/.../research-runs`; `http_json` search provider (`WEB_SEARCH_*` env); probe with `python -m app.cli.web_search_probe`. External search only after user approval; never send `input_text`/full draft to search provider.
 - Migrations (PostgreSQL required):
 
 ```text
@@ -42,7 +43,7 @@ pytest
 
 - **Auth / Workspace / Manual Idea / AI Session flows use the real Backend** (HttpOnly session + CSRF cookie). Dev: Browser calls `http://localhost:5173/api/v1/...` via Vite proxy. Legacy route `/w/personal/*` redirects to the user's PERSONAL workspace UUID.
 - **AI routes use session UUID:** `/w/:workspaceId/ideas/new/ai/analyzing/:sessionId` and `.../review/:sessionId`. Legacy analyzing/review without sessionId redirect to AI input (no mock workflow). Visibility preference may travel as `?visibility=PRIVATE|WORKSPACE|SELECTED_USERS` until confirm.
-- **Reviews inbox, notifications, Web Search/Evidence, and help content remain mock/prototype** until later steps.
+- **Reviews inbox, notifications, and help content remain mock/prototype** until later steps. Web Research runs on AI Review (CREATE session, `READY_FOR_REVIEW` only); confirmed Idea re-research ("다시 조사") is not implemented.
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (workspaceId is a Backend UUID; `/w/personal/*` is legacy-compatible).
 - The Vite config includes a custom `figma:asset/` import resolver, `@` alias, and `/api` dev proxy.
 - Root `.env.example` includes `VITE_API_BASE_URL`, `VITE_AUTH_CSRF_COOKIE_NAME`, `VITE_DEV_API_PROXY_TARGET`, plus backend placeholders. Backend Settings load the repository-root `.env` (cwd-independent).

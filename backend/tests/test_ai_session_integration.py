@@ -70,6 +70,17 @@ class FakeProvider:
             raise item
         return item
 
+    def refine_idea_with_evidence(self, request):
+        from app.llm.research_schemas import EvidenceRefinementResult
+
+        self.calls += 1
+        if not self._results:
+            raise RuntimeError("FakeProvider exhausted")
+        item = self._results.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
 
 def _ready_result(title: str = "AI Draft Title") -> IdeaStructuringResult:
     return IdeaStructuringResult(

@@ -423,6 +423,15 @@ def confirm_ai_session(
             status_code=409,
         )
 
+    from app.services import web_research as web_research_service
+
+    if web_research_service.has_active_research(db, session.id):
+        raise AppError(
+            "Web research is in progress.",
+            code="AI_RESEARCH_IN_PROGRESS",
+            status_code=409,
+        )
+
     if payload.visibility is None:
         visibility = IdeaVisibility.PRIVATE
     else:

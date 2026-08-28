@@ -142,9 +142,9 @@ export function useAiSession(
     [pollWhenProcessing, pollIntervalMs, fetchOnce, clearTimer],
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<AiSession | null> => {
     const requestKey = sessionRequestKey(workspaceId, sessionId);
-    if (!requestKey) return;
+    if (!requestKey) return null;
 
     setLoading(true);
     const next = await fetchOnce(requestKey);
@@ -154,6 +154,7 @@ export function useAiSession(
         startPollingLoop(requestKey);
       }
     }
+    return next;
   }, [workspaceId, sessionId, fetchOnce, startPollingLoop]);
 
   const setSessionGuarded = useCallback((next: AiSession) => {

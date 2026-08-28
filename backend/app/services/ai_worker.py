@@ -17,14 +17,26 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory
 from app.llm.base import LlmProvider
-from app.llm.exceptions import LlmError, LlmUnavailableError
+from app.llm.exceptions import LlmError, LlmResponseValidationError, LlmUnavailableError
 from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
+from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
+from app.llm.research_schemas import (
+    EvidenceInput,
+    RESEARCH_REFINABLE_FIELDS,
+    merge_refinement_provenance,
+    validate_refinement_result,
+)
 from app.llm.schemas import IdeaStructuringRequest
 from app.models.ai import AiJob, IdeaAiSession
-from app.models.enums import AiJobStatus, AiLlmDecision, IdeaAiSessionStatus
-from app.models.workspace import WorkspaceCategory
+from app.models.enums import AiJobStatus, AiJobType, AiLlmDecision, IdeaAiSessionStatus, WebResearchRunStatus
+from app.models.research import WebEvidence, WebResearchRun
+from app.models.workspace import Workspace, WorkspaceCategory
 from app.services import ai_session as ai_session_service
+from app.services import web_research as web_research_service
+from app.web_search.base import WebSearchProvider
+from app.web_search.exceptions import WebSearchError
+from app.web_search.factory import get_web_search_provider
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +53,40 @@ def backoff_seconds(base: float, attempt: int) -> float:
     """Exponential backoff: base * 2^(attempt-1). attempt is 1-based after claim."""
     exp = max(attempt - 1, 0)
     return base * (2**exp)
+
+
+_ACTIVE_WEB_RESEARCH_RUN_STATUSES = {
+    WebResearchRunStatus.QUEUED.value,
+    WebResearchRunStatus.SEARCHING.value,
+    WebResearchRunStatus.REFINING.value,
+}
+
+
+def _web_research_retry_phase(run_status: str) -> str:
+    return (
+        "REFINE"
+        if run_status == WebResearchRunStatus.REFINING.value
+        else "SEARCH"
+    )
+
+
+def _apply_stale_web_research_run(
+    run: WebResearchRun,
+    *,
+    requeue: bool,
+    retry_phase: str,
+    now: datetime,
+) -> None:
+    if requeue:
+        run.status = WebResearchRunStatus.QUEUED.value
+        run.failure_phase = retry_phase
+        return
+
+    run.status = WebResearchRunStatus.FAILED.value
+    run.failure_phase = retry_phase
+    run.failure_code = "LLM_LEASE_EXPIRED"
+    run.failure_message = "Worker lease expired."
+    run.completed_at = now
 
 
 def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
@@ -67,6 +113,14 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
             break
 
         session = db.get(IdeaAiSession, job.session_id)
+
+        run: WebResearchRun | None = None
+        retry_phase: str | None = None
+        if job.job_type == AiJobType.WEB_RESEARCH.value and job.research_run_id is not None:
+            run = db.get(WebResearchRun, job.research_run_id)
+            if run is not None and run.status in _ACTIVE_WEB_RESEARCH_RUN_STATUSES:
+                retry_phase = _web_research_retry_phase(run.status)
+
         if job.attempts < job.max_attempts:
             job.status = AiJobStatus.QUEUED.value
             job.available_at = now
@@ -76,6 +130,13 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
             job.started_at = None
             job.last_error_code = "LLM_LEASE_EXPIRED"
             job.last_error_message = "Worker lease expired; job requeued."
+            if run is not None and retry_phase is not None:
+                _apply_stale_web_research_run(
+                    run,
+                    requeue=True,
+                    retry_phase=retry_phase,
+                    now=now,
+                )
             recovered += 1
         else:
             job.status = AiJobStatus.FAILED.value
@@ -89,6 +150,13 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
                 session.status = IdeaAiSessionStatus.FAILED.value
                 session.failure_code = "LLM_UNAVAILABLE"
                 session.failure_message = "AI 처리 중 일시적인 오류가 발생했습니다."
+            if run is not None and retry_phase is not None:
+                _apply_stale_web_research_run(
+                    run,
+                    requeue=False,
+                    retry_phase=retry_phase,
+                    now=now,
+                )
             recovered += 1
 
     if recovered:
@@ -236,20 +304,385 @@ def _apply_failure(
         session.failure_message = safe_msg
 
 
+def _apply_web_research_failure(
+    db: Session,
+    *,
+    job: AiJob,
+    run: WebResearchRun,
+    error: WebSearchError | LlmError,
+    settings: Settings,
+    failure_phase: str,
+) -> None:
+    now = utcnow()
+    safe_msg = (error.safe_message or "웹 조사 중 오류가 발생했습니다.")[:512]
+    code = error.code
+    retryable = getattr(error, "retryable", False)
+
+    if retryable and job.attempts < job.max_attempts:
+        delay = backoff_seconds(settings.ai_job_retry_base_seconds, job.attempts)
+        job.status = AiJobStatus.QUEUED.value
+        job.available_at = now + timedelta(seconds=delay)
+        job.locked_at = None
+        job.lease_until = None
+        job.worker_id = None
+        job.started_at = None
+        job.last_error_code = code
+        job.last_error_message = safe_msg
+        run.status = WebResearchRunStatus.QUEUED.value
+        run.failure_phase = failure_phase
+        return
+
+    job.status = AiJobStatus.FAILED.value
+    job.finished_at = now
+    job.locked_at = None
+    job.lease_until = None
+    job.last_error_code = code
+    job.last_error_message = safe_msg
+
+    run.status = WebResearchRunStatus.FAILED.value
+    run.failure_phase = failure_phase
+    run.failure_code = code
+    run.failure_message = safe_msg
+    run.completed_at = now
+
+
+def process_web_research_job(
+    db: Session,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    provider: LlmProvider,
+    search_provider: WebSearchProvider,
+    settings: Settings | None = None,
+) -> None:
+    cfg = settings or get_settings()
+    job = db.get(AiJob, job_id)
+    if job is None or job.status != AiJobStatus.RUNNING.value or job.worker_id != worker_id:
+        return
+    if job.research_run_id is None:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "AI_RESEARCH_NOT_FOUND"
+        job.last_error_message = "Missing research_run_id."
+        db.commit()
+        return
+
+    run = db.get(WebResearchRun, job.research_run_id)
+    session = db.get(IdeaAiSession, job.session_id)
+    workspace = db.get(Workspace, session.workspace_id) if session else None
+
+    if run is None or session is None or workspace is None:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "AI_RESEARCH_NOT_FOUND"
+        job.last_error_message = "Research run or session missing."
+        db.commit()
+        return
+
+    if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "AI_SESSION_INVALID_STATE"
+        job.last_error_message = "Session not READY_FOR_REVIEW."
+        db.commit()
+        return
+
+    if not workspace.allow_web_search or not workspace.allow_llm:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "WORKSPACE_WEB_SEARCH_DISABLED"
+        job.last_error_message = "Web search or LLM disabled."
+        run.status = WebResearchRunStatus.FAILED.value
+        run.failure_phase = "SEARCH"
+        run.failure_code = "WORKSPACE_WEB_SEARCH_DISABLED"
+        run.failure_message = "Web search or LLM disabled."
+        run.completed_at = utcnow()
+        db.commit()
+        return
+
+    run_id = run.id
+    session_id = session.id
+    queries = list(run.queries_to_send or [])
+    base_draft = dict(run.base_draft_payload or {})
+    base_provenance = dict(run.base_field_provenance or {})
+    user_edited = list(run.user_edited_fields or [])
+    skip_search = (
+        run.failure_phase == "REFINE"
+        and db.execute(
+            select(WebEvidence.id).where(WebEvidence.research_run_id == run.id).limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    search_error: WebSearchError | None = None
+    collected: list[tuple[str, Any]] = []
+
+    if not skip_search:
+        run.status = WebResearchRunStatus.SEARCHING.value
+        if run.started_at is None:
+            run.started_at = utcnow()
+        db.commit()
+
+        max_per_query = cfg.web_search_max_results_per_query
+        max_total = cfg.web_search_max_total_results
+        total = 0
+        rank = 0
+
+        try:
+            for query in queries:
+                if total >= max_total:
+                    break
+                remaining = max_total - total
+                batch = search_provider.search(
+                    query=str(query),
+                    max_results=min(max_per_query, remaining),
+                )
+                for item in batch:
+                    if total >= max_total:
+                        break
+                    collected.append((str(query), item))
+                    total += 1
+                    rank += 1
+        except WebSearchError as exc:
+            search_error = exc
+
+        now = utcnow()
+        job = db.execute(select(AiJob).where(AiJob.id == job_id).with_for_update()).scalar_one_or_none()
+        if job is None or not _job_owned_by_worker(job, worker_id=worker_id, now=now):
+            db.rollback()
+            return
+
+        run = db.execute(
+            select(WebResearchRun).where(WebResearchRun.id == run_id).with_for_update()
+        ).scalar_one_or_none()
+        if run is None:
+            db.rollback()
+            return
+
+        if search_error is not None:
+            _apply_web_research_failure(
+                db,
+                job=job,
+                run=run,
+                error=search_error,
+                settings=cfg,
+                failure_phase="SEARCH",
+            )
+            db.commit()
+            return
+
+        fetched_at = utcnow()
+        seen_hashes: set[str] = set()
+        evidence_rows: list[WebEvidence] = []
+        for query, item in collected:
+            uhash = web_research_service.url_hash(item.url)
+            if uhash in seen_hashes:
+                continue
+            seen_hashes.add(uhash)
+            evidence_rows.append(
+                WebEvidence(
+                    research_run_id=run.id,
+                    query=query[:200],
+                    title=item.title[:500],
+                    url=item.url[:2048],
+                    url_hash=uhash,
+                    domain=web_research_service.domain_from_url(item.url),
+                    source_name=(item.source or "")[:255] or None,
+                    snippet=(item.snippet or "")[:2000] or None,
+                    published_at=item.published_at,
+                    fetched_at=fetched_at,
+                    rank=len(evidence_rows),
+                    provider=search_provider.provider_name,
+                    related_fields=[],
+                )
+            )
+
+        for row in evidence_rows:
+            db.add(row)
+        run.result_count = len(evidence_rows)
+        db.flush()
+
+        if run.result_count == 0:
+            run.status = WebResearchRunStatus.READY.value
+            run.research_summary = None
+            run.completed_at = utcnow()
+            run.failure_phase = None
+            run.failure_code = None
+            run.failure_message = None
+            session = db.execute(
+                select(IdeaAiSession).where(IdeaAiSession.id == session_id).with_for_update()
+            ).scalar_one_or_none()
+            if session is not None and session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+                session.research_recommended = False
+            job.status = AiJobStatus.SUCCEEDED.value
+            job.finished_at = utcnow()
+            job.locked_at = None
+            job.lease_until = None
+            db.commit()
+            return
+
+    # Refinement phase
+    run.status = WebResearchRunStatus.REFINING.value
+    db.commit()
+
+    evidence_db = list(
+        db.scalars(
+            select(WebEvidence)
+            .where(WebEvidence.research_run_id == run_id)
+            .order_by(WebEvidence.rank.asc())
+        )
+    )
+    evidence_inputs = [
+        EvidenceInput(
+            evidence_id=ev.id,
+            title=ev.title,
+            source=ev.source_name,
+            published_at=ev.published_at.isoformat() if ev.published_at else None,
+            snippet=ev.snippet,
+        )
+        for ev in evidence_db
+    ]
+
+    from app.llm.research_schemas import EvidenceRefinementRequest
+
+    refine_request = EvidenceRefinementRequest(
+        input_text=session.input_text,
+        base_draft=base_draft,
+        base_provenance=base_provenance,
+        user_edited_fields=user_edited,
+        evidence=evidence_inputs,
+    )
+
+    refine_error: LlmError | None = None
+    refine_result = None
+    try:
+        refine_result = provider.refine_idea_with_evidence(refine_request)
+        valid_ids = {str(ev.id) for ev in evidence_db}
+        refine_result = validate_refinement_result(
+            refine_result,
+            base_draft=base_draft,
+            user_edited_fields=user_edited,
+            valid_evidence_ids=valid_ids,
+        )
+    except LlmError as exc:
+        refine_error = exc
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "unexpected_research_refine_error job_id=%s run_id=%s category=%s",
+            job_id,
+            run_id,
+            type(exc).__name__,
+        )
+        refine_error = LlmUnavailableError()
+
+    now = utcnow()
+    job = db.execute(select(AiJob).where(AiJob.id == job_id).with_for_update()).scalar_one_or_none()
+    if job is None or not _job_owned_by_worker(job, worker_id=worker_id, now=now):
+        db.rollback()
+        return
+
+    run = db.execute(
+        select(WebResearchRun).where(WebResearchRun.id == run_id).with_for_update()
+    ).scalar_one_or_none()
+    session = db.execute(
+        select(IdeaAiSession).where(IdeaAiSession.id == session_id).with_for_update()
+    ).scalar_one_or_none()
+
+    if run is None or session is None or session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.locked_at = None
+        job.lease_until = None
+        job.last_error_code = "AI_SESSION_INVALID_STATE"
+        job.last_error_message = "Session state changed during research."
+        db.commit()
+        return
+
+    if refine_error is not None:
+        _apply_web_research_failure(
+            db,
+            job=job,
+            run=run,
+            error=refine_error,
+            settings=cfg,
+            failure_phase="REFINE",
+        )
+        db.commit()
+        return
+
+    assert refine_result is not None
+    merged_draft = dict(base_draft)
+    for field in RESEARCH_REFINABLE_FIELDS:
+        if field in refine_result.draft:
+            merged_draft[field] = refine_result.draft[field]
+
+    merged_provenance = merge_refinement_provenance(
+        base_provenance=base_provenance,
+        base_draft=base_draft,
+        refined_draft=merged_draft,
+        evidence_links=refine_result.evidence_links,
+        user_edited_fields=user_edited,
+    )
+    web_research_service.update_evidence_related_fields(
+        db, run_id=run.id, evidence_links=refine_result.evidence_links
+    )
+
+    session.draft_payload = merged_draft
+    session.field_provenance = merged_provenance
+    session.research_recommended = False
+
+    run.status = WebResearchRunStatus.READY.value
+    run.research_summary = refine_result.research_summary
+    run.llm_provider = getattr(provider, "provider_name", "openai_compatible")
+    run.llm_model = getattr(provider, "model_name", None)
+    run.prompt_version = IDEA_RESEARCH_REFINE_PROMPT_VERSION
+    run.completed_at = utcnow()
+    run.failure_phase = None
+    run.failure_code = None
+    run.failure_message = None
+
+    job.status = AiJobStatus.SUCCEEDED.value
+    job.finished_at = utcnow()
+    job.locked_at = None
+    job.lease_until = None
+    job.last_error_code = None
+    job.last_error_message = None
+    db.commit()
+    logger.info(
+        "web_research_job_succeeded job_id=%s run_id=%s result_count=%s",
+        job.id,
+        run.id,
+        run.result_count,
+    )
+
+
 def process_claimed_job(
     db: Session,
     *,
     job_id: UUID,
     worker_id: str,
     provider: LlmProvider,
+    search_provider: WebSearchProvider | None = None,
     settings: Settings | None = None,
 ) -> None:
-    """Run LLM outside prior claim txn; persist only if lease ownership holds."""
+    """Run LLM / Web Search outside prior claim txn; persist only if lease holds."""
     cfg = settings or get_settings()
     job = db.get(AiJob, job_id)
     if job is None or job.status != AiJobStatus.RUNNING.value:
         return
     if job.worker_id != worker_id:
+        return
+
+    if job.job_type == AiJobType.WEB_RESEARCH.value:
+        search = search_provider or get_web_search_provider(cfg)
+        process_web_research_job(
+            db,
+            job_id=job_id,
+            worker_id=worker_id,
+            provider=provider,
+            search_provider=search,
+            settings=cfg,
+        )
         return
 
     session = db.get(IdeaAiSession, job.session_id)
@@ -352,6 +785,7 @@ def run_once(
     *,
     session_factory: sessionmaker[Session] | None = None,
     provider: LlmProvider | None = None,
+    search_provider: WebSearchProvider | None = None,
     settings: Settings | None = None,
     worker_id: str | None = None,
     recover: bool = True,
@@ -361,7 +795,15 @@ def run_once(
     factory = session_factory or get_session_factory()
     wid = worker_id or make_worker_id()
     owns_provider = provider is None
+    owns_search = search_provider is None
     llm = provider or get_llm_provider(cfg)
+    search: WebSearchProvider | None = search_provider
+    if search is None and cfg.web_search_api_url.strip():
+        try:
+            search = get_web_search_provider(cfg)
+            owns_search = True
+        except Exception:  # noqa: BLE001
+            search = None
 
     try:
         db = factory()
@@ -372,8 +814,43 @@ def run_once(
             if job is None:
                 return False
             job_id = job.id
+            job_type = job.job_type
         finally:
             db.close()
+
+        if job_type == AiJobType.WEB_RESEARCH.value and search is None:
+            db_fail = factory()
+            try:
+                job_row = db_fail.execute(
+                    select(AiJob).where(AiJob.id == job_id).with_for_update()
+                ).scalar_one_or_none()
+                run_row = (
+                    db_fail.get(WebResearchRun, job_row.research_run_id)
+                    if job_row and job_row.research_run_id
+                    else None
+                )
+                if job_row is not None:
+                    from app.web_search.exceptions import WebSearchConfigurationError
+
+                    err = WebSearchConfigurationError()
+                    if run_row is not None:
+                        _apply_web_research_failure(
+                            db_fail,
+                            job=job_row,
+                            run=run_row,
+                            error=err,
+                            settings=cfg,
+                            failure_phase="SEARCH",
+                        )
+                    else:
+                        job_row.status = AiJobStatus.FAILED.value
+                        job_row.finished_at = utcnow()
+                        job_row.last_error_code = err.code
+                        job_row.last_error_message = err.safe_message
+                    db_fail.commit()
+            finally:
+                db_fail.close()
+            return True
 
         db2 = factory()
         try:
@@ -382,6 +859,7 @@ def run_once(
                 job_id=job_id,
                 worker_id=wid,
                 provider=llm,
+                search_provider=search,
                 settings=cfg,
             )
             return True
@@ -392,6 +870,10 @@ def run_once(
             close = getattr(llm, "close", None)
             if callable(close):
                 close()
+        if owns_search and search is not None:
+            close_search = getattr(search, "close", None)
+            if callable(close_search):
+                close_search()
 
 
 class AiWorker:
@@ -435,12 +917,19 @@ class AiWorker:
     def _loop(self) -> None:
         cfg = self._settings or get_settings()
         provider = self._provider_factory()
+        search_provider: WebSearchProvider | None = None
+        if cfg.web_search_api_url.strip():
+            try:
+                search_provider = get_web_search_provider(cfg)
+            except Exception:  # noqa: BLE001
+                search_provider = None
         try:
             while not self._stop.is_set():
                 try:
                     did_work = run_once(
                         session_factory=self._session_factory,
                         provider=provider,
+                        search_provider=search_provider,
                         settings=cfg,
                         worker_id=self.worker_id,
                         recover=True,
@@ -458,3 +947,7 @@ class AiWorker:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
+            if search_provider is not None:
+                close_search = getattr(search_provider, "close", None)
+                if callable(close_search):
+                    close_search()
