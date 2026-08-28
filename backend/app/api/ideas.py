@@ -134,7 +134,23 @@ def patch_idea(
             idea_id=idea_id,
             user_id=ctx.user.id,
         )
+        old_assignee_id = idea.assignee_id
         idea = idea_service.update_idea(db, idea=idea, access=access, payload=body)
+        if "assignee_id" in body.model_fields_set:
+            from app.services import notification as notification_service
+
+            if (
+                idea.assignee_id is not None
+                and idea.assignee_id != old_assignee_id
+                and idea.assignee_id != ctx.user.id
+            ):
+                notification_service.emit_assigned(
+                    db,
+                    workspace_id=ctx.workspace.id,
+                    idea=idea,
+                    assignee_id=idea.assignee_id,
+                    actor_id=ctx.user.id,
+                )
         db.commit()
         db.refresh(idea)
         share = idea_access.get_idea_share(db, idea.id, ctx.user.id)

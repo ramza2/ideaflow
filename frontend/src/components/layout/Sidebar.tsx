@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { NavLink, useNavigate } from "react-router";
+import { useCallback, useEffect, useState } from "react";
+import { NavLink, useLocation } from "react-router";
 import { clsx } from "clsx";
 import {
   Home,
@@ -11,6 +11,8 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
+import { getReviewInboxCounts } from "../../api/reviews";
+import { REVIEW_COUNTS_CHANGED_EVENT } from "../../utils/collaboration";
 
 interface SidebarProps {
   workspaceId: string;
@@ -18,10 +20,35 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
-const reviewCount = 0;
-
 export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
+  const location = useLocation();
+  const [reviewCount, setReviewCount] = useState(0);
   const base = `/w/${workspaceId}`;
+
+  const loadReviewCount = useCallback(async () => {
+    if (!workspaceId) {
+      setReviewCount(0);
+      return;
+    }
+    try {
+      const counts = await getReviewInboxCounts(workspaceId);
+      setReviewCount(counts.pending_total);
+    } catch {
+      setReviewCount(0);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void loadReviewCount();
+  }, [loadReviewCount, location.pathname]);
+
+  useEffect(() => {
+    function onCountsChanged() {
+      void loadReviewCount();
+    }
+    window.addEventListener(REVIEW_COUNTS_CHANGED_EVENT, onCountsChanged);
+    return () => window.removeEventListener(REVIEW_COUNTS_CHANGED_EVENT, onCountsChanged);
+  }, [loadReviewCount]);
 
   const navItems = [
     { label: "홈", icon: Home, to: `${base}/home` },
@@ -40,7 +67,7 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
     <aside
       className={clsx(
         "flex flex-col bg-white border-r border-[rgba(0,0,0,0.07)] transition-all duration-200 shrink-0",
-        collapsed ? "w-[72px]" : "w-[240px]"
+        collapsed ? "w-[72px]" : "w-[240px]",
       )}
     >
       <nav className="flex-1 py-3 px-2 space-y-0.5">
@@ -50,11 +77,11 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
             to={item.to}
             className={({ isActive }) =>
               clsx(
-                "flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm font-medium transition-colors group",
+                "flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm font-medium transition-colors group relative",
                 isActive
                   ? "bg-[#ede9fe] text-[#4f46e5]"
                   : "text-[#6b6b80] hover:bg-[#f4f4f8] hover:text-[#111118]",
-                collapsed && "justify-center px-0"
+                collapsed && "justify-center px-0",
               )
             }
             title={collapsed ? item.label : undefined}
@@ -86,7 +113,7 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
               isActive
                 ? "bg-[#ede9fe] text-[#4f46e5]"
                 : "text-[#6b6b80] hover:bg-[#f4f4f8] hover:text-[#111118]",
-              collapsed && "justify-center px-0"
+              collapsed && "justify-center px-0",
             )
           }
           title={collapsed ? "도움말" : undefined}
@@ -95,10 +122,11 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
           {!collapsed && <span>도움말</span>}
         </NavLink>
         <button
+          type="button"
           onClick={onToggle}
           className={clsx(
             "w-full flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm text-[#6b6b80] hover:bg-[#f4f4f8] hover:text-[#111118] transition-colors",
-            collapsed && "justify-center px-0"
+            collapsed && "justify-center px-0",
           )}
           title={collapsed ? "펼치기" : undefined}
         >

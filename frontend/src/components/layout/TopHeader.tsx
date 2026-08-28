@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, FormEvent } from "react";
+import { useState, useRef, useEffect, FormEvent, useCallback } from "react";
 import { useNavigate } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -15,16 +15,23 @@ import {
   User,
   Shield,
 } from "lucide-react";
-import { MOCK_NOTIFICATIONS } from "../../mocks/notifications";
 import { Avatar } from "../common/Avatar";
 import { Button } from "../common/Button";
 import { toast } from "../common/Toast";
 import { useAuth } from "../../auth/AuthProvider";
 import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import { createTeamWorkspace } from "../../api/workspaces";
+import {
+  getNotificationUnreadCount,
+  listNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "../../api/notifications";
 import { apiErrorMessage } from "../../api/client";
 import { toDisplayUser } from "../../utils/avatar";
 import { workspaceIcon } from "../../utils/mappers";
+import { notificationBody, notificationTitle } from "../../utils/collaboration";
+import type { NotificationItem } from "../../types/api";
 
 interface TopHeaderProps {
   workspaceId: string;
@@ -44,10 +51,99 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   const [globalSearch, setGlobalSearch] = useState("");
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [markingAll, setMarkingAll] = useState(false);
 
   const ws = workspaces.find((w) => w.id === workspaceId);
   const displayUser = user ? toDisplayUser({ id: user.id, name: user.name, email: user.email }) : null;
-  const unreadCount = MOCK_NOTIFICATIONS.filter((n) => !n.read).length;
+
+  const loadUnreadCount = useCallback(async () => {
+    if (!workspaceId) {
+      setUnreadCount(0);
+      return;
+    }
+    try {
+      const data = await getNotificationUnreadCount(workspaceId);
+      setUnreadCount(data.count);
+    } catch {
+      setUnreadCount(0);
+    }
+  }, [workspaceId]);
+
+  const loadNotifications = useCallback(async () => {
+    if (!workspaceId) return;
+    setNotifLoading(true);
+    try {
+      const [list, countData] = await Promise.all([
+        listNotifications(workspaceId, { limit: 20 }),
+        getNotificationUnreadCount(workspaceId),
+      ]);
+      setNotifications(list.items);
+      setUnreadCount(countData.count);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "알림을 불러오지 못했습니다."));
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void loadUnreadCount();
+  }, [loadUnreadCount]);
+
+  useEffect(() => {
+    if (notifOpen) {
+      void loadNotifications();
+    }
+  }, [notifOpen, loadNotifications]);
+
+  async function handleNotificationClick(n: NotificationItem) {
+    if (!workspaceId) return;
+    if (!n.read) {
+      try {
+        await markNotificationRead(workspaceId, n.id);
+        setNotifications((prev) =>
+          prev.map((item) => (item.id === n.id ? { ...item, read: true } : item)),
+        );
+        setUnreadCount((c) => Math.max(0, c - 1));
+      } catch {
+        /* navigate anyway */
+      }
+    }
+    setNotifOpen(false);
+    const ideaId = n.idea?.id;
+    switch (n.type) {
+      case "REVIEW_REQUESTED":
+        navigate(`/w/${workspaceId}/reviews`);
+        break;
+      case "COMMENT_ADDED":
+      case "MENTION":
+        if (ideaId) navigate(`/w/${workspaceId}/ideas/${ideaId}?tab=discussion`);
+        break;
+      case "REVIEW_COMPLETED":
+      case "ASSIGNED":
+        if (ideaId) navigate(`/w/${workspaceId}/ideas/${ideaId}`);
+        break;
+      default:
+        break;
+    }
+  }
+
+  async function handleMarkAllRead() {
+    if (!workspaceId || unreadCount === 0) return;
+    setMarkingAll(true);
+    try {
+      await markAllNotificationsRead(workspaceId);
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setUnreadCount(0);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "모두 읽음 처리에 실패했습니다."));
+    } finally {
+      setMarkingAll(false);
+    }
+  }
 
   const wsRef = useRef<HTMLDivElement>(null);
   const createRef = useRef<HTMLDivElement>(null);
@@ -243,24 +339,47 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
             <div className="absolute top-full right-0 mt-1 w-80 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg z-50">
               <div className="flex items-center justify-between px-4 py-3 border-b border-[rgba(0,0,0,0.06)]">
                 <p className="text-sm font-semibold text-[#111118]">알림</p>
-                <button className="text-xs text-[#4f46e5] hover:underline">모두 읽음</button>
+                <button
+                  type="button"
+                  className="text-xs text-[#4f46e5] hover:underline disabled:opacity-50"
+                  disabled={markingAll || unreadCount === 0}
+                  onClick={() => void handleMarkAllRead()}
+                >
+                  모두 읽음
+                </button>
               </div>
               <div className="max-h-80 overflow-y-auto">
-                {MOCK_NOTIFICATIONS.map((n) => (
-                  <div
-                    key={n.id}
-                    className={clsx(
-                      "px-4 py-3 border-b border-[rgba(0,0,0,0.04)] hover:bg-[#f8f8fb] cursor-pointer",
-                      !n.read && "bg-[#f5f3ff]/50"
-                    )}
-                  >
-                    <p className="text-sm font-medium text-[#111118] mb-0.5">{n.title}</p>
-                    <p className="text-xs text-[#6b6b80] line-clamp-2">{n.body}</p>
-                    {!n.read && (
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#4f46e5] mt-1.5" />
-                    )}
-                  </div>
-                ))}
+                {notifLoading ? (
+                  <p className="px-4 py-6 text-sm text-[#6b6b80]">불러오는 중...</p>
+                ) : notifications.length === 0 ? (
+                  <p className="px-4 py-6 text-sm text-[#6b6b80]">알림이 없습니다.</p>
+                ) : (
+                  notifications.map((n) => (
+                    <div
+                      key={n.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => void handleNotificationClick(n)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") void handleNotificationClick(n);
+                      }}
+                      className={clsx(
+                        "px-4 py-3 border-b border-[rgba(0,0,0,0.04)] hover:bg-[#f8f8fb] cursor-pointer",
+                        !n.read && "bg-[#f5f3ff]/50",
+                      )}
+                    >
+                      <p className="text-sm font-medium text-[#111118] mb-0.5">
+                        {notificationTitle(n.type, n.actor?.name)}
+                      </p>
+                      <p className="text-xs text-[#6b6b80] line-clamp-2">
+                        {notificationBody(n.idea?.idea_code, n.idea?.title)}
+                      </p>
+                      {!n.read && (
+                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#4f46e5] mt-1.5" />
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           )}
