@@ -15,9 +15,7 @@ from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.session import reset_engine
 from app.main import app
-from app.models.collaboration import Notification
 from app.models.enums import (
-    IdeaVisibility,
     SystemRole,
     UserStatus,
     WorkspaceMemberStatus,
