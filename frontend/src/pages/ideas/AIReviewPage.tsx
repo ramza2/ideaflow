@@ -47,7 +47,7 @@ interface EditableField {
   key: DraftKey;
   label: string;
   value: string;
-  source: SourceBadgeType;
+  source: SourceBadgeType | null;
   multiline?: boolean;
 }
 
@@ -78,10 +78,11 @@ function provenanceFor(
   fieldProvenance: Record<string, AiFieldProvenance> | null | undefined,
   key: string,
   edited: Set<string>,
-): SourceBadgeType {
+): SourceBadgeType | null {
   if (edited.has(key)) return "user_edited";
   const p = fieldProvenance?.[key];
-  const raw = p?.final_source ?? p?.source ?? p?.original_source;
+  if (!p) return null;
+  const raw = p.final_source ?? p.source ?? p.original_source;
   return mapProvenanceSource(raw);
 }
 
@@ -720,19 +721,21 @@ export function AIReviewPage() {
               {provenanceEntries.length > 0 && (
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-[#6b6b80]">필드 출처 요약</p>
-                  {provenanceEntries.map(([field, p]) => (
-                    <div
-                      key={field}
-                      className="flex items-center justify-between gap-2 text-xs"
-                    >
-                      <span className="text-[#9ca3af] truncate">{field}</span>
-                      <SourceBadge
-                        type={mapProvenanceSource(
-                          p.final_source ?? p.source ?? p.original_source,
-                        )}
-                      />
-                    </div>
-                  ))}
+                  {provenanceEntries.map(([field, p]) => {
+                    const badge = mapProvenanceSource(
+                      p.final_source ?? p.source ?? p.original_source,
+                    );
+                    if (!badge) return null;
+                    return (
+                      <div
+                        key={field}
+                        className="flex items-center justify-between gap-2 text-xs"
+                      >
+                        <span className="text-[#9ca3af] truncate">{field}</span>
+                        <SourceBadge type={badge} />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -869,7 +872,7 @@ function FieldSection({
                 <span className="text-xs font-semibold text-[#6b6b80]">
                   {field.label}
                 </span>
-                <SourceBadge type={field.source} />
+                {field.source && <SourceBadge type={field.source} />}
                 {!alwaysEdit && (
                   <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button

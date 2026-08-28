@@ -58,11 +58,11 @@ const router = createBrowserRouter([
               {
                 // Legacy without sessionId — no mock workflow
                 path: "ideas/new/ai/analyzing",
-                element: <Navigate to="../ai" replace />,
+                element: <Navigate to=".." relative="path" replace />,
               },
               {
                 path: "ideas/new/ai/review",
-                element: <Navigate to="../ai" replace />,
+                element: <Navigate to=".." relative="path" replace />,
               },
               { path: "ideas/:ideaId", element: <IdeaDetailPage /> },
               { path: "ideas/:ideaId/edit", element: <IdeaEditPage /> },

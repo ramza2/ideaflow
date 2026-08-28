@@ -1,10 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAiSession } from "../api/aiSessions";
 import { apiErrorMessage, ApiError } from "../api/client";
-import type { AiSession, IdeaVisibility } from "../types/api";
+import type { AiSession, AiSessionStatus, IdeaVisibility } from "../types/api";
 import type { SourceBadgeType } from "../types";
 
 const DEFAULT_POLL_MS = 1800;
+
+export function sessionRequestKey(
+  workspaceId: string | undefined,
+  sessionId: string | undefined,
+): string | null {
+  if (!workspaceId || !sessionId) return null;
+  return `${workspaceId}:${sessionId}`;
+}
+
+export function shouldApplySessionResponse(
+  activeKey: string | null,
+  requestKey: string,
+  cancelled: boolean,
+): boolean {
+  return !cancelled && activeKey === requestKey;
+}
+
+export function shouldContinuePolling(status: AiSessionStatus | null): boolean {
+  return status === "PROCESSING";
+}
 
 export function useAiSession(
   workspaceId: string | undefined,
@@ -19,9 +39,11 @@ export function useAiSession(
   const [error, setError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
 
+  const activeKeyRef = useRef<string | null>(null);
+  const inFlightKeyRef = useRef<string | null>(null);
+  const latestStatusRef = useRef<AiSessionStatus | null>(null);
   const cancelledRef = useRef(false);
   const timerRef = useRef<number | null>(null);
-  const inFlightRef = useRef(false);
   const hasSessionRef = useRef(false);
 
   const clearTimer = useCallback(() => {
@@ -31,60 +53,128 @@ export function useAiSession(
     }
   }, []);
 
-  const applySession = useCallback((next: AiSession) => {
+  const applySession = useCallback((next: AiSession, requestKey: string) => {
+    if (!shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+      return;
+    }
     hasSessionRef.current = true;
+    latestStatusRef.current = next.status;
     setSession(next);
     setError(null);
     setPollError(null);
   }, []);
 
-  const fetchOnce = useCallback(async (): Promise<AiSession | null> => {
-    if (!workspaceId || !sessionId) return null;
-    if (inFlightRef.current) return null;
-    inFlightRef.current = true;
-    try {
-      const next = await getAiSession(workspaceId, sessionId);
-      if (cancelledRef.current) return null;
-      applySession(next);
-      return next;
-    } catch (err) {
-      if (cancelledRef.current) return null;
-      const message = apiErrorMessage(err, "AI 세션을 불러오지 못했습니다.");
-      if (err instanceof ApiError && err.status === 404) {
-        setError(
-          err.code === "AI_SESSION_NOT_FOUND"
-            ? "존재하지 않거나 접근할 수 없는 AI 작업입니다."
-            : message,
-        );
-        setSession(null);
-        hasSessionRef.current = false;
-      } else if (hasSessionRef.current) {
-        setPollError(message);
-      } else {
-        setError(message);
+  const fetchOnce = useCallback(
+    async (requestKey: string): Promise<AiSession | null> => {
+      if (!workspaceId || !sessionId) return null;
+      if (inFlightKeyRef.current === requestKey) return null;
+
+      inFlightKeyRef.current = requestKey;
+      try {
+        const next = await getAiSession(workspaceId, sessionId);
+        if (!shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+          return null;
+        }
+        applySession(next, requestKey);
+        return next;
+      } catch (err) {
+        if (!shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+          return null;
+        }
+        const message = apiErrorMessage(err, "AI 세션을 불러오지 못했습니다.");
+        if (err instanceof ApiError && err.status === 404) {
+          latestStatusRef.current = null;
+          setError(
+            err.code === "AI_SESSION_NOT_FOUND"
+              ? "존재하지 않거나 접근할 수 없는 AI 작업입니다."
+              : message,
+          );
+          setSession(null);
+          hasSessionRef.current = false;
+        } else if (hasSessionRef.current) {
+          setPollError(message);
+        } else {
+          setError(message);
+        }
+        return null;
+      } finally {
+        if (inFlightKeyRef.current === requestKey) {
+          inFlightKeyRef.current = null;
+        }
       }
-      return null;
-    } finally {
-      inFlightRef.current = false;
-    }
-  }, [workspaceId, sessionId, applySession]);
+    },
+    [workspaceId, sessionId, applySession],
+  );
+
+  const startPollingLoop = useCallback(
+    (requestKey: string) => {
+      if (!pollWhenProcessing) return;
+      clearTimer();
+
+      const tick = async () => {
+        if (!shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+          return;
+        }
+        if (!shouldContinuePolling(latestStatusRef.current)) {
+          return;
+        }
+
+        const next = await fetchOnce(requestKey);
+        if (!shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+          return;
+        }
+
+        if (next) {
+          latestStatusRef.current = next.status;
+        }
+
+        if (shouldContinuePolling(latestStatusRef.current)) {
+          timerRef.current = window.setTimeout(() => {
+            void tick();
+          }, pollIntervalMs);
+        }
+      };
+
+      timerRef.current = window.setTimeout(() => {
+        void tick();
+      }, pollIntervalMs);
+    },
+    [pollWhenProcessing, pollIntervalMs, fetchOnce, clearTimer],
+  );
 
   const refresh = useCallback(async () => {
+    const requestKey = sessionRequestKey(workspaceId, sessionId);
+    if (!requestKey) return;
+
     setLoading(true);
-    await fetchOnce();
-    if (!cancelledRef.current) setLoading(false);
-  }, [fetchOnce]);
+    const next = await fetchOnce(requestKey);
+    if (shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+      setLoading(false);
+      if (next?.status === "PROCESSING") {
+        startPollingLoop(requestKey);
+      }
+    }
+  }, [workspaceId, sessionId, fetchOnce, startPollingLoop]);
+
+  const setSessionGuarded = useCallback((next: AiSession) => {
+    const requestKey = activeKeyRef.current;
+    if (!requestKey || cancelledRef.current) return;
+    applySession(next, requestKey);
+  }, [applySession]);
 
   useEffect(() => {
+    const requestKey = sessionRequestKey(workspaceId, sessionId);
+    activeKeyRef.current = requestKey;
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
     setPollError(null);
     setSession(null);
     hasSessionRef.current = false;
+    latestStatusRef.current = null;
     clearTimer();
 
-    if (!workspaceId || !sessionId) {
+    if (!requestKey) {
       setLoading(false);
       setError("AI 세션을 찾을 수 없습니다.");
       return () => {
@@ -94,8 +184,10 @@ export function useAiSession(
     }
 
     void (async () => {
-      await fetchOnce();
-      if (!cancelledRef.current) setLoading(false);
+      await fetchOnce(requestKey);
+      if (shouldApplySessionResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+        setLoading(false);
+      }
     })();
 
     return () => {
@@ -107,35 +199,28 @@ export function useAiSession(
   }, [workspaceId, sessionId]);
 
   useEffect(() => {
-    clearTimer();
     if (!pollWhenProcessing) return;
+    const requestKey = sessionRequestKey(workspaceId, sessionId);
+    if (!requestKey || requestKey !== activeKeyRef.current) return;
     if (!session || session.status !== "PROCESSING") return;
-    if (!workspaceId || !sessionId) return;
 
-    const schedule = () => {
-      timerRef.current = window.setTimeout(async () => {
-        const next = await fetchOnce();
-        if (cancelledRef.current) return;
-        if (next?.status === "PROCESSING") schedule();
-      }, pollIntervalMs);
-    };
-    schedule();
+    latestStatusRef.current = "PROCESSING";
+    startPollingLoop(requestKey);
 
     return () => clearTimer();
   }, [
     session?.status,
     session?.id,
     pollWhenProcessing,
-    pollIntervalMs,
     workspaceId,
     sessionId,
-    fetchOnce,
+    startPollingLoop,
     clearTimer,
   ]);
 
   return {
     session,
-    setSession,
+    setSession: setSessionGuarded,
     loading,
     error,
     pollError,
@@ -153,7 +238,7 @@ export function parseVisibilityParam(raw: string | null): IdeaVisibility {
 
 export function mapProvenanceSource(
   source: string | undefined | null,
-): SourceBadgeType {
+): SourceBadgeType | null {
   switch (source) {
     case "USER_INPUT":
       return "user_input";
@@ -166,7 +251,7 @@ export function mapProvenanceSource(
     case "USER_EDIT":
       return "user_edited";
     default:
-      return "llm_structured";
+      return null;
   }
 }
 
