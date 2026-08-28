@@ -92,13 +92,16 @@ def _build_actor(db: Session, actor_id: UUID | None) -> UserRef | None:
 
 
 def _to_public(db: Session, row: Notification, *, user_id: UUID) -> NotificationPublic | None:
-    if row.idea_id is not None and not _idea_readable(db, row.idea_id, user_id):
-        return None
+    if row.idea_id is not None:
+        idea = db.get(Idea, row.idea_id)
+        if idea is None or idea.deleted_at is not None:
+            return None
+        if not _idea_readable(db, row.idea_id, user_id):
+            return None
+
     if row.comment_id is not None:
         comment = db.get(IdeaComment, row.comment_id)
-        if comment is None or comment.deleted_at is not None:
-            return None
-        if row.idea_id is None or not _idea_readable(db, row.idea_id, user_id):
+        if comment is None:
             return None
 
     idea_ref = None
@@ -137,21 +140,16 @@ def list_notifications(
     if unread_only:
         base = base.where(Notification.read_at.is_(None))
 
-    rows = list(
-        db.scalars(
-            base.order_by(Notification.created_at.desc()).offset(offset).limit(limit + 50)
-        )
-    )
-    items: list[NotificationPublic] = []
+    rows = list(db.scalars(base.order_by(Notification.created_at.desc())))
+
+    visible: list[NotificationPublic] = []
     for row in rows:
         public = _to_public(db, row, user_id=user_id)
-        if public is None:
-            continue
-        items.append(public)
-        if len(items) >= limit:
-            break
+        if public is not None:
+            visible.append(public)
 
-    total = len(items)
+    total = len(visible)
+    items = visible[offset : offset + limit]
     return NotificationListResponse(items=items, total=total)
 
 

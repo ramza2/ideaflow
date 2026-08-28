@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -23,17 +23,28 @@ interface SidebarProps {
 export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
   const location = useLocation();
   const [reviewCount, setReviewCount] = useState(0);
+  const activeWorkspaceRef = useRef(workspaceId);
   const base = `/w/${workspaceId}`;
 
+  useEffect(() => {
+    activeWorkspaceRef.current = workspaceId;
+    setReviewCount(0);
+  }, [workspaceId]);
+
   const loadReviewCount = useCallback(async () => {
-    if (!workspaceId) {
-      setReviewCount(0);
+    const requestWorkspaceId = workspaceId;
+    if (!requestWorkspaceId) {
+      if (activeWorkspaceRef.current === requestWorkspaceId) {
+        setReviewCount(0);
+      }
       return;
     }
     try {
-      const counts = await getReviewInboxCounts(workspaceId);
+      const counts = await getReviewInboxCounts(requestWorkspaceId);
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setReviewCount(counts.pending_total);
     } catch {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setReviewCount(0);
     }
   }, [workspaceId]);

@@ -55,36 +55,53 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   const [notifLoading, setNotifLoading] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [markingAll, setMarkingAll] = useState(false);
+  const activeWorkspaceRef = useRef(workspaceId);
 
   const ws = workspaces.find((w) => w.id === workspaceId);
   const displayUser = user ? toDisplayUser({ id: user.id, name: user.name, email: user.email }) : null;
 
+  useEffect(() => {
+    activeWorkspaceRef.current = workspaceId;
+    setNotifications([]);
+    setUnreadCount(0);
+    setNotifOpen(false);
+  }, [workspaceId]);
+
   const loadUnreadCount = useCallback(async () => {
-    if (!workspaceId) {
-      setUnreadCount(0);
+    const requestWorkspaceId = workspaceId;
+    if (!requestWorkspaceId) {
+      if (activeWorkspaceRef.current === requestWorkspaceId) {
+        setUnreadCount(0);
+      }
       return;
     }
     try {
-      const data = await getNotificationUnreadCount(workspaceId);
+      const data = await getNotificationUnreadCount(requestWorkspaceId);
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setUnreadCount(data.count);
     } catch {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setUnreadCount(0);
     }
   }, [workspaceId]);
 
   const loadNotifications = useCallback(async () => {
-    if (!workspaceId) return;
+    const requestWorkspaceId = workspaceId;
+    if (!requestWorkspaceId) return;
     setNotifLoading(true);
     try {
       const [list, countData] = await Promise.all([
-        listNotifications(workspaceId, { limit: 20 }),
-        getNotificationUnreadCount(workspaceId),
+        listNotifications(requestWorkspaceId, { limit: 20 }),
+        getNotificationUnreadCount(requestWorkspaceId),
       ]);
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setNotifications(list.items);
       setUnreadCount(countData.count);
     } catch (err) {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       toast.error(apiErrorMessage(err, "알림을 불러오지 못했습니다."));
     } finally {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setNotifLoading(false);
     }
   }, [workspaceId]);

@@ -22,6 +22,7 @@ from app.models.enums import (
     WorkspaceRole,
     WorkspaceType,
 )
+from app.models.collaboration import IdeaCommentMention
 from app.models.idea import Idea
 from app.models.relations import IdeaShare
 from app.models.user import User
@@ -881,3 +882,153 @@ def test_assignment_notification_on_assignee_patch(client: TestClient, db: Sessi
 
     _login(client, no_access.email, "password-ok-1")
     assert all(n["type"] != "ASSIGNED" for n in client.get(_notifications_url(ws.id)).json()["items"])
+
+
+def test_comment_body_edit_preserves_mentions_no_duplicate_notification(
+    client: TestClient, db: Session
+) -> None:
+    author, author_pw = _user(db)
+    commenter, commenter_pw = _user(db)
+    mentioned, mentioned_pw = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, commenter)
+    _add_member(db, ws, mentioned)
+
+    _login(client, author.email, author_pw)
+    idea_id = _create_idea(client, ws.id, visibility="WORKSPACE")["id"]
+
+    _login(client, commenter.email, commenter_pw)
+    created = client.post(
+        _comments_url(ws.id, idea_id),
+        json={"body": "please review", "mention_user_ids": [str(mentioned.id)]},
+        headers=_headers(client),
+    )
+    assert created.status_code == 201, created.text
+    comment_id = uuid.UUID(created.json()["id"])
+
+    _login(client, mentioned.email, mentioned_pw)
+    mentions_before = [
+        n for n in client.get(_notifications_url(ws.id)).json()["items"] if n["type"] == "MENTION"
+    ]
+    assert len(mentions_before) == 1
+
+    _login(client, commenter.email, commenter_pw)
+    updated = client.patch(
+        f"{_comments_url(ws.id, idea_id)}/{comment_id}",
+        json={"body": "updated body", "mention_user_ids": [str(mentioned.id)]},
+        headers=_headers(client),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["body"] == "updated body"
+    assert len(updated.json()["mentions"]) == 1
+    assert updated.json()["mentions"][0]["id"] == str(mentioned.id)
+
+    mention_rows = db.scalars(
+        select(IdeaCommentMention).where(IdeaCommentMention.comment_id == comment_id)
+    ).all()
+    assert len(mention_rows) == 1
+    assert mention_rows[0].user_id == mentioned.id
+
+    _login(client, mentioned.email, mentioned_pw)
+    mentions_after = [
+        n for n in client.get(_notifications_url(ws.id)).json()["items"] if n["type"] == "MENTION"
+    ]
+    assert len(mentions_after) == 1
+
+
+def test_deleted_comment_notification_persists_without_body(
+    client: TestClient, db: Session
+) -> None:
+    author, author_pw = _user(db)
+    commenter, commenter_pw = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, commenter)
+
+    _login(client, author.email, author_pw)
+    idea_id = _create_idea(client, ws.id, visibility="WORKSPACE")["id"]
+
+    _login(client, commenter.email, commenter_pw)
+    created = client.post(
+        _comments_url(ws.id, idea_id),
+        json={"body": "visible comment"},
+        headers=_headers(client),
+    )
+    assert created.status_code == 201, created.text
+    comment_id = created.json()["id"]
+
+    _login(client, author.email, author_pw)
+    notes_before = client.get(_notifications_url(ws.id)).json()["items"]
+    added = [n for n in notes_before if n["type"] == "COMMENT_ADDED"]
+    assert len(added) == 1
+    note_id = added[0]["id"]
+    assert added[0]["idea"]["id"] == idea_id
+    assert "body" not in added[0]
+
+    _login(client, commenter.email, commenter_pw)
+    deleted = client.delete(
+        f"{_comments_url(ws.id, idea_id)}/{comment_id}",
+        headers=_headers(client),
+    )
+    assert deleted.status_code == 204
+
+    _login(client, author.email, author_pw)
+    notes_after = client.get(_notifications_url(ws.id)).json()["items"]
+    kept = [n for n in notes_after if n["id"] == note_id]
+    assert len(kept) == 1
+    assert kept[0]["type"] == "COMMENT_ADDED"
+    assert kept[0]["idea"]["title"]
+    assert client.get(f"{_notifications_url(ws.id)}/unread-count").json()["count"] == 1
+
+    marked = client.post(
+        f"{_notifications_url(ws.id)}/{note_id}/read",
+        headers=_headers(client),
+    )
+    assert marked.status_code == 200
+    assert marked.json()["read"] is True
+
+
+def test_notification_pagination_after_acl_filtering(
+    client: TestClient, db: Session
+) -> None:
+    author, author_pw = _user(db)
+    recipient, recipient_pw = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, recipient)
+
+    _login(client, author.email, author_pw)
+    visible_idea_id = None
+    hidden_idea_ids: list[str] = []
+    for i in range(81):
+        idea = _create_idea(
+            client,
+            ws.id,
+            title=f"idea-{i}",
+            visibility="SELECTED_USERS",
+            shares=[{"user_id": str(recipient.id), "permission": "READ"}],
+        )
+        client.post(
+            _reviews_url(ws.id, idea["id"]),
+            json={"reviewer_id": str(recipient.id), "kind": "GENERAL"},
+            headers=_headers(client),
+        )
+        if i == 0:
+            visible_idea_id = idea["id"]
+        else:
+            hidden_idea_ids.append(idea["id"])
+
+    for hidden_id in hidden_idea_ids:
+        client.put(
+            f"{_ideas_url(ws.id)}/{hidden_id}/shares",
+            json={"shares": []},
+            headers=_headers(client),
+        )
+
+    _login(client, recipient.email, recipient_pw)
+    unread = client.get(f"{_notifications_url(ws.id)}/unread-count").json()["count"]
+    assert unread == 1
+
+    listed = client.get(_notifications_url(ws.id), params={"limit": 20, "offset": 0}).json()
+    assert listed["total"] == 1
+    assert len(listed["items"]) == 1
+    assert listed["items"][0]["idea"]["id"] == visible_idea_id
+    assert listed["items"][0]["type"] == "REVIEW_REQUESTED"

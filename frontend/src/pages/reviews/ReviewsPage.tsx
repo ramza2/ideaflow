@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -24,6 +24,7 @@ import {
   REVIEW_RESULT_OPTIONS,
   dispatchReviewCountsChanged,
 } from "../../utils/collaboration";
+import { inboxRequestKey, shouldApplyRequest } from "../../utils/requestFence";
 import type {
   ReviewInboxCounts,
   ReviewInboxItem,
@@ -71,8 +72,19 @@ export function ReviewsPage() {
   const [completionNote, setCompletionNote] = useState("");
   const [suggestedDate, setSuggestedDate] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const activeRequestKeyRef = useRef(inboxRequestKey(workspaceId, tab));
+
+  useEffect(() => {
+    const requestKey = inboxRequestKey(workspaceId, tab);
+    activeRequestKeyRef.current = requestKey;
+    setItems([]);
+    setCounts(null);
+    setLoading(true);
+    setError(null);
+  }, [workspaceId, tab]);
 
   const loadInbox = useCallback(async () => {
+    const requestKey = inboxRequestKey(workspaceId, tab);
     if (!workspaceId) return;
     setLoading(true);
     setError(null);
@@ -81,12 +93,15 @@ export function ReviewsPage() {
         getReviewInbox(workspaceId, tab),
         getReviewInboxCounts(workspaceId),
       ]);
+      if (!shouldApplyRequest(activeRequestKeyRef.current, requestKey)) return;
       setItems(inbox.items);
       setCounts(countData);
     } catch (err) {
+      if (!shouldApplyRequest(activeRequestKeyRef.current, requestKey)) return;
       setError(apiErrorMessage(err, "검토함을 불러오지 못했습니다."));
       setItems([]);
     } finally {
+      if (!shouldApplyRequest(activeRequestKeyRef.current, requestKey)) return;
       setLoading(false);
     }
   }, [workspaceId, tab]);
@@ -148,8 +163,24 @@ export function ReviewsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" icon={<Filter className="w-3.5 h-3.5" />}>필터</Button>
-            <Button variant="ghost" size="sm" icon={<SlidersHorizontal className="w-3.5 h-3.5" />}>정렬</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Filter className="w-3.5 h-3.5" />}
+              disabled
+              title="추후 제공됩니다."
+            >
+              필터
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<SlidersHorizontal className="w-3.5 h-3.5" />}
+              disabled
+              title="추후 제공됩니다."
+            >
+              정렬
+            </Button>
           </div>
         </div>
         <div className="flex gap-0.5 -mb-px overflow-x-auto">
@@ -288,7 +319,9 @@ export function ReviewsPage() {
                       )}
                       <button
                         type="button"
-                        className="w-7 h-7 flex items-center justify-center rounded-lg text-[#9ca3af] hover:bg-[#f4f4f8]"
+                        disabled
+                        title="추후 제공됩니다."
+                        className="w-7 h-7 flex items-center justify-center rounded-lg text-[#9ca3af] opacity-50 cursor-not-allowed"
                       >
                         <ChevronDown className="w-4 h-4" />
                       </button>
