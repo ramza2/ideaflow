@@ -140,7 +140,7 @@ class CommentCreateRequest(BaseModel):
 
 class CommentUpdateRequest(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
-    mention_user_ids: list[UUID] = Field(default_factory=list)
+    mention_user_ids: list[UUID] | None = None
 
     @field_validator("body")
     @classmethod

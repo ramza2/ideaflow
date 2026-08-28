@@ -65,6 +65,7 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
     setNotifications([]);
     setUnreadCount(0);
     setNotifOpen(false);
+    setMarkingAll(false);
   }, [workspaceId]);
 
   const loadUnreadCount = useCallback(async () => {
@@ -117,31 +118,34 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   }, [notifOpen, loadNotifications]);
 
   async function handleNotificationClick(n: NotificationItem) {
-    if (!workspaceId) return;
+    const requestWorkspaceId = workspaceId;
+    if (!requestWorkspaceId) return;
     if (!n.read) {
       try {
-        await markNotificationRead(workspaceId, n.id);
+        await markNotificationRead(requestWorkspaceId, n.id);
+        if (activeWorkspaceRef.current !== requestWorkspaceId) return;
         setNotifications((prev) =>
           prev.map((item) => (item.id === n.id ? { ...item, read: true } : item)),
         );
         setUnreadCount((c) => Math.max(0, c - 1));
       } catch {
-        /* navigate anyway */
+        if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       }
     }
+    if (activeWorkspaceRef.current !== requestWorkspaceId) return;
     setNotifOpen(false);
     const ideaId = n.idea?.id;
     switch (n.type) {
       case "REVIEW_REQUESTED":
-        navigate(`/w/${workspaceId}/reviews`);
+        navigate(`/w/${requestWorkspaceId}/reviews`);
         break;
       case "COMMENT_ADDED":
       case "MENTION":
-        if (ideaId) navigate(`/w/${workspaceId}/ideas/${ideaId}?tab=discussion`);
+        if (ideaId) navigate(`/w/${requestWorkspaceId}/ideas/${ideaId}?tab=discussion`);
         break;
       case "REVIEW_COMPLETED":
       case "ASSIGNED":
-        if (ideaId) navigate(`/w/${workspaceId}/ideas/${ideaId}`);
+        if (ideaId) navigate(`/w/${requestWorkspaceId}/ideas/${ideaId}`);
         break;
       default:
         break;
@@ -149,15 +153,19 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   }
 
   async function handleMarkAllRead() {
-    if (!workspaceId || unreadCount === 0) return;
+    const requestWorkspaceId = workspaceId;
+    if (!requestWorkspaceId || unreadCount === 0) return;
     setMarkingAll(true);
     try {
-      await markAllNotificationsRead(workspaceId);
+      await markAllNotificationsRead(requestWorkspaceId);
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
       setUnreadCount(0);
     } catch (err) {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       toast.error(apiErrorMessage(err, "모두 읽음 처리에 실패했습니다."));
     } finally {
+      if (activeWorkspaceRef.current !== requestWorkspaceId) return;
       setMarkingAll(false);
     }
   }

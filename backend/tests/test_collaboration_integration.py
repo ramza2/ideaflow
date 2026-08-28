@@ -884,7 +884,7 @@ def test_assignment_notification_on_assignee_patch(client: TestClient, db: Sessi
     assert all(n["type"] != "ASSIGNED" for n in client.get(_notifications_url(ws.id)).json()["items"])
 
 
-def test_comment_body_edit_preserves_mentions_no_duplicate_notification(
+def test_comment_patch_omit_preserves_mentions_no_duplicate_notification(
     client: TestClient, db: Session
 ) -> None:
     author, author_pw = _user(db)
@@ -915,7 +915,7 @@ def test_comment_body_edit_preserves_mentions_no_duplicate_notification(
     _login(client, commenter.email, commenter_pw)
     updated = client.patch(
         f"{_comments_url(ws.id, idea_id)}/{comment_id}",
-        json={"body": "updated body", "mention_user_ids": [str(mentioned.id)]},
+        json={"body": "updated body"},
         headers=_headers(client),
     )
     assert updated.status_code == 200, updated.text
@@ -934,6 +934,95 @@ def test_comment_body_edit_preserves_mentions_no_duplicate_notification(
         n for n in client.get(_notifications_url(ws.id)).json()["items"] if n["type"] == "MENTION"
     ]
     assert len(mentions_after) == 1
+
+
+def test_comment_patch_explicit_empty_removes_mentions(
+    client: TestClient, db: Session
+) -> None:
+    author, author_pw = _user(db)
+    commenter, commenter_pw = _user(db)
+    mentioned, _ = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, commenter)
+    _add_member(db, ws, mentioned)
+
+    _login(client, author.email, author_pw)
+    idea_id = _create_idea(client, ws.id, visibility="WORKSPACE")["id"]
+
+    _login(client, commenter.email, commenter_pw)
+    created = client.post(
+        _comments_url(ws.id, idea_id),
+        json={"body": "with mention", "mention_user_ids": [str(mentioned.id)]},
+        headers=_headers(client),
+    )
+    assert created.status_code == 201, created.text
+    comment_id = uuid.UUID(created.json()["id"])
+
+    updated = client.patch(
+        f"{_comments_url(ws.id, idea_id)}/{comment_id}",
+        json={"body": "updated again", "mention_user_ids": []},
+        headers=_headers(client),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["mentions"] == []
+
+    mention_rows = db.scalars(
+        select(IdeaCommentMention).where(IdeaCommentMention.comment_id == comment_id)
+    ).all()
+    assert mention_rows == []
+
+
+def test_comment_patch_body_only_succeeds_when_old_mention_lost_acl(
+    client: TestClient, db: Session
+) -> None:
+    author, author_pw = _user(db)
+    mentioned, mentioned_pw = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, mentioned)
+
+    _login(client, author.email, author_pw)
+    idea_id = _create_idea(
+        client,
+        ws.id,
+        visibility="SELECTED_USERS",
+        shares=[{"user_id": str(mentioned.id), "permission": "READ"}],
+    )["id"]
+
+    created = client.post(
+        _comments_url(ws.id, idea_id),
+        json={"body": "for B", "mention_user_ids": [str(mentioned.id)]},
+        headers=_headers(client),
+    )
+    assert created.status_code == 201, created.text
+    comment_id = uuid.UUID(created.json()["id"])
+
+    client.put(
+        f"{_ideas_url(ws.id)}/{idea_id}/shares",
+        json={"shares": []},
+        headers=_headers(client),
+    )
+
+    updated = client.patch(
+        f"{_comments_url(ws.id, idea_id)}/{comment_id}",
+        json={"body": "body only edit"},
+        headers=_headers(client),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["body"] == "body only edit"
+
+    mention_rows = db.scalars(
+        select(IdeaCommentMention).where(IdeaCommentMention.comment_id == comment_id)
+    ).all()
+    assert len(mention_rows) == 1
+    assert mention_rows[0].user_id == mentioned.id
+
+    _login(client, mentioned.email, mentioned_pw)
+    assert client.get(_notifications_url(ws.id)).json()["items"] == []
+    assert client.get(f"{_notifications_url(ws.id)}/unread-count").json()["count"] == 0
+    mentioned_inbox = client.get(
+        f"{_review_inbox_url(ws.id)}", params={"tab": "mentioned"}
+    ).json()
+    assert mentioned_inbox["items"] == []
 
 
 def test_deleted_comment_notification_persists_without_body(

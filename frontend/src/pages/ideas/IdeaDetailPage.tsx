@@ -252,11 +252,9 @@ export function IdeaDetailPage() {
 
   async function handleSaveEdit(commentId: string) {
     if (!workspaceId || !ideaId || !editingBody.trim()) return;
-    const current = comments.find((c) => c.id === commentId);
     try {
       const updated = await updateComment(workspaceId, ideaId, commentId, {
         body: editingBody.trim(),
-        mention_user_ids: current?.mentions.map((m) => m.id) ?? [],
       });
       setComments((prev) => prev.map((c) => (c.id === commentId ? updated : c)));
       setEditingCommentId(null);

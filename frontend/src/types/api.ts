@@ -488,7 +488,7 @@ export interface ReviewInboxCommentRef {
 }
 
 export interface ReviewInboxItem {
-  source: "REVIEW_REQUEST" | "ASSIGNED" | "MENTIONED";
+  source: "REVIEW_REQUEST" | "COMMENT" | "IDEA";
   reason: ReviewInboxTab;
   idea: ReviewInboxIdeaRef;
   review_request?: ReviewInboxReviewRef | null;
@@ -540,7 +540,7 @@ export interface CommentCreateRequest {
 
 export interface CommentUpdateRequest {
   body: string;
-  mention_user_ids?: string[];
+  mention_user_ids?: string[] | null;
 }
 
 export type NotificationType =

@@ -301,6 +301,13 @@ def update_comment(
             select(IdeaCommentMention).where(IdeaCommentMention.comment_id == comment.id)
         ).all()
     }
+
+    comment.body = payload.body
+
+    if payload.mention_user_ids is None:
+        db.flush()
+        return _to_public(db, comment, current_user_id=user_id)
+
     new_mention_ids = _validate_mentions(
         db,
         workspace_id=workspace_id,
@@ -308,7 +315,6 @@ def update_comment(
         mention_user_ids=payload.mention_user_ids,
         author_id=user_id,
     )
-    comment.body = payload.body
     _replace_mentions(db, comment.id, new_mention_ids)
 
     added = [uid for uid in new_mention_ids if uid not in existing_mentions]
