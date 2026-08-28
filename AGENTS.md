@@ -4,9 +4,9 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API (Step 6). The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider (Frontend AI pages still mock).
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider.
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, and Manual Idea CRUD use real APIs; AI/Review pages remain mock until Step 8.
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, and **AI Input/Analyzing/Review** use real APIs. Web Search/Evidence remain for later steps.
 - `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
 
 ### Frontend service
@@ -40,8 +40,9 @@ pytest
 
 ### Non-obvious behavior
 
-- **Auth / Workspace / Manual Idea flows use the real Backend** (HttpOnly session + CSRF cookie). Dev: Browser calls `http://localhost:5173/api/v1/...` via Vite proxy. Legacy route `/w/personal/*` redirects to the user's PERSONAL workspace UUID.
-- **AI Input / Analyzing / Review, Reviews inbox, notifications, and help content remain mock/prototype** until later steps.
+- **Auth / Workspace / Manual Idea / AI Session flows use the real Backend** (HttpOnly session + CSRF cookie). Dev: Browser calls `http://localhost:5173/api/v1/...` via Vite proxy. Legacy route `/w/personal/*` redirects to the user's PERSONAL workspace UUID.
+- **AI routes use session UUID:** `/w/:workspaceId/ideas/new/ai/analyzing/:sessionId` and `.../review/:sessionId`. Legacy analyzing/review without sessionId redirect to AI input (no mock workflow). Visibility preference may travel as `?visibility=PRIVATE|WORKSPACE|SELECTED_USERS` until confirm.
+- **Reviews inbox, notifications, Web Search/Evidence, and help content remain mock/prototype** until later steps.
 - Routing uses `react-router` `createBrowserRouter`. The root path `/` redirects to `/login`; the main app lives under `/w/:workspaceId/...` (workspaceId is a Backend UUID; `/w/personal/*` is legacy-compatible).
 - The Vite config includes a custom `figma:asset/` import resolver, `@` alias, and `/api` dev proxy.
 - Root `.env.example` includes `VITE_API_BASE_URL`, `VITE_AUTH_CSRF_COOKIE_NAME`, `VITE_DEV_API_PROXY_TARGET`, plus backend placeholders. Backend Settings load the repository-root `.env` (cwd-independent).

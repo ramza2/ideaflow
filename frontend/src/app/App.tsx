@@ -47,8 +47,23 @@ const router = createBrowserRouter([
               { path: "ideas", element: <IdeaListPage /> },
               { path: "ideas/new", element: <IdeaEditPage /> },
               { path: "ideas/new/ai", element: <AIInputPage /> },
-              { path: "ideas/new/ai/analyzing", element: <AIAnalyzingPage /> },
-              { path: "ideas/new/ai/review", element: <AIReviewPage /> },
+              {
+                path: "ideas/new/ai/analyzing/:sessionId",
+                element: <AIAnalyzingPage />,
+              },
+              {
+                path: "ideas/new/ai/review/:sessionId",
+                element: <AIReviewPage />,
+              },
+              {
+                // Legacy without sessionId — no mock workflow
+                path: "ideas/new/ai/analyzing",
+                element: <Navigate to=".." relative="path" replace />,
+              },
+              {
+                path: "ideas/new/ai/review",
+                element: <Navigate to=".." relative="path" replace />,
+              },
               { path: "ideas/:ideaId", element: <IdeaDetailPage /> },
               { path: "ideas/:ideaId/edit", element: <IdeaEditPage /> },
               { path: "reviews", element: <ReviewsPage /> },

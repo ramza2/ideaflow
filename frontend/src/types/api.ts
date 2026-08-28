@@ -202,3 +202,129 @@ export interface IdeaListParams {
   limit?: number;
   offset?: number;
 }
+
+/* --- Step 8: AI Session --- */
+
+export type AiSessionPurpose = "CREATE" | "REFINE" | "RESEARCH";
+
+export type AiSessionStatus =
+  | "PROCESSING"
+  | "NEEDS_CLARIFICATION"
+  | "READY_FOR_REVIEW"
+  | "CONFIRMED"
+  | "FAILED"
+  | "CANCELLED";
+
+export type AiFieldProvenanceSource =
+  | "USER_INPUT"
+  | "LLM_SUMMARY"
+  | "LLM_INFERENCE"
+  | "WEB_EVIDENCE"
+  | "USER_EDIT";
+
+export interface AiDraft {
+  title?: string | null;
+  one_line_definition?: string | null;
+  background?: string | null;
+  problem?: string | null;
+  core_concept?: string | null;
+  major_features?: string | null;
+  expected_effect?: string | null;
+  target_users?: string | null;
+  scenarios?: string | null;
+  challenges?: string | null;
+  minimum_validation?: string | null;
+  related_project?: string | null;
+  category_slug?: string | null;
+  priority?: IdeaPriority | null;
+  feasibility?: IdeaFeasibility | null;
+  tags?: string[];
+}
+
+export interface AiFieldProvenance {
+  source?: AiFieldProvenanceSource | string;
+  note?: string | null;
+  original_source?: string | null;
+  final_source?: string | null;
+}
+
+export interface AiClarifyingQuestion {
+  id: string;
+  field?: string | null;
+  question: string;
+}
+
+export interface AiClarificationAnswer {
+  question_id: string;
+  answer: string;
+}
+
+export interface AiSessionFailure {
+  code: string;
+  message: string;
+}
+
+export interface AiSessionLlm {
+  provider: string | null;
+  model: string | null;
+  prompt_version: string | null;
+}
+
+export interface AiSession {
+  id: string;
+  workspace_id: string;
+  purpose: AiSessionPurpose;
+  status: AiSessionStatus;
+  input_text: string;
+  draft: AiDraft | null;
+  field_provenance: Record<string, AiFieldProvenance> | null;
+  clarifying_questions: AiClarifyingQuestion[] | null;
+  clarification_answers: AiClarificationAnswer[] | null;
+  research_recommended: boolean;
+  research_topics: string[] | null;
+  result_idea_id: string | null;
+  failure: AiSessionFailure | null;
+  llm: AiSessionLlm;
+  created_at: string;
+  updated_at: string;
+  ready_at: string | null;
+  confirmed_at: string | null;
+}
+
+export interface AiSessionCreateRequest {
+  purpose?: AiSessionPurpose;
+  input_text: string;
+}
+
+export interface AiClarificationSubmitRequest {
+  answers: AiClarificationAnswer[];
+}
+
+export interface AiSessionConfirmRequest {
+  title: string;
+  one_line_definition?: string | null;
+  background?: string | null;
+  problem?: string | null;
+  core_concept?: string | null;
+  major_features?: string | null;
+  expected_effect?: string | null;
+  target_users?: string | null;
+  scenarios?: string | null;
+  challenges?: string | null;
+  minimum_validation?: string | null;
+  related_project?: string | null;
+  category_id?: string | null;
+  stage_id?: string | null;
+  priority?: IdeaPriority;
+  feasibility?: IdeaFeasibility;
+  visibility?: IdeaVisibility;
+  assignee_id?: string | null;
+  next_review_date?: string | null;
+  tags?: string[];
+  shares?: IdeaShareInput[] | null;
+}
+
+export interface AiSessionConfirmResponse {
+  created: boolean;
+  idea: IdeaDetail;
+}

@@ -100,6 +100,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const setCurrentWorkspaceId = useCallback(
     (id: string) => {
+      // AI session URLs are bound to workspace+session — do not carry sessionId across workspaces
+      if (/\/ideas\/new\/ai\/(analyzing|review)(\/|$)/.test(window.location.pathname)) {
+        navigate(`/w/${id}/ideas/new/ai`, { replace: true });
+        return;
+      }
       navigate(`/w/${id}/home`);
     },
     [navigate],

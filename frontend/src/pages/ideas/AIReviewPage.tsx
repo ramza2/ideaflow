@@ -1,98 +1,458 @@
-import { useState } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import { clsx } from "clsx";
 import {
   Sparkles,
   ChevronDown,
   ChevronUp,
   RefreshCw,
-  BookOpen,
   X,
   Check,
-  AlertTriangle,
-  Info,
   Pencil,
-  Save,
   ArrowLeft,
+  Loader2,
 } from "lucide-react";
 import { Button } from "../../components/common/Button";
 import { SourceBadge } from "../../components/common/Badge";
-import { ProgressStepper } from "../../components/common/EmptyState";
+import { Select } from "../../components/common/Input";
+import { ProgressStepper, InlineAlert } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
-import { MOCK_EVIDENCE } from "../../mocks/evidence";
+import { confirmAiSession } from "../../api/aiSessions";
+import { listCategories, listMembers, listStages } from "../../api/workspaces";
+import { ApiError, apiErrorMessage } from "../../api/client";
+import { useAuth } from "../../auth/useAuth";
+import {
+  mapProvenanceSource,
+  parseVisibilityParam,
+  useAiSession,
+} from "../../ai/useAiSession";
+import type {
+  AiDraft,
+  AiFieldProvenance,
+  AiSessionConfirmRequest,
+  CategoryPublic,
+  IdeaFeasibility,
+  IdeaPriority,
+  IdeaShareInput,
+  IdeaSharePermission,
+  IdeaVisibility,
+  MemberPublic,
+  StagePublic,
+} from "../../types/api";
 import type { SourceBadgeType } from "../../types";
 
-interface DraftField {
-  key: string;
+type DraftKey = keyof AiDraft | "tags_text";
+
+interface EditableField {
+  key: DraftKey;
   label: string;
   value: string;
-  source: SourceBadgeType;
-  confidence: "clear" | "inferred" | "needs_check" | "insufficient";
+  source: SourceBadgeType | null;
+  multiline?: boolean;
 }
 
-const INITIAL_DRAFT: DraftField[] = [
-  { key: "title", label: "아이디어명", value: "글로벌 MCP 협업 네트워크", source: "llm_structured", confidence: "clear" },
-  { key: "oneLiner", label: "한 줄 정의", value: "전 세계 AI 에이전트가 MCP 프로토콜로 협업하는 오픈 네트워크 플랫폼", source: "llm_structured", confidence: "clear" },
-  { key: "field", label: "대표 분야", value: "기술/AI", source: "llm_inferred", confidence: "inferred" },
-  { key: "tags", label: "태그", value: "AI, MCP, 협업, 오픈소스, 에이전트", source: "llm_structured", confidence: "clear" },
-  { key: "background", label: "배경", value: "AI 에이전트들이 격리된 환경에서 작동하고 있어 협업이 어렵다. MCP는 표준 프로토콜로 이를 해결할 수 있는 잠재력이 있다.", source: "user_input", confidence: "clear" },
-  { key: "problem", label: "해결하려는 문제", value: "AI 에이전트 간 데이터 공유 및 작업 위임이 표준화되어 있지 않아 각각의 사일로에서 운영된다.", source: "llm_structured", confidence: "clear" },
-  { key: "concept", label: "핵심 개념", value: "MCP 프로토콜을 기반으로 에이전트가 서로 작업을 요청하고 결과를 공유하는 글로벌 네트워크 구축", source: "llm_inferred", confidence: "inferred" },
-  { key: "features", label: "주요 기능", value: "에이전트 등록 레지스트리, 작업 위임 API, 결과 검증 시스템, 신뢰 점수 체계", source: "web_evidence", confidence: "needs_check" },
-  { key: "expectedEffect", label: "기대 효과", value: "AI 생태계 전반의 협업 효율 향상, 중복 개발 감소, 전문화된 에이전트 활용 가능", source: "llm_inferred", confidence: "inferred" },
-  { key: "targetUsers", label: "예상 사용자", value: "AI 개발자, 기업 AI 팀, 오픈소스 기여자", source: "llm_structured", confidence: "clear" },
-  { key: "challenges", label: "주요 난제", value: "신뢰 모델 설계, 프라이버시 보호, 네트워크 확장성", source: "llm_inferred", confidence: "needs_check" },
-  { key: "validation", label: "최소 검증 방법", value: "소규모 폐쇄 베타로 3개 팀 간 에이전트 협업 시나리오 검증", source: "llm_inferred", confidence: "inferred" },
+const TEXT_FIELDS: { key: keyof AiDraft; label: string; section: "basic" | "content" }[] = [
+  { key: "title", label: "아이디어명", section: "basic" },
+  { key: "one_line_definition", label: "한 줄 정의", section: "basic" },
+  { key: "background", label: "배경", section: "content" },
+  { key: "problem", label: "해결하려는 문제", section: "content" },
+  { key: "core_concept", label: "핵심 개념", section: "content" },
+  { key: "major_features", label: "주요 기능", section: "content" },
+  { key: "expected_effect", label: "기대 효과", section: "content" },
+  { key: "target_users", label: "예상 사용자", section: "content" },
+  { key: "scenarios", label: "사용 시나리오", section: "content" },
+  { key: "challenges", label: "주요 난제", section: "content" },
+  { key: "minimum_validation", label: "최소 검증 방법", section: "content" },
+  { key: "related_project", label: "관련 프로젝트", section: "content" },
 ];
 
-const CONFIDENCE_CONFIG: Record<string, { label: string; icon: React.ReactNode; className: string }> = {
-  clear: { label: "명확", icon: <Check className="w-3 h-3" />, className: "text-[#16a34a] bg-[#f0fdf4]" },
-  inferred: { label: "추론 포함", icon: <Info className="w-3 h-3" />, className: "text-[#d97706] bg-[#fffbeb]" },
-  needs_check: { label: "확인 필요", icon: <AlertTriangle className="w-3 h-3" />, className: "text-[#dc2626] bg-[#fef2f2]" },
-  insufficient: { label: "정보 부족", icon: <AlertTriangle className="w-3 h-3" />, className: "text-[#9ca3af] bg-[#f0f0f5]" },
-};
+function draftValue(draft: AiDraft | null, key: keyof AiDraft): string {
+  if (!draft) return "";
+  const v = draft[key];
+  if (v == null) return "";
+  if (Array.isArray(v)) return v.join(", ");
+  return String(v);
+}
+
+function provenanceFor(
+  fieldProvenance: Record<string, AiFieldProvenance> | null | undefined,
+  key: string,
+  edited: Set<string>,
+): SourceBadgeType | null {
+  if (edited.has(key)) return "user_edited";
+  const p = fieldProvenance?.[key];
+  if (!p) return null;
+  const raw = p.final_source ?? p.source ?? p.original_source;
+  return mapProvenanceSource(raw);
+}
 
 export function AIReviewPage() {
   const navigate = useNavigate();
-  const { workspaceId = "personal" } = useParams();
-  const [draft, setDraft] = useState<DraftField[]>(INITIAL_DRAFT);
-  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const { workspaceId = "", sessionId = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const initialVisibility = parseVisibilityParam(searchParams.get("visibility"));
+  const { user } = useAuth();
+
+  const { session, loading, error, refresh } = useAiSession(workspaceId, sessionId, {
+    pollWhenProcessing: false,
+  });
+
+  const [stages, setStages] = useState<StagePublic[]>([]);
+  const [categories, setCategories] = useState<CategoryPublic[]>([]);
+  const [members, setMembers] = useState<MemberPublic[]>([]);
+  const [metaLoaded, setMetaLoaded] = useState(false);
+
+  const [draft, setDraft] = useState<AiDraft | null>(null);
+  const [editedKeys, setEditedKeys] = useState<Set<string>>(new Set());
+  const [initialized, setInitialized] = useState(false);
+
+  const [categoryId, setCategoryId] = useState("");
+  const [stageId, setStageId] = useState("");
+  const [priority, setPriority] = useState<IdeaPriority>("MEDIUM");
+  const [feasibility, setFeasibility] = useState<IdeaFeasibility>("UNKNOWN");
+  const [visibility, setVisibility] = useState<IdeaVisibility>(initialVisibility);
+  const [assigneeId, setAssigneeId] = useState("");
+  const [nextReviewDate, setNextReviewDate] = useState("");
+  const [tagsText, setTagsText] = useState("");
+  const [shares, setShares] = useState<IdeaShareInput[]>([]);
+
+  const [editingKey, setEditingKey] = useState<DraftKey | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [directEditMode, setDirectEditMode] = useState(false);
   const [originalOpen, setOriginalOpen] = useState(true);
   const [showEvidence, setShowEvidence] = useState(true);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
-  function startEdit(field: DraftField) {
+  // Status guards
+  useEffect(() => {
+    if (!session || !workspaceId || !sessionId) return;
+    if (session.status === "CONFIRMED" && session.result_idea_id) {
+      navigate(`/w/${workspaceId}/ideas/${session.result_idea_id}`, {
+        replace: true,
+      });
+      return;
+    }
+    if (
+      session.status === "PROCESSING" ||
+      session.status === "NEEDS_CLARIFICATION" ||
+      session.status === "FAILED"
+    ) {
+      const vis = searchParams.get("visibility");
+      const q = vis ? `?visibility=${vis}` : `?visibility=${initialVisibility}`;
+      navigate(`/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}${q}`, {
+        replace: true,
+      });
+    }
+  }, [
+    session,
+    workspaceId,
+    sessionId,
+    navigate,
+    searchParams,
+    initialVisibility,
+  ]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    void Promise.all([
+      listStages(workspaceId),
+      listCategories(workspaceId),
+      listMembers(workspaceId),
+    ])
+      .then(([s, c, m]) => {
+        if (cancelled) return;
+        setStages(s);
+        setCategories(c);
+        setMembers(m);
+        setMetaLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          toast.error("양식 데이터를 불러오지 못했습니다.");
+          setMetaLoaded(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // Initialize form from session draft once
+  useEffect(() => {
+    if (!session || session.status !== "READY_FOR_REVIEW") return;
+    if (!metaLoaded || initialized) return;
+
+    const d = session.draft ?? {};
+    setDraft({ ...d });
+    setTagsText((d.tags ?? []).join(", "));
+
+    const slug = d.category_slug?.trim();
+    if (slug) {
+      const match = categories.find((c) => c.slug === slug);
+      setCategoryId(match?.id ?? "");
+    } else {
+      setCategoryId("");
+    }
+
+    const defaultStage = stages.find((x) => x.is_default) ?? stages[0];
+    setStageId(defaultStage?.id ?? "");
+
+    setPriority(
+      d.priority === "HIGH" || d.priority === "MEDIUM" || d.priority === "LOW"
+        ? d.priority
+        : "MEDIUM",
+    );
+    setFeasibility(
+      d.feasibility === "HIGH" ||
+        d.feasibility === "MEDIUM" ||
+        d.feasibility === "LOW" ||
+        d.feasibility === "UNKNOWN"
+        ? d.feasibility
+        : "UNKNOWN",
+    );
+    setVisibility(initialVisibility);
+    setAssigneeId("");
+    setNextReviewDate("");
+    setShares([]);
+    setInitialized(true);
+  }, [
+    session,
+    metaLoaded,
+    initialized,
+    categories,
+    stages,
+    initialVisibility,
+  ]);
+
+  const activeMembers = useMemo(
+    () =>
+      members.filter(
+        (m) => m.status === "ACTIVE" && m.user_id !== user?.id,
+      ),
+    [members, user?.id],
+  );
+
+  const basicFields: EditableField[] = useMemo(() => {
+    const fields: EditableField[] = TEXT_FIELDS.filter((f) => f.section === "basic").map(
+      (f) => ({
+        key: f.key,
+        label: f.label,
+        value: draftValue(draft, f.key),
+        source: provenanceFor(session?.field_provenance, f.key, editedKeys),
+        multiline: f.key !== "title",
+      }),
+    );
+    fields.push({
+      key: "tags_text",
+      label: "태그",
+      value: tagsText,
+      source: editedKeys.has("tags")
+        ? "user_edited"
+        : provenanceFor(session?.field_provenance, "tags", editedKeys),
+    });
+    return fields;
+  }, [draft, tagsText, session?.field_provenance, editedKeys]);
+
+  const contentFields: EditableField[] = useMemo(
+    () =>
+      TEXT_FIELDS.filter((f) => f.section === "content").map((f) => ({
+        key: f.key,
+        label: f.label,
+        value: draftValue(draft, f.key) || "정보 없음",
+        source: provenanceFor(session?.field_provenance, f.key, editedKeys),
+        multiline: true,
+      })),
+    [draft, session?.field_provenance, editedKeys],
+  );
+
+  const titleOk = (draft?.title ?? "").trim().length > 0;
+  const selectedUsersOk =
+    visibility !== "SELECTED_USERS" || shares.length > 0;
+
+  function startEdit(field: EditableField) {
     setEditingKey(field.key);
-    setEditValue(field.value);
+    const raw =
+      field.key === "tags_text"
+        ? tagsText
+        : draftValue(draft, field.key as keyof AiDraft);
+    setEditValue(raw === "정보 없음" ? "" : raw);
   }
 
-  function saveEdit(key: string) {
-    setDraft((prev) =>
-      prev.map((f) =>
-        f.key === key ? { ...f, value: editValue, source: "user_edited" } : f
-      )
+  function saveEdit(key: DraftKey, value?: string) {
+    const next = value ?? editValue;
+    if (key === "tags_text") {
+      setTagsText(next);
+      setEditedKeys((prev) => new Set(prev).add("tags"));
+    } else {
+      setDraft((prev) => ({
+        ...(prev ?? {}),
+        [key]: next,
+      }));
+      setEditedKeys((prev) => new Set(prev).add(key));
+    }
+    if (value === undefined) setEditingKey(null);
+  }
+
+  function toggleShare(userId: string) {
+    setShares((prev) => {
+      const exists = prev.find((s) => s.user_id === userId);
+      if (exists) return prev.filter((s) => s.user_id !== userId);
+      return [...prev, { user_id: userId, permission: "READ" as const }];
+    });
+  }
+
+  function setSharePermission(userId: string, permission: IdeaSharePermission) {
+    setShares((prev) =>
+      prev.map((s) => (s.user_id === userId ? { ...s, permission } : s)),
     );
-    setEditingKey(null);
   }
 
   function handleRegister() {
+    if (!titleOk) {
+      toast.error("아이디어명을 입력해 주세요.");
+      return;
+    }
+    if (visibility === "SELECTED_USERS" && shares.length === 0) {
+      toast.error(
+        "지정 사용자 공유에는 최소 1명의 공유 대상이 필요합니다. 비공개 또는 작업공간 공유를 선택해 주세요.",
+      );
+      return;
+    }
+    setConfirmError(null);
     setShowConfirmModal(true);
   }
 
-  function confirmRegister() {
-    setShowConfirmModal(false);
-    toast.success("아이디어가 등록되었습니다 🎉", "IF-011 · 글로벌 MCP 협업 네트워크");
-    navigate(`/w/${workspaceId}/ideas/idea-001`);
+  async function confirmRegister() {
+    if (!workspaceId || !sessionId || isConfirming || !titleOk) return;
+    setIsConfirming(true);
+    setConfirmError(null);
+    try {
+      const tags = tagsText
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      const payload: AiSessionConfirmRequest = {
+        title: (draft?.title ?? "").trim(),
+        one_line_definition: emptyToNull(draft?.one_line_definition),
+        background: emptyToNull(draft?.background),
+        problem: emptyToNull(draft?.problem),
+        core_concept: emptyToNull(draft?.core_concept),
+        major_features: emptyToNull(draft?.major_features),
+        expected_effect: emptyToNull(draft?.expected_effect),
+        target_users: emptyToNull(draft?.target_users),
+        scenarios: emptyToNull(draft?.scenarios),
+        challenges: emptyToNull(draft?.challenges),
+        minimum_validation: emptyToNull(draft?.minimum_validation),
+        related_project: emptyToNull(draft?.related_project),
+        category_id: categoryId || null,
+        stage_id: stageId || null,
+        priority,
+        feasibility,
+        visibility,
+        assignee_id: assigneeId || null,
+        next_review_date: nextReviewDate || null,
+        tags,
+        shares: visibility === "SELECTED_USERS" ? shares : null,
+      };
+
+      const result = await confirmAiSession(workspaceId, sessionId, payload);
+      setShowConfirmModal(false);
+      toast.success(
+        "아이디어가 등록되었습니다",
+        `${result.idea.idea_code} · ${result.idea.title}`,
+      );
+      navigate(`/w/${workspaceId}/ideas/${result.idea.id}`);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setConfirmError(
+          apiErrorMessage(
+            err,
+            "이 AI 작업을 등록할 수 없는 상태입니다. 세션을 다시 확인해 주세요.",
+          ),
+        );
+        await refresh();
+      } else if (err instanceof ApiError && err.status === 422) {
+        setConfirmError(apiErrorMessage(err, "입력값을 확인해 주세요."));
+      } else {
+        setConfirmError(apiErrorMessage(err, "아이디어 등록에 실패했습니다."));
+      }
+    } finally {
+      setIsConfirming(false);
+    }
   }
 
-  const basicFields = draft.slice(0, 4);
-  const contentFields = draft.slice(4, 11);
-  const mgmtFields = draft.slice(11);
+  if (loading || (session?.status === "READY_FOR_REVIEW" && !initialized)) {
+    return (
+      <div className="min-h-full flex items-center justify-center px-4 py-12">
+        <div className="flex items-center gap-2 text-sm text-[#6b6b80]">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          AI 초안을 불러오는 중...
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !session) {
+    return (
+      <div className="min-h-full flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-lg space-y-4">
+          <InlineAlert type="warning" title="AI 초안을 불러올 수 없습니다">
+            {error ?? "존재하지 않거나 접근할 수 없는 AI 작업입니다."}
+          </InlineAlert>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => void refresh()}>
+              다시 확인
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+            >
+              새 AI 작업 시작
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (session.status === "CANCELLED") {
+    return (
+      <div className="min-h-full flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-lg space-y-4">
+          <InlineAlert type="warning" title="취소된 AI 작업">
+            이 AI 작업은 취소되었습니다.
+          </InlineAlert>
+          <Button
+            variant="primary"
+            onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+          >
+            새 Session 시작
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (session.status !== "READY_FOR_REVIEW") {
+    return (
+      <div className="min-h-full flex items-center justify-center px-4 py-12">
+        <div className="flex items-center gap-2 text-sm text-[#6b6b80]">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          적절한 화면으로 이동 중...
+        </div>
+      </div>
+    );
+  }
+
+  const clarificationAnswers = session.clarification_answers ?? [];
+  const provenanceEntries = Object.entries(session.field_provenance ?? {});
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header bar */}
       <div className="px-4 sm:px-8 py-4 bg-white border-b border-[rgba(0,0,0,0.06)]">
         <div className="flex items-center justify-between mb-3">
           <ProgressStepper
@@ -103,116 +463,376 @@ export function AIReviewPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-[#111118]">AI 등록 초안 검토</h1>
-            <p className="text-sm text-[#6b6b80]">AI가 정리한 내용을 확인하고 필요한 경우 수정하세요.</p>
+            <p className="text-sm text-[#6b6b80]">
+              AI가 정리한 내용을 확인하고 필요한 경우 수정하세요.
+            </p>
           </div>
         </div>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: original text */}
         <div className="w-64 border-r border-[rgba(0,0,0,0.06)] bg-[#fafafa] flex flex-col overflow-hidden shrink-0 hidden lg:flex">
           <div className="flex items-center justify-between px-4 py-3 border-b border-[rgba(0,0,0,0.06)]">
-            <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider">사용자 원문</p>
-            <button onClick={() => setOriginalOpen(!originalOpen)}>
-              {originalOpen ? <ChevronUp className="w-4 h-4 text-[#9ca3af]" /> : <ChevronDown className="w-4 h-4 text-[#9ca3af]" />}
+            <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider">
+              사용자 원문
+            </p>
+            <button type="button" onClick={() => setOriginalOpen(!originalOpen)}>
+              {originalOpen ? (
+                <ChevronUp className="w-4 h-4 text-[#9ca3af]" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-[#9ca3af]" />
+              )}
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-4">
-            <p className="text-xs text-[#6b6b80] leading-relaxed">
-              AI 에이전트들이 각각의 사일로에서 동작하고 있는데, 만약 전 세계 AI 에이전트들이 MCP 같은 표준 프로토콜로 서로 협업할 수 있다면 어떨까? 에이전트 레지스트리가 있고, 작업을 위임할 수 있고, 결과를 공유하는 오픈 네트워크. 신뢰 문제가 핵심 난제일 것 같음.
-            </p>
-            <div className="mt-4 border-t border-[rgba(0,0,0,0.06)] pt-4">
-              <p className="text-xs font-medium text-[#6b6b80] mb-2">추가 질문 답변</p>
-              <p className="text-xs text-[#9ca3af]">주 사용자: AI 개발자, 기업 팀</p>
+          {originalOpen && (
+            <div className="flex-1 overflow-y-auto p-4">
+              <p className="text-xs text-[#6b6b80] leading-relaxed whitespace-pre-wrap">
+                {session.input_text}
+              </p>
+              {clarificationAnswers.length > 0 && (
+                <div className="mt-4 border-t border-[rgba(0,0,0,0.06)] pt-4">
+                  <p className="text-xs font-medium text-[#6b6b80] mb-2">
+                    추가 질문 답변
+                  </p>
+                  <ul className="space-y-2">
+                    {clarificationAnswers.map((a) => (
+                      <li key={a.question_id} className="text-xs text-[#9ca3af]">
+                        <span className="font-mono text-[10px] text-[#d1d5db]">
+                          {a.question_id}
+                        </span>
+                        <br />
+                        {a.answer}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
-          </div>
+          )}
         </div>
 
-        {/* Center: draft fields */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
-          <FieldSection title="기본정보" fields={basicFields} editingKey={editingKey} editValue={editValue} onEdit={startEdit} onSave={saveEdit} onEditChange={setEditValue} onCancelEdit={() => setEditingKey(null)} />
-          <FieldSection title="아이디어 내용" fields={contentFields} editingKey={editingKey} editValue={editValue} onEdit={startEdit} onSave={saveEdit} onEditChange={setEditValue} onCancelEdit={() => setEditingKey(null)} />
-          <FieldSection title="관리정보" fields={mgmtFields} editingKey={editingKey} editValue={editValue} onEdit={startEdit} onSave={saveEdit} onEditChange={setEditValue} onCancelEdit={() => setEditingKey(null)} />
+          <FieldSection
+            title="기본정보"
+            fields={basicFields}
+            editingKey={editingKey}
+            editValue={editValue}
+            onEdit={startEdit}
+            onSave={saveEdit}
+            onEditChange={setEditValue}
+            onCancelEdit={() => setEditingKey(null)}
+            alwaysEdit={directEditMode}
+          />
+          <FieldSection
+            title="아이디어 내용"
+            fields={contentFields}
+            editingKey={editingKey}
+            editValue={editValue}
+            onEdit={startEdit}
+            onSave={saveEdit}
+            onEditChange={setEditValue}
+            onCancelEdit={() => setEditingKey(null)}
+            alwaysEdit={directEditMode}
+          />
 
-          {/* Similar ideas */}
-          <div className="mt-6 bg-[#fffbeb] rounded-xl border border-[#fde68a] p-4">
-            <p className="text-sm font-semibold text-[#b45309] mb-3">⚠ 유사 아이디어 발견</p>
-            <div className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3 mb-3">
-              <p className="text-sm font-medium text-[#111118]">IdeaFlow (IF-002)</p>
-              <p className="text-xs text-[#6b6b80] mb-1">유사 이유: AI 기반 아이디어 관리 및 협업 기능 중복</p>
-              <div className="w-full bg-[#f0f0f5] rounded-full h-1.5 mb-2">
-                <div className="h-1.5 rounded-full bg-[#d97706]" style={{ width: "42%" }} />
-              </div>
-              <p className="text-xs text-[#9ca3af]">유사도 42%</p>
+          <div className="mb-6">
+            <h3 className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-3">
+              관리정보
+            </h3>
+            <div className="bg-white rounded-xl border border-[rgba(0,0,0,0.07)] p-4 space-y-4">
+              <Select
+                label="분야 (카테고리)"
+                value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value)}
+                options={[
+                  { value: "", label: "선택 안 함" },
+                  ...categories.map((c) => ({ value: c.id, label: c.name })),
+                ]}
+              />
+              <Select
+                label="단계"
+                value={stageId}
+                onChange={(e) => setStageId(e.target.value)}
+                options={stages.map((s) => ({ value: s.id, label: s.label }))}
+              />
+              <Select
+                label="우선순위"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value as IdeaPriority)}
+                options={[
+                  { value: "HIGH", label: "높음" },
+                  { value: "MEDIUM", label: "중간" },
+                  { value: "LOW", label: "낮음" },
+                ]}
+              />
+              <Select
+                label="구현 가능성"
+                value={feasibility}
+                onChange={(e) =>
+                  setFeasibility(e.target.value as IdeaFeasibility)
+                }
+                options={[
+                  { value: "HIGH", label: "높음" },
+                  { value: "MEDIUM", label: "중간" },
+                  { value: "LOW", label: "낮음" },
+                  { value: "UNKNOWN", label: "미평가" },
+                ]}
+              />
+              <Select
+                label="공개 범위"
+                value={visibility}
+                onChange={(e) =>
+                  setVisibility(e.target.value as IdeaVisibility)
+                }
+                options={[
+                  { value: "PRIVATE", label: "비공개" },
+                  { value: "WORKSPACE", label: "작업공간 공유" },
+                  { value: "SELECTED_USERS", label: "지정 사용자 공유" },
+                ]}
+              />
+              {visibility === "SELECTED_USERS" && (
+                <div className="rounded-lg border border-[rgba(0,0,0,0.08)] p-3 space-y-2">
+                  <p className="text-xs font-medium text-[#6b6b80]">공유 대상</p>
+                  {activeMembers.length === 0 ? (
+                    <p className="text-xs text-[#9ca3af]">
+                      공유할 수 있는 활성 멤버가 없습니다. 비공개 또는 작업공간
+                      공유를 선택해 주세요.
+                    </p>
+                  ) : (
+                    activeMembers.map((m) => {
+                      const selected = shares.find((s) => s.user_id === m.user_id);
+                      return (
+                        <div
+                          key={m.user_id}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!!selected}
+                            onChange={() => toggleShare(m.user_id)}
+                            className="w-4 h-4 accent-[#4f46e5]"
+                          />
+                          <span className="flex-1 text-[#111118]">{m.name}</span>
+                          {selected && (
+                            <select
+                              value={selected.permission}
+                              onChange={(e) =>
+                                setSharePermission(
+                                  m.user_id,
+                                  e.target.value as IdeaSharePermission,
+                                )
+                              }
+                              className="text-xs border rounded px-2 py-1"
+                            >
+                              <option value="READ">읽기</option>
+                              <option value="EDIT">편집</option>
+                            </select>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+              <Select
+                label="담당자"
+                value={assigneeId}
+                onChange={(e) => setAssigneeId(e.target.value)}
+                options={[
+                  { value: "", label: "담당자 없음" },
+                  ...members
+                    .filter((m) => m.status === "ACTIVE")
+                    .map((m) => ({ value: m.user_id, label: m.name })),
+                ]}
+              />
+              <label className="block">
+                <span className="text-xs font-medium text-[#6b6b80] mb-1 block">
+                  다음 검토일
+                </span>
+                <input
+                  type="date"
+                  value={nextReviewDate}
+                  onChange={(e) => setNextReviewDate(e.target.value)}
+                  className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] px-3 text-sm"
+                />
+              </label>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {["별도 아이디어로 등록", "기존 아이디어에 추가", "두 아이디어 연결", "등록 취소"].map((opt) => (
-                <Button key={opt} variant="secondary" size="sm">{opt}</Button>
-              ))}
-            </div>
+          </div>
+
+          <div className="mt-6 bg-[#f8f8fb] rounded-xl border border-[rgba(0,0,0,0.07)] p-4">
+            <p className="text-sm font-semibold text-[#6b6b80] mb-1">
+              유사 아이디어 검색
+            </p>
+            <p className="text-xs text-[#9ca3af]">
+              유사 아이디어 검색은 추후 제공됩니다.
+            </p>
           </div>
         </div>
 
-        {/* Right: evidence */}
         {showEvidence && (
           <div className="w-72 border-l border-[rgba(0,0,0,0.06)] flex flex-col overflow-hidden shrink-0 hidden xl:flex">
             <div className="flex items-center justify-between px-4 py-3 border-b border-[rgba(0,0,0,0.06)]">
-              <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider">근거·출처</p>
-              <button onClick={() => setShowEvidence(false)}>
+              <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider">
+                근거·출처
+              </p>
+              <button type="button" onClick={() => setShowEvidence(false)}>
                 <X className="w-4 h-4 text-[#9ca3af]" />
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {MOCK_EVIDENCE.slice(0, 3).map((ev) => (
-                <div key={ev.id} className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3">
-                  <p className="text-xs font-semibold text-[#111118] mb-1 line-clamp-2">{ev.title}</p>
-                  <p className="text-xs text-[#9ca3af] mb-2">{ev.publisher}</p>
-                  <p className="text-xs text-[#6b6b80] line-clamp-3">{ev.summary}</p>
-                  <div className="flex gap-1 mt-2 flex-wrap">
-                    {ev.relatedFields.map((f) => (
-                      <span key={f} className="text-[10px] px-1.5 py-0.5 rounded bg-[#ede9fe] text-[#7c3aed]">{f}</span>
-                    ))}
-                  </div>
+              <div className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3">
+                <p className="text-xs font-semibold text-[#111118] mb-1">
+                  외부 검색 근거 없음
+                </p>
+                <p className="text-xs text-[#6b6b80]">
+                  현재 초안은 사용자 입력과 AI 구조화 결과로 작성되었습니다.
+                </p>
+              </div>
+
+              {session.research_recommended && (
+                <div className="bg-[#eff6ff] rounded-lg border border-[#bfdbfe] p-3">
+                  <p className="text-xs font-semibold text-[#1d4ed8] mb-1">
+                    웹 검색 권장
+                  </p>
+                  <p className="text-xs text-[#6b6b80] mb-2">
+                    AI가 외부 조사를 권장합니다. (검색 실행은 Step 9)
+                  </p>
+                  {(session.research_topics ?? []).length > 0 && (
+                    <ul className="list-disc pl-4 space-y-1">
+                      {(session.research_topics ?? []).map((t) => (
+                        <li key={t} className="text-xs text-[#1e40af]">
+                          {t}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="mt-3 w-full"
+                    disabled
+                    title="Step 9에서 제공"
+                  >
+                    웹 검색으로 보완
+                  </Button>
                 </div>
-              ))}
+              )}
+
+              {provenanceEntries.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-[#6b6b80]">필드 출처 요약</p>
+                  {provenanceEntries.map(([field, p]) => {
+                    const badge = mapProvenanceSource(
+                      p.final_source ?? p.source ?? p.original_source,
+                    );
+                    if (!badge) return null;
+                    return (
+                      <div
+                        key={field}
+                        className="flex items-center justify-between gap-2 text-xs"
+                      >
+                        <span className="text-[#9ca3af] truncate">{field}</span>
+                        <SourceBadge type={badge} />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
       </div>
 
-      {/* Bottom action bar */}
       <div className="px-4 sm:px-8 py-4 bg-white border-t border-[rgba(0,0,0,0.06)] flex flex-wrap items-center gap-2 sm:gap-3">
-        <Button variant="ghost" icon={<ArrowLeft className="w-4 h-4" />} onClick={() => navigate(-1)}>이전</Button>
-        <Button variant="secondary">임시 저장</Button>
-        <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" icon={<RefreshCw className="w-3.5 h-3.5" />}>전체 다시 생성</Button>
-          <Button variant="secondary" icon={<Pencil className="w-3.5 h-3.5" />}>직접 수정 모드</Button>
-          <Button variant="primary" icon={<Check className="w-4 h-4" />} onClick={handleRegister}>
+        <Button
+          variant="ghost"
+          icon={<ArrowLeft className="w-4 h-4" />}
+          onClick={() =>
+            navigate(
+              `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}?visibility=${visibility}`,
+            )
+          }
+        >
+          이전
+        </Button>
+        <Button variant="secondary" disabled title="추후 제공">
+          임시 저장
+        </Button>
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          <Button
+            variant="ghost"
+            icon={<RefreshCw className="w-3.5 h-3.5" />}
+            disabled
+            title="추후 제공"
+          >
+            전체 다시 생성
+          </Button>
+          <Button
+            variant="secondary"
+            icon={<Pencil className="w-3.5 h-3.5" />}
+            onClick={() => setDirectEditMode((v) => !v)}
+          >
+            {directEditMode ? "수정 모드 끄기" : "직접 수정 모드"}
+          </Button>
+          <Button
+            variant="primary"
+            icon={<Check className="w-4 h-4" />}
+            onClick={handleRegister}
+            disabled={!titleOk || !selectedUsersOk}
+          >
             아이디어 등록
           </Button>
         </div>
       </div>
 
-      {/* Confirm modal */}
       {showConfirmModal && (
         <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.08)] shadow-xl w-full max-w-sm p-6">
             <div className="flex items-center gap-2 mb-3">
               <Sparkles className="w-5 h-5 text-[#4f46e5]" />
-              <h3 className="text-base font-bold text-[#111118]">아이디어를 등록하시겠습니까?</h3>
+              <h3 className="text-base font-bold text-[#111118]">
+                아이디어를 등록하시겠습니까?
+              </h3>
             </div>
-            <p className="text-sm text-[#6b6b80] mb-5">
+            <p className="text-sm text-[#6b6b80] mb-3">
               검토된 내용으로 아이디어가 등록됩니다. 등록 후에도 편집이 가능합니다.
             </p>
+            {confirmError && (
+              <div className="mb-3">
+                <InlineAlert type="error" title="등록 실패">
+                  {confirmError}
+                </InlineAlert>
+              </div>
+            )}
             <div className="flex gap-2">
-              <Button variant="ghost" className="flex-1" onClick={() => setShowConfirmModal(false)}>취소</Button>
-              <Button variant="primary" className="flex-1" onClick={confirmRegister}>등록</Button>
+              <Button
+                variant="ghost"
+                className="flex-1"
+                disabled={isConfirming}
+                onClick={() => setShowConfirmModal(false)}
+              >
+                취소
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                loading={isConfirming}
+                onClick={() => void confirmRegister()}
+              >
+                등록
+              </Button>
             </div>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function emptyToNull(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const t = value.trim();
+  return t.length ? t : null;
 }
 
 function FieldSection({
@@ -224,68 +844,83 @@ function FieldSection({
   onSave,
   onEditChange,
   onCancelEdit,
+  alwaysEdit,
 }: {
   title: string;
-  fields: DraftField[];
-  editingKey: string | null;
+  fields: EditableField[];
+  editingKey: DraftKey | null;
   editValue: string;
-  onEdit: (f: DraftField) => void;
-  onSave: (key: string) => void;
+  onEdit: (f: EditableField) => void;
+  onSave: (key: DraftKey, value?: string) => void;
   onEditChange: (v: string) => void;
   onCancelEdit: () => void;
+  alwaysEdit: boolean;
 }) {
-  const CONFIDENCE_CONFIG: Record<string, { label: string; className: string }> = {
-    clear: { label: "명확", className: "text-[#16a34a] bg-[#f0fdf4]" },
-    inferred: { label: "추론 포함", className: "text-[#d97706] bg-[#fffbeb]" },
-    needs_check: { label: "확인 필요", className: "text-[#dc2626] bg-[#fef2f2]" },
-    insufficient: { label: "정보 부족", className: "text-[#9ca3af] bg-[#f0f0f5]" },
-  };
-
   return (
     <div className="mb-6">
-      <h3 className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-3">{title}</h3>
+      <h3 className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-3">
+        {title}
+      </h3>
       <div className="bg-white rounded-xl border border-[rgba(0,0,0,0.07)] divide-y divide-[rgba(0,0,0,0.05)]">
         {fields.map((field) => {
-          const isEditing = editingKey === field.key;
-          const conf = CONFIDENCE_CONFIG[field.confidence];
+          const isEditing = alwaysEdit || editingKey === field.key;
+          const displayValue =
+            field.value === "정보 없음" ? "" : field.value;
           return (
             <div key={field.key} className="p-4 group">
               <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-xs font-semibold text-[#6b6b80]">{field.label}</span>
-                <SourceBadge type={field.source} />
-                <span className={clsx("text-[10px] px-1.5 py-0.5 rounded-full font-medium", conf.className)}>
-                  {conf.label}
+                <span className="text-xs font-semibold text-[#6b6b80]">
+                  {field.label}
                 </span>
-                <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={() => onEdit(field)}
-                    className="p-1 rounded hover:bg-[#f0f0f5] text-[#6b6b80]"
-                  >
-                    <Pencil className="w-3 h-3" />
-                  </button>
-                  <button className="p-1 rounded hover:bg-[#f0f0f5] text-[#6b6b80]">
-                    <RefreshCw className="w-3 h-3" />
-                  </button>
-                  <button className="p-1 rounded hover:bg-[#f0f0f5] text-[#6b6b80]">
-                    <BookOpen className="w-3 h-3" />
-                  </button>
-                </div>
+                {field.source && <SourceBadge type={field.source} />}
+                {!alwaysEdit && (
+                  <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      type="button"
+                      onClick={() => onEdit(field)}
+                      className="p-1 rounded hover:bg-[#f0f0f5] text-[#6b6b80]"
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
               </div>
               {isEditing ? (
                 <div>
                   <textarea
-                    value={editValue}
-                    onChange={(e) => onEditChange(e.target.value)}
-                    className="w-full rounded-lg border border-[#4f46e5] bg-white px-3 py-2 text-sm text-[#111118] resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20 min-h-[60px]"
-                    autoFocus
+                    value={alwaysEdit ? displayValue : editValue}
+                    onChange={(e) => {
+                      if (alwaysEdit) {
+                        onSave(field.key, e.target.value);
+                      } else {
+                        onEditChange(e.target.value);
+                      }
+                    }}
+                    className={clsx(
+                      "w-full rounded-lg border border-[#4f46e5] bg-white px-3 py-2 text-sm text-[#111118] resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20",
+                      field.multiline ? "min-h-[60px]" : "min-h-[40px]",
+                    )}
+                    autoFocus={!alwaysEdit}
                   />
-                  <div className="flex gap-2 mt-2">
-                    <Button variant="primary" size="sm" onClick={() => onSave(field.key)}>저장</Button>
-                    <Button variant="ghost" size="sm" onClick={onCancelEdit}>취소</Button>
-                  </div>
+                  {!alwaysEdit && editingKey === field.key && (
+                    <div className="flex gap-2 mt-2">
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => onSave(field.key)}
+                      >
+                        저장
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={onCancelEdit}>
+                        취소
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <p className="text-sm text-[#111118] leading-relaxed">{field.value}</p>
+                <p className="text-sm text-[#111118] leading-relaxed whitespace-pre-wrap">
+                  {field.value || "정보 없음"}
+                </p>
               )}
             </div>
           );

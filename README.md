@@ -13,9 +13,10 @@ IdeaFlow/
 
 ## 현재 상태
 
-- Frontend: Figma Make UI + **Backend API 연동 (Step 6)** — Login, Workspace, Members, Manual Idea CRUD/Search
-- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + **AI Session/Job/LLM provider (Step 7)**
-- Frontend AI Input/Analyzing/Review 페이지는 아직 mock (Step 8에서 연결)
+- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)**
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7)
+- Step 8: Frontend AI Input → processing polling → clarification → review → confirm → Idea 연결 완료
+- Web Search / Evidence는 아직 미구현 (Step 9+)
 
 ## 개발 실행
 
