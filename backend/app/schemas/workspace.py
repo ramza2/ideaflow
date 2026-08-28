@@ -12,8 +12,8 @@ from app.models.enums import WorkspaceRole
 
 class TeamWorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    allow_llm: bool = True
-    allow_web_search: bool = True
+    allow_llm: bool | None = None
+    allow_web_search: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -47,6 +47,8 @@ class WorkspacePublic(BaseModel):
     owner_id: UUID
     allow_llm: bool
     allow_web_search: bool
+    effective_allow_llm: bool
+    effective_allow_web_search: bool
     current_user_role: str
     created_at: datetime
     updated_at: datetime

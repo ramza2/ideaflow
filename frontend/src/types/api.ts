@@ -41,6 +41,8 @@ export interface WorkspacePublic {
   owner_id: string;
   allow_llm: boolean;
   allow_web_search: boolean;
+  effective_allow_llm: boolean;
+  effective_allow_web_search: boolean;
   current_user_role: WorkspaceRole;
   created_at: string;
   updated_at: string;
@@ -568,4 +570,130 @@ export interface NotificationListResponse {
 
 export interface NotificationUnreadCount {
   count: number;
+}
+
+// --- Step 11: Admin ---
+
+export interface AdminUserPublic {
+  id: string;
+  email: string;
+  name: string;
+  status: UserStatus;
+  system_role: SystemRole;
+  must_change_password: boolean;
+  failed_login_count: number;
+  locked_until: string | null;
+  temporary_login_locked: boolean;
+  active_session_count: number;
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+  is_current_user: boolean;
+}
+
+export interface AdminUserListResponse {
+  items: AdminUserPublic[];
+  total: number;
+}
+
+export interface AdminUserCreateRequest {
+  email: string;
+  name: string;
+  temporary_password: string;
+  system_role?: SystemRole;
+}
+
+export interface AdminUserUpdateRequest {
+  name?: string;
+  status?: UserStatus;
+  system_role?: SystemRole;
+}
+
+export interface AdminPasswordResetRequest {
+  temporary_password: string;
+}
+
+export interface SettingMetadata {
+  source: string;
+  updated_at: string | null;
+  updated_by: { id: string; name: string } | null;
+}
+
+export interface SystemSettingsResponse {
+  global_llm_enabled: boolean;
+  global_web_search_enabled: boolean;
+  default_team_allow_llm: boolean;
+  default_team_allow_web_search: boolean;
+  metadata: Record<string, SettingMetadata>;
+}
+
+export interface SystemSettingsUpdateRequest {
+  global_llm_enabled?: boolean;
+  default_team_allow_llm?: boolean;
+  global_web_search_enabled?: boolean;
+  default_team_allow_web_search?: boolean;
+}
+
+export interface LlmIntegrationConfig {
+  provider: string;
+  api_url: string;
+  chat_completions_path: string;
+  model_name: string;
+  api_key_configured: boolean;
+  timeout_seconds: number;
+  connect_timeout_seconds: number;
+  max_tokens: number;
+  temperature: number;
+  enable_thinking: boolean | null;
+  configuration_source: string;
+}
+
+export interface WebSearchIntegrationConfig {
+  provider: string;
+  api_url: string | null;
+  api_key_configured: boolean;
+  timeout_seconds: number;
+  connect_timeout_seconds: number;
+  max_queries: number;
+  max_results_per_query: number;
+  max_total_results: number;
+  configured: boolean;
+  configuration_source: string;
+}
+
+export interface AdminIntegrationConfigResponse {
+  llm: LlmIntegrationConfig;
+  web_search: WebSearchIntegrationConfig;
+  global_llm_enabled: boolean;
+  global_web_search_enabled: boolean;
+}
+
+export interface LlmConnectionTestResult {
+  status: string;
+  provider?: string | null;
+  model?: string | null;
+  latency_ms?: number | null;
+  tested_at: string;
+  error_code?: string | null;
+  retryable?: boolean | null;
+  safe_message?: string | null;
+}
+
+export interface WebSearchTestResultItem {
+  title: string;
+  url: string;
+  source?: string | null;
+  published_at?: string | null;
+}
+
+export interface WebSearchConnectionTestResult {
+  status: string;
+  provider?: string | null;
+  latency_ms?: number | null;
+  result_count?: number | null;
+  tested_at: string;
+  error_code?: string | null;
+  retryable?: boolean | null;
+  safe_message?: string | null;
+  results?: WebSearchTestResultItem[] | null;
 }

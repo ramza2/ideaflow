@@ -117,7 +117,7 @@ export function AIReviewPage() {
     enabled: Boolean(workspaceId && sessionId),
   });
 
-  const allowWebSearch = currentWorkspace?.allow_web_search !== false;
+  const allowWebSearch = currentWorkspace?.effective_allow_web_search !== false;
 
   const [stages, setStages] = useState<StagePublic[]>([]);
   const [categories, setCategories] = useState<CategoryPublic[]>([]);
@@ -944,7 +944,7 @@ export function AIReviewPage() {
                 <p className="text-xs font-semibold text-[#1d4ed8] mb-1">웹 검색으로 보완</p>
                 {!allowWebSearch ? (
                   <p className="text-xs text-[#6b6b80]">
-                    이 작업공간에서는 외부 웹 검색이 비활성화되어 있습니다.
+                    웹 검색이 현재 시스템 또는 작업공간 정책으로 비활성화되어 있습니다.
                   </p>
                 ) : (
                   <>

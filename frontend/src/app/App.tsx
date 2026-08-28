@@ -2,6 +2,7 @@ import { createBrowserRouter, RouterProvider, Navigate, Outlet } from "react-rou
 import "../styles/fonts.css";
 import { AuthProvider } from "../auth/AuthProvider";
 import { RequireAuth, RequireGuest } from "../auth/RequireAuth";
+import { RequireSystemAdmin } from "../auth/RequireSystemAdmin";
 import { WorkspaceProvider } from "../workspace/WorkspaceProvider";
 import { AppShell } from "../components/layout/AppShell";
 import { LoginPage } from "../pages/auth/LoginPage";
@@ -16,6 +17,8 @@ import { AIReviewPage } from "../pages/ideas/AIReviewPage";
 import { ReviewsPage } from "../pages/reviews/ReviewsPage";
 import { MembersPage } from "../pages/workspace/MembersPage";
 import { AdminIntegrationsPage } from "../pages/admin/AdminIntegrationsPage";
+import { AdminSystemSettingsPage } from "../pages/admin/AdminSystemSettingsPage";
+import { AdminUsersPage } from "../pages/admin/AdminUsersPage";
 import { HelpPage } from "../pages/help/HelpPage";
 
 const router = createBrowserRouter([
@@ -34,7 +37,15 @@ const router = createBrowserRouter([
         element: <RequireAuth />,
         children: [
           { path: "/change-password", element: <ChangePasswordPage /> },
-          { path: "/admin/integrations", element: <AdminIntegrationsPage /> },
+          {
+            element: <RequireSystemAdmin />,
+            children: [
+              { path: "/admin", element: <Navigate to="/admin/users" replace /> },
+              { path: "/admin/users", element: <AdminUsersPage /> },
+              { path: "/admin/settings", element: <AdminSystemSettingsPage /> },
+              { path: "/admin/integrations", element: <AdminIntegrationsPage /> },
+            ],
+          },
           {
             path: "/w/:workspaceId",
             element: (

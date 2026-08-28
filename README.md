@@ -13,11 +13,19 @@ IdeaFlow/
 
 ## 현재 상태
 
-- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)**
-- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)**
+- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)** + **Admin / SystemSetting (Step 11)**
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)** + **Admin / SystemSetting / Integration diagnostics (Step 11)**
 - Step 8: Frontend AI Input → processing polling → clarification → review → confirm → Idea 연결 완료
 - Step 9: Review 단계에서 승인된 Web Search → Evidence 저장 → Qwen 근거 기반 초안 보완 → Idea Detail 조사 및 근거 탭
 - Step 10: Review Request / Inbox, Comment + @Mention, In-app Notification (Bell). Review/Mention/Assignee는 Idea read ACL을 부여하지 않음. Email/Push 없음.
+- Step 11: SYSTEM_ADMIN Admin Console (사용자 관리, SystemSetting 4개 정책, Integration diagnostics). Connection config는 ENV read-only; API key DB 저장/노출 없음. Workspace `effective_allow_llm` / `effective_allow_web_search`.
+
+## Step 11 — Admin / SystemSetting
+
+- **SystemSetting (DB):** `GLOBAL_LLM_ENABLED`, `GLOBAL_WEB_SEARCH_ENABLED`, `DEFAULT_TEAM_ALLOW_LLM`, `DEFAULT_TEAM_ALLOW_WEB_SEARCH` (boolean only; migration seed 없음).
+- **Connection config (ENV):** LLM/Web Search URL·key·provider는 환경변수 authority; Admin에서 read-only 조회 및 diagnostic test만.
+- **Global policy:** 새 AI session/clarification/retry 및 web research preview/approve/retry 차단; confirm·read·cancel은 허용.
+- **Effective capabilities:** `effective_allow_llm = workspace.allow_llm ∧ GLOBAL_LLM_ENABLED`; web search는 LLM global도 필요.
 
 ## Step 10 — Review / Comment / Notification
 
