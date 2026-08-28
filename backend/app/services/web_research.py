@@ -47,6 +47,51 @@ from app.web_search.sanitize import validate_and_sanitize_queries
 
 logger = logging.getLogger(__name__)
 
+_PREVIEW_DRAFT_FIELDS = frozenset(
+    {
+        "title",
+        "one_line_definition",
+        "background",
+        "problem",
+        "core_concept",
+        "major_features",
+        "expected_effect",
+        "target_users",
+        "scenarios",
+        "challenges",
+        "minimum_validation",
+        "related_project",
+        "category_slug",
+        "priority",
+        "feasibility",
+        "tags",
+    }
+)
+
+_USER_EDITABLE_FIELDS = frozenset(RESEARCH_REFINABLE_FIELDS)
+
+
+def sanitize_preview_draft(raw: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {key: raw[key] for key in _PREVIEW_DRAFT_FIELDS if key in raw}
+
+
+def sanitize_user_edited_fields(raw: list[str] | None) -> list[str]:
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        field = item.strip()
+        if not field or field not in _USER_EDITABLE_FIELDS or field in seen:
+            continue
+        seen.add(field)
+        out.append(field)
+    return out
+
 _ACTIVE_RUN_STATUSES = {
     WebResearchRunStatus.AWAITING_APPROVAL.value,
     WebResearchRunStatus.QUEUED.value,
@@ -183,9 +228,9 @@ def preview_research_run(
         sanitization_notes=[
             {"query_index": n.query_index, "changed": n.changed} for n in sanitized.notes
         ],
-        base_draft_payload=dict(payload.current_draft),
+        base_draft_payload=sanitize_preview_draft(payload.current_draft),
         base_field_provenance=dict(session.field_provenance or {}),
-        user_edited_fields=list(payload.user_edited_fields),
+        user_edited_fields=sanitize_user_edited_fields(payload.user_edited_fields),
         provider=provider,
     )
     db.add(run)
@@ -321,7 +366,8 @@ def retry_research_run(
         )
 
     run.status = WebResearchRunStatus.QUEUED.value
-    run.failure_phase = None
+    failed_phase = run.failure_phase
+    run.failure_phase = failed_phase
     run.failure_code = None
     run.failure_message = None
     run.completed_at = None

@@ -111,6 +111,7 @@ export function AIReviewPage() {
   const {
     run: researchRun,
     inProgress: researchInProgress,
+    pollError: researchPollError,
     refresh: refreshResearch,
   } = useWebResearch(workspaceId, sessionId, {
     enabled: Boolean(workspaceId && sessionId),
@@ -258,29 +259,35 @@ export function AIReviewPage() {
 
   // Apply refreshed session draft after research completes (preserve user edits).
   useEffect(() => {
-    if (!session || session.status !== "READY_FOR_REVIEW" || !initialized) return;
-    if (researchRun?.status !== "READY") return;
+    if (!initialized || researchRun?.status !== "READY") return;
     if (lastAppliedResearchIdRef.current === researchRun.id) return;
 
-    lastAppliedResearchIdRef.current = researchRun.id;
-    const serverDraft = session.draft ?? {};
-    setDraft((prev) => {
-      const merged: AiDraft = { ...serverDraft };
-      for (const key of editedKeys) {
-        if (key === "tags") continue;
-        const k = key as keyof AiDraft;
-        if (prev && prev[k] !== undefined) {
-          (merged as Record<string, unknown>)[k] = prev[k];
-        }
-      }
-      return merged;
-    });
-  }, [session, session?.draft, session?.updated_at, researchRun?.status, researchRun?.id, initialized, editedKeys]);
+    let cancelled = false;
 
-  useEffect(() => {
-    if (researchRun?.status !== "READY") return;
-    void refresh();
-  }, [researchRun?.status, researchRun?.id, refresh]);
+    void (async () => {
+      const refreshed = await refresh();
+      if (cancelled || lastAppliedResearchIdRef.current === researchRun.id) return;
+      if (!refreshed || refreshed.status !== "READY_FOR_REVIEW") return;
+
+      const serverDraft = refreshed.draft ?? {};
+      setDraft((prev) => {
+        const merged: AiDraft = { ...serverDraft };
+        for (const key of editedKeys) {
+          if (key === "tags") continue;
+          const k = key as keyof AiDraft;
+          if (prev && prev[k] !== undefined) {
+            (merged as Record<string, unknown>)[k] = prev[k];
+          }
+        }
+        return merged;
+      });
+      lastAppliedResearchIdRef.current = researchRun.id;
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [researchRun?.status, researchRun?.id, initialized, refresh, editedKeys]);
 
   const activeMembers = useMemo(
     () =>
@@ -507,6 +514,19 @@ export function AIReviewPage() {
     setResearchPanelOpen(false);
     setPreviewRun(null);
     setResearchError(null);
+  }
+
+  async function handleEditResearchQueries() {
+    if (!previewRun || !workspaceId || !sessionId) return;
+    setResearchError(null);
+    try {
+      await cancelWebResearch(workspaceId, sessionId, previewRun.id);
+      setPreviewRun(null);
+      await refreshResearch();
+    } catch (err) {
+      setResearchError(apiErrorMessage(err, "검색어 수정을 위해 기존 미리보기를 취소하지 못했습니다."));
+      throw err;
+    }
   }
 
   async function handleResearchRetry() {
@@ -850,6 +870,10 @@ export function AIReviewPage() {
                 </div>
               )}
 
+              {researchPollError && researchInProgress && (
+                <p className="text-xs text-[#b45309]">{researchPollError}</p>
+              )}
+
               {researchRun?.status === "FAILED" && (
                 <div className="bg-[#fef2f2] rounded-lg border border-[#fecaca] p-3">
                   <p className="text-xs font-semibold text-[#b91c1c] mb-1">웹 조사 실패</p>
@@ -1072,6 +1096,7 @@ export function AIReviewPage() {
         onPreview={() => void handleResearchPreview()}
         onApprove={() => void handleResearchApprove()}
         onCancel={() => void handleResearchCancel()}
+        onEditQueries={handleEditResearchQueries}
       />
     </div>
   );

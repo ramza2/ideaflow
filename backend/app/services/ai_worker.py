@@ -108,10 +108,11 @@ def recover_stale_jobs(db: Session, *, settings: Settings | None = None) -> int:
                     WebResearchRunStatus.SEARCHING.value,
                     WebResearchRunStatus.REFINING.value,
                 }:
+                    previous_run_status = run.status
                     run.status = WebResearchRunStatus.FAILED.value
                     run.failure_phase = (
                         "REFINE"
-                        if run.status == WebResearchRunStatus.REFINING.value
+                        if previous_run_status == WebResearchRunStatus.REFINING.value
                         else "SEARCH"
                     )
                     run.failure_code = "LLM_LEASE_EXPIRED"
@@ -289,6 +290,7 @@ def _apply_web_research_failure(
         job.last_error_code = code
         job.last_error_message = safe_msg
         run.status = WebResearchRunStatus.QUEUED.value
+        run.failure_phase = failure_phase
         return
 
     job.status = AiJobStatus.FAILED.value

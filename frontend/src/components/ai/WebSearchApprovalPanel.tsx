@@ -15,6 +15,7 @@ interface WebSearchApprovalPanelProps {
   onPreview: () => void;
   onApprove: () => void;
   onCancel: () => void;
+  onEditQueries: () => Promise<void>;
 }
 
 export function WebSearchApprovalPanel({
@@ -29,6 +30,7 @@ export function WebSearchApprovalPanel({
   onPreview,
   onApprove,
   onCancel,
+  onEditQueries,
 }: WebSearchApprovalPanelProps) {
   const [queries, setQueries] = useState<string[]>([]);
   const [showPrivacy, setShowPrivacy] = useState(true);
@@ -234,8 +236,14 @@ export function WebSearchApprovalPanel({
                 <Button
                   variant="ghost"
                   className="flex-1"
-                  onClick={() => setStep("edit")}
                   disabled={approving}
+                  onClick={() => {
+                    void onEditQueries()
+                      .then(() => setStep("edit"))
+                      .catch(() => {
+                        // parent sets error; keep confirm step
+                      });
+                  }}
                 >
                   검색어 수정
                 </Button>

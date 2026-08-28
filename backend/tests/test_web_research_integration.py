@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.session import reset_engine
+from app.llm.exceptions import LlmTimeoutError
 from app.llm.research_schemas import EvidenceRefinementResult
 from app.llm.schemas import (
     ClarifyingQuestionRaw,
@@ -43,6 +45,7 @@ from app.models.workspace import Workspace, WorkspaceMember
 from app.services import ai_worker
 from app.services.workspace import seed_workspace_defaults
 from app.web_search.base import WebSearchResult
+from app.web_search.exceptions import WebSearchTimeoutError
 from app.web_search.http_json import HttpJsonWebSearchProvider
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -263,9 +266,26 @@ def _ready_session(
     assert r.status_code == 202
     session_id = uuid.UUID(r.json()["id"])
     provider = FakeProvider([_ready_result()])
-    assert ai_worker.run_once(session_factory=session_factory, provider=provider)
+    for _ in range(5):
+        job = db.scalars(
+            select(AiJob).where(
+                AiJob.session_id == session_id,
+                AiJob.job_type == AiJobType.STRUCTURE_IDEA.value,
+            )
+        ).first()
+        if job is not None and job.available_at > datetime.now(timezone.utc):
+            job.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        if ai_worker.run_once(session_factory=session_factory, provider=provider):
+            db.expire_all()
+            session = db.get(IdeaAiSession, session_id)
+            if session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+                return session_id
     db.expire_all()
-    return session_id
+    session = db.get(IdeaAiSession, session_id)
+    pytest.fail(
+        f"session not ready after retries (status={session.status if session else 'missing'})"
+    )
 
 
 def test_preview_no_external_call(client: TestClient, db: Session, session_factory) -> None:
@@ -383,8 +403,10 @@ def test_security_no_idea_leakage(
 
     search = FakeSearchProvider()
     llm = RefineFromEvidence()
-    assert ai_worker.run_once(
-        session_factory=session_factory,
+    assert _run_research_worker_once(
+        db,
+        session_factory,
+        uuid.UUID(run_id),
         provider=llm,
         search_provider=search,
     )
@@ -423,7 +445,9 @@ def test_research_success_updates_session(
             return _refine_result(ev_id)
 
     llm = RefineFromEvidence()
-    assert ai_worker.run_once(session_factory=session_factory, provider=llm, search_provider=search)
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
 
     db.expire_all()
     run = db.get(WebResearchRun, run_id)
@@ -464,3 +488,422 @@ def test_confirm_blocked_during_research(client: TestClient, db: Session, sessio
     )
     assert confirm.status_code == 409
     assert confirm.json()["error"]["code"] == "AI_RESEARCH_IN_PROGRESS"
+
+
+def _make_research_job_available(db: Session, run_id: uuid.UUID) -> AiJob:
+    job = db.scalars(
+        select(AiJob)
+        .where(
+            AiJob.research_run_id == run_id,
+            AiJob.job_type == AiJobType.WEB_RESEARCH.value,
+            AiJob.status == AiJobStatus.QUEUED.value,
+        )
+        .order_by(AiJob.created_at.desc())
+    ).first()
+    if job is None:
+        job = db.scalars(
+            select(AiJob)
+            .where(
+                AiJob.research_run_id == run_id,
+                AiJob.job_type == AiJobType.WEB_RESEARCH.value,
+            )
+            .order_by(AiJob.created_at.desc())
+        ).first()
+    assert job is not None, f"no WEB_RESEARCH job for run {run_id}"
+    job.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    for other in db.scalars(
+        select(AiJob).where(
+            AiJob.status == AiJobStatus.QUEUED.value,
+            AiJob.id != job.id,
+        )
+    ).all():
+        other.available_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    db.commit()
+    return job
+
+
+def _run_research_worker_once(
+    db: Session,
+    session_factory: sessionmaker,
+    run_id: uuid.UUID,
+    *,
+    provider,
+    search_provider,
+) -> bool:
+    _make_research_job_available(db, run_id)
+    claimed = ai_worker.run_once(
+        session_factory=session_factory,
+        provider=provider,
+        search_provider=search_provider,
+    )
+    db.expire_all()
+    return claimed
+
+
+def _preview_and_approve(
+    client: TestClient,
+    ws: Workspace,
+    session_id: uuid.UUID,
+    *,
+    queries: list[str] | None = None,
+    draft: dict | None = None,
+) -> uuid.UUID:
+    queries = queries or ["saas examples"]
+    draft = draft or {"title": "AI Draft", "background": "A"}
+    preview = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/preview",
+        json={"queries": queries, "current_draft": draft, "user_edited_fields": []},
+        headers=_headers(client),
+    )
+    assert preview.status_code == 201, preview.text
+    run_id = uuid.UUID(preview.json()["id"])
+    approve = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/{run_id}/approve",
+        headers=_headers(client),
+    )
+    assert approve.status_code == 200, approve.text
+    return run_id
+
+
+def test_refine_auto_retry_skips_search(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_JOB_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+
+    FakeSearchProvider.calls = 0
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(client, ws, session_id)
+
+    class FlakyRefineProvider(FakeProvider):
+        refine_calls = 0
+
+        def refine_idea_with_evidence(self, request):
+            type(self).refine_calls += 1
+            if type(self).refine_calls == 1:
+                raise LlmTimeoutError()
+            ev_id = str(request.evidence[0].evidence_id)
+            return _refine_result(ev_id)
+
+    search = FakeSearchProvider()
+    llm = FlakyRefineProvider()
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.status == WebResearchRunStatus.QUEUED.value
+    assert run.failure_phase == "REFINE"
+    assert FakeSearchProvider.calls == 1
+    assert (
+        db.scalar(
+            select(func.count()).select_from(WebEvidence).where(WebEvidence.research_run_id == run_id)
+        )
+        == 1
+    )
+
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+    assert FakeSearchProvider.calls == 1
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.status == WebResearchRunStatus.READY.value
+    assert run.failure_phase is None
+
+
+def test_refine_manual_retry_skips_search(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeSearchProvider.calls = 0
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(client, ws, session_id)
+
+    monkeypatch.setenv("AI_JOB_MAX_ATTEMPTS", "1")
+    get_settings.cache_clear()
+    research_job = db.scalars(
+        select(AiJob).where(
+            AiJob.research_run_id == run_id,
+            AiJob.job_type == AiJobType.WEB_RESEARCH.value,
+        )
+    ).one()
+    research_job.max_attempts = 1
+    db.commit()
+
+    class AlwaysFailRefine(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            raise LlmTimeoutError()
+
+    search = FakeSearchProvider()
+    llm = AlwaysFailRefine()
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.status == WebResearchRunStatus.FAILED.value
+    assert run.failure_phase == "REFINE"
+    assert FakeSearchProvider.calls == 1
+
+    retry = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/{run_id}/retry",
+        headers=_headers(client),
+    )
+    assert retry.status_code == 200
+    assert retry.json()["status"] == "QUEUED"
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.failure_phase == "REFINE"
+
+    class RefineFromEvidence(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            ev_id = str(request.evidence[0].evidence_id)
+            return _refine_result(ev_id)
+
+    FakeSearchProvider.calls = 0
+    assert _run_research_worker_once(
+        db,
+        session_factory,
+        run_id,
+        provider=RefineFromEvidence(),
+        search_provider=search,
+    )
+    assert FakeSearchProvider.calls == 0
+
+
+def test_search_retry_researches(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_JOB_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+
+    class FlakySearchProvider:
+        provider_name = "flaky_search"
+        calls = 0
+
+        def search(self, *, query: str, max_results: int) -> list[WebSearchResult]:
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise WebSearchTimeoutError()
+            return [
+                WebSearchResult(
+                    title="Evidence Title",
+                    url="https://example.com/article",
+                    snippet="snippet",
+                    source="Example",
+                )
+            ]
+
+        def close(self) -> None:
+            pass
+
+    FlakySearchProvider.calls = 0
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(client, ws, session_id)
+
+    class RefineFromEvidence(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            ev_id = str(request.evidence[0].evidence_id)
+            return _refine_result(ev_id)
+
+    search = FlakySearchProvider()
+    llm = RefineFromEvidence()
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.status == WebResearchRunStatus.QUEUED.value
+    assert run.failure_phase == "SEARCH"
+    assert FlakySearchProvider.calls == 1
+
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+    assert FlakySearchProvider.calls == 2
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run.status == WebResearchRunStatus.READY.value
+
+
+def test_stale_lease_failure_phase_search(db: Session) -> None:
+
+    owner, _ = _user(db)
+    ws = _team(db, owner)
+    session = IdeaAiSession(
+        workspace_id=ws.id,
+        requester_id=owner.id,
+        purpose="CREATE",
+        status=IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+        input_text="idea",
+        research_recommended=False,
+    )
+    db.add(session)
+    db.flush()
+    run = WebResearchRun(
+        session_id=session.id,
+        requester_id=owner.id,
+        status=WebResearchRunStatus.SEARCHING.value,
+        queries_to_send=["query"],
+        base_draft_payload={"title": "t"},
+    )
+    db.add(run)
+    db.flush()
+    now = datetime.now(timezone.utc)
+    job = AiJob(
+        session_id=session.id,
+        research_run_id=run.id,
+        job_type=AiJobType.WEB_RESEARCH.value,
+        status=AiJobStatus.RUNNING.value,
+        attempts=3,
+        max_attempts=3,
+        available_at=now,
+        lease_until=now - timedelta(seconds=30),
+        worker_id="stale-worker",
+    )
+    db.add(job)
+    db.commit()
+
+    ai_worker.recover_stale_jobs(db, settings=get_settings())
+    db.expire_all()
+    run = db.get(WebResearchRun, run.id)
+    assert run.status == WebResearchRunStatus.FAILED.value
+    assert run.failure_phase == "SEARCH"
+
+
+def test_stale_lease_failure_phase_refine(db: Session) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    owner, _ = _user(db)
+    ws = _team(db, owner)
+    session = IdeaAiSession(
+        workspace_id=ws.id,
+        requester_id=owner.id,
+        purpose="CREATE",
+        status=IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+        input_text="idea",
+        research_recommended=False,
+    )
+    db.add(session)
+    db.flush()
+    run = WebResearchRun(
+        session_id=session.id,
+        requester_id=owner.id,
+        status=WebResearchRunStatus.REFINING.value,
+        queries_to_send=["query"],
+        base_draft_payload={"title": "t"},
+    )
+    db.add(run)
+    db.flush()
+    now = datetime.now(timezone.utc)
+    job = AiJob(
+        session_id=session.id,
+        research_run_id=run.id,
+        job_type=AiJobType.WEB_RESEARCH.value,
+        status=AiJobStatus.RUNNING.value,
+        attempts=3,
+        max_attempts=3,
+        available_at=now,
+        lease_until=now - timedelta(seconds=30),
+        worker_id="stale-worker",
+    )
+    db.add(job)
+    db.commit()
+
+    ai_worker.recover_stale_jobs(db, settings=get_settings())
+    db.expire_all()
+    run = db.get(WebResearchRun, run.id)
+    assert run.status == WebResearchRunStatus.FAILED.value
+    assert run.failure_phase == "REFINE"
+
+
+def test_preview_edit_cancel_new_preview(
+    client: TestClient,
+    db: Session,
+    session_factory,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+
+    preview_a = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/preview",
+        json={"queries": ["query A"], "current_draft": {"title": "AI Draft"}},
+        headers=_headers(client),
+    )
+    assert preview_a.status_code == 201
+    run_a_id = preview_a.json()["id"]
+
+    cancel = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/{run_a_id}/cancel",
+        headers=_headers(client),
+    )
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "CANCELLED"
+
+    preview_b = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/preview",
+        json={"queries": ["query B"], "current_draft": {"title": "AI Draft"}},
+        headers=_headers(client),
+    )
+    assert preview_b.status_code == 201, preview_b.text
+    body = preview_b.json()
+    assert body["status"] == "AWAITING_APPROVAL"
+    assert body["queries_to_send"] == ["query B"]
+    assert body["id"] != run_a_id
+
+
+def test_preview_draft_sanitizes_unknown_keys(
+    client: TestClient,
+    db: Session,
+    session_factory,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+
+    preview = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/research-runs/preview",
+        json={
+            "queries": ["query"],
+            "current_draft": {
+                "title": "AI Draft",
+                "background": "A",
+                "evil_field": "drop me",
+                "workspace_id": "secret",
+            },
+            "user_edited_fields": ["title", "not_a_field"],
+        },
+        headers=_headers(client),
+    )
+    assert preview.status_code == 201
+    run_id = uuid.UUID(preview.json()["id"])
+    run = db.get(WebResearchRun, run_id)
+    assert run.base_draft_payload == {"title": "AI Draft", "background": "A"}
+    assert run.user_edited_fields == ["title"]
