@@ -13,10 +13,17 @@ IdeaFlow/
 
 ## 현재 상태
 
-- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)**
-- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)**
+- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)**
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)**
 - Step 8: Frontend AI Input → processing polling → clarification → review → confirm → Idea 연결 완료
 - Step 9: Review 단계에서 승인된 Web Search → Evidence 저장 → Qwen 근거 기반 초안 보완 → Idea Detail 조사 및 근거 탭
+- Step 10: Review Request / Inbox, Comment + @Mention, In-app Notification (Bell). Review/Mention/Assignee는 Idea read ACL을 부여하지 않음. Email/Push 없음.
+
+## Step 10 — Review / Comment / Notification
+
+- **Review ACL:** Reviewer는 기존 Idea read ACL을 가진 ACTIVE workspace member만 지정 가능. Review 완료는 `Idea.stage_id` / `next_review_date`를 자동 변경하지 않음 (`suggested_next_review_date`만 저장).
+- **Comment ACL:** Idea read 권한 + ACTIVE member. Mention은 read ACL 대상만 가능하며 Share를 생성하지 않음.
+- **Notification:** DB에 관계 ID만 저장; list/unread 시 현재 Idea read ACL 재검증. Revoked ACL notification leak 방지.
 
 ## Step 9 — Web Research architecture
 

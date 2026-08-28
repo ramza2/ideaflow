@@ -1,6 +1,12 @@
 """ORM models package. Import all models here so Alembic sees metadata."""
 
 from app.models.ai import AiJob, IdeaAiSession
+from app.models.collaboration import (
+    IdeaComment,
+    IdeaCommentMention,
+    IdeaReviewRequest,
+    Notification,
+)
 from app.models.research import WebEvidence, WebResearchRun
 from app.models.auth import AuthSession
 from app.models.enums import (
@@ -19,6 +25,10 @@ from app.models.enums import (
     WorkspaceMemberStatus,
     WorkspaceRole,
     WorkspaceType,
+    NotificationType,
+    ReviewKind,
+    ReviewResult,
+    ReviewStatus,
     WebResearchRunStatus,
 )
 from app.models.idea import Idea
@@ -64,4 +74,12 @@ __all__ = [
     "WebResearchRun",
     "WebEvidence",
     "WebResearchRunStatus",
+    "IdeaReviewRequest",
+    "IdeaComment",
+    "IdeaCommentMention",
+    "Notification",
+    "ReviewKind",
+    "ReviewStatus",
+    "ReviewResult",
+    "NotificationType",
 ]

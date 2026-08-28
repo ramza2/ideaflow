@@ -16,9 +16,19 @@ import {
   Send,
   RefreshCw,
   Trash2,
+  ClipboardCheck,
+  AtSign,
 } from "lucide-react";
 import { deleteIdea, getIdea } from "../../api/ideas";
 import { getIdeaEvidence } from "../../api/webResearch";
+import {
+  createComment,
+  deleteComment,
+  listComments,
+  listMentionCandidates,
+  updateComment,
+} from "../../api/comments";
+import { createReviewRequest, listEligibleReviewers } from "../../api/reviews";
 import { ApiError, apiErrorMessage } from "../../api/client";
 import { Button } from "../../components/common/Button";
 import { toast } from "../../components/common/Toast";
@@ -31,8 +41,10 @@ import {
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { useAuth } from "../../auth/AuthProvider";
 import { toDisplayUser } from "../../utils/avatar";
-import type { IdeaDetail, IdeaEvidenceItem } from "../../types/api";
+import { REVIEW_KIND_OPTIONS, dispatchReviewCountsChanged } from "../../utils/collaboration";
+import type { IdeaComment, IdeaDetail, IdeaEvidenceItem, UserRef } from "../../types/api";
 
 type DetailTab = "overview" | "research" | "discussion" | "history";
 
@@ -49,6 +61,7 @@ const AI_EVOLVE_OPTIONS = [
 
 export function IdeaDetailPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { workspaceId = "", ideaId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = (searchParams.get("tab") as DetailTab) || "overview";
@@ -63,6 +76,26 @@ export function IdeaDetailPage() {
   const [evidence, setEvidence] = useState<IdeaEvidenceItem[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
+
+  const [comments, setComments] = useState<IdeaComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [commentBody, setCommentBody] = useState("");
+  const [mentionCandidates, setMentionCandidates] = useState<UserRef[]>([]);
+  const [selectedMentions, setSelectedMentions] = useState<UserRef[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [postingComment, setPostingComment] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingBody, setEditingBody] = useState("");
+
+  const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  const [eligibleReviewers, setEligibleReviewers] = useState<UserRef[]>([]);
+  const [reviewersLoading, setReviewersLoading] = useState(false);
+  const [reviewerId, setReviewerId] = useState("");
+  const [reviewKind, setReviewKind] = useState<"GENERAL" | "NEEDS_INFO" | "NEXT_STAGE">("GENERAL");
+  const [reviewMessage, setReviewMessage] = useState("");
+  const [reviewDueDate, setReviewDueDate] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
 
   function setTab(t: DetailTab) {
     setSearchParams({ tab: t }, { replace: true });
@@ -116,6 +149,130 @@ export function IdeaDetailPage() {
       cancelled = true;
     };
   }, [workspaceId, ideaId, tab]);
+
+  useEffect(() => {
+    if (!workspaceId || !ideaId || tab !== "discussion") return;
+    let cancelled = false;
+    setCommentsLoading(true);
+    setCommentsError(null);
+    void listComments(workspaceId, ideaId)
+      .then((data) => {
+        if (!cancelled) setComments(data.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCommentsError(apiErrorMessage(err, "댓글을 불러오지 못했습니다."));
+          setComments([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCommentsLoading(false);
+      });
+    void listMentionCandidates(workspaceId, ideaId)
+      .then((data) => {
+        if (!cancelled) setMentionCandidates(data.items);
+      })
+      .catch(() => {
+        if (!cancelled) setMentionCandidates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, ideaId, tab]);
+
+  async function openReviewModal() {
+    if (!workspaceId || !ideaId) return;
+    setReviewModalOpen(true);
+    setReviewersLoading(true);
+    setReviewerId("");
+    setReviewKind("GENERAL");
+    setReviewMessage("");
+    setReviewDueDate("");
+    try {
+      const data = await listEligibleReviewers(workspaceId, ideaId);
+      setEligibleReviewers(data.items);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "검토자 목록을 불러오지 못했습니다."));
+      setEligibleReviewers([]);
+    } finally {
+      setReviewersLoading(false);
+    }
+  }
+
+  async function handleSubmitReview() {
+    if (!workspaceId || !ideaId || !reviewerId) return;
+    setSubmittingReview(true);
+    try {
+      await createReviewRequest(workspaceId, ideaId, {
+        reviewer_id: reviewerId,
+        kind: reviewKind,
+        message: reviewMessage.trim() || null,
+        due_date: reviewDueDate || null,
+      });
+      toast.success("검토를 요청했습니다.");
+      setReviewModalOpen(false);
+      dispatchReviewCountsChanged();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "검토 요청에 실패했습니다."));
+    } finally {
+      setSubmittingReview(false);
+    }
+  }
+
+  function toggleMention(candidate: UserRef) {
+    setSelectedMentions((prev) => {
+      const exists = prev.some((m) => m.id === candidate.id);
+      if (exists) return prev.filter((m) => m.id !== candidate.id);
+      if (prev.length >= 20) {
+        toast.error("한 댓글에 최대 20명까지 언급할 수 있습니다.");
+        return prev;
+      }
+      return [...prev, candidate];
+    });
+  }
+
+  async function handlePostComment() {
+    if (!workspaceId || !ideaId || !commentBody.trim()) return;
+    setPostingComment(true);
+    try {
+      const created = await createComment(workspaceId, ideaId, {
+        body: commentBody.trim(),
+        mention_user_ids: selectedMentions.map((m) => m.id),
+      });
+      setComments((prev) => [...prev, created]);
+      setCommentBody("");
+      setSelectedMentions([]);
+      setMentionOpen(false);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "댓글 게시에 실패했습니다."));
+    } finally {
+      setPostingComment(false);
+    }
+  }
+
+  async function handleSaveEdit(commentId: string) {
+    if (!workspaceId || !ideaId || !editingBody.trim()) return;
+    try {
+      const updated = await updateComment(workspaceId, ideaId, commentId, {
+        body: editingBody.trim(),
+      });
+      setComments((prev) => prev.map((c) => (c.id === commentId ? updated : c)));
+      setEditingCommentId(null);
+      setEditingBody("");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "댓글 수정에 실패했습니다."));
+    }
+  }
+
+  async function handleDeleteComment(commentId: string) {
+    if (!workspaceId || !ideaId) return;
+    try {
+      await deleteComment(workspaceId, ideaId, commentId);
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "댓글 삭제에 실패했습니다."));
+    }
+  }
 
   function handleShare() {
     navigator.clipboard?.writeText(window.location.href).catch(() => {});
@@ -223,6 +380,16 @@ export function IdeaDetailPage() {
                 <Star className="w-4 h-4" />
               </Button>
               <Button variant="icon" title="공유" onClick={handleShare} className="hidden sm:flex"><Share2 className="w-4 h-4" /></Button>
+              {canEdit && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<ClipboardCheck className="w-3.5 h-3.5" />}
+                  onClick={() => void openReviewModal()}
+                >
+                  <span className="hidden sm:inline">검토 요청</span>
+                </Button>
+              )}
               {canEdit && (
                 <Button
                   variant="secondary"
@@ -357,18 +524,157 @@ export function IdeaDetailPage() {
 
           {tab === "discussion" && (
             <div className="max-w-xl">
-              <p className="text-sm text-[#6b6b80] mb-4">댓글 기능은 추후 제공됩니다.</p>
+              {commentsLoading ? (
+                <p className="text-sm text-[#6b6b80] mb-4">댓글을 불러오는 중...</p>
+              ) : commentsError ? (
+                <p className="text-sm text-[#dc2626] mb-4">{commentsError}</p>
+              ) : comments.length === 0 ? (
+                <p className="text-sm text-[#6b6b80] mb-4">아직 댓글이 없습니다. 첫 댓글을 남겨보세요.</p>
+              ) : (
+                <div className="space-y-4 mb-6">
+                  {comments.map((c) => {
+                    const commentAuthor = toDisplayUser(c.author);
+                    const isEditing = editingCommentId === c.id;
+                    return (
+                      <div key={c.id} className="flex gap-3">
+                        <Avatar user={commentAuthor} size="sm" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-sm font-medium text-[#111118]">{commentAuthor.name}</span>
+                            <span className="text-xs text-[#9ca3af]">
+                              {new Date(c.created_at).toLocaleString("ko")}
+                              {c.edited ? " (수정됨)" : ""}
+                            </span>
+                          </div>
+                          {isEditing ? (
+                            <div>
+                              <textarea
+                                value={editingBody}
+                                onChange={(e) => setEditingBody(e.target.value)}
+                                className="w-full h-20 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+                              />
+                              <div className="flex gap-2 mt-2">
+                                <Button variant="ghost" size="sm" onClick={() => setEditingCommentId(null)}>
+                                  취소
+                                </Button>
+                                <Button variant="primary" size="sm" onClick={() => void handleSaveEdit(c.id)}>
+                                  저장
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="text-sm text-[#111118] whitespace-pre-wrap">{c.body}</p>
+                              {c.mentions.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {c.mentions.map((m) => (
+                                    <span
+                                      key={m.id}
+                                      className="text-xs px-2 py-0.5 rounded-full bg-[#ede9fe] text-[#4f46e5]"
+                                    >
+                                      @{m.name}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {!isEditing && (c.can_edit || c.can_delete) && (
+                            <div className="flex gap-2 mt-2">
+                              {c.can_edit && (
+                                <button
+                                  type="button"
+                                  className="text-xs text-[#6b6b80] hover:text-[#4f46e5]"
+                                  onClick={() => {
+                                    setEditingCommentId(c.id);
+                                    setEditingBody(c.body);
+                                  }}
+                                >
+                                  수정
+                                </button>
+                              )}
+                              {c.can_delete && (
+                                <button
+                                  type="button"
+                                  className="text-xs text-[#dc2626] hover:underline"
+                                  onClick={() => void handleDeleteComment(c.id)}
+                                >
+                                  삭제
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <div className="flex gap-3 pt-2 border-t border-[rgba(0,0,0,0.06)]">
-                <Avatar user={author} size="sm" />
+                <Avatar
+                  user={user ? toDisplayUser({ id: user.id, name: user.name, email: user.email }) : author}
+                  size="sm"
+                />
                 <div className="flex-1">
                   <textarea
-                    value=""
-                    disabled
-                    placeholder="댓글 기능은 추후 제공됩니다"
-                    className="w-full h-20 rounded-lg border border-[rgba(0,0,0,0.1)] bg-[#f4f4f8] px-3 py-2 text-sm resize-none text-[#9ca3af] cursor-not-allowed"
+                    value={commentBody}
+                    onChange={(e) => setCommentBody(e.target.value)}
+                    placeholder="의견을 남겨보세요"
+                    className="w-full h-20 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20 focus:border-[#4f46e5]"
                   />
-                  <div className="flex justify-end mt-2">
-                    <Button variant="primary" size="sm" icon={<Send className="w-3.5 h-3.5" />} disabled>
+                  {selectedMentions.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {selectedMentions.map((m) => (
+                        <span
+                          key={m.id}
+                          className="text-xs px-2 py-0.5 rounded-full bg-[#ede9fe] text-[#4f46e5] flex items-center gap-1"
+                        >
+                          @{m.name}
+                          <button type="button" onClick={() => toggleMention(m)} className="hover:text-[#dc2626]">
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="relative">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<AtSign className="w-3.5 h-3.5" />}
+                        onClick={() => setMentionOpen(!mentionOpen)}
+                      >
+                        사용자 언급
+                      </Button>
+                      {mentionOpen && mentionCandidates.length > 0 && (
+                        <div className="absolute bottom-full left-0 mb-1 w-56 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1 z-10 max-h-40 overflow-y-auto">
+                          {mentionCandidates
+                            .filter((m) => m.id !== user?.id)
+                            .map((m) => (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => toggleMention(m)}
+                                className={clsx(
+                                  "w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]",
+                                  selectedMentions.some((s) => s.id === m.id) && "text-[#4f46e5]",
+                                )}
+                              >
+                                {m.name}
+                              </button>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<Send className="w-3.5 h-3.5" />}
+                      loading={postingComment}
+                      disabled={postingComment || !commentBody.trim()}
+                      onClick={() => void handlePostComment()}
+                    >
                       게시
                     </Button>
                   </div>
@@ -428,6 +734,88 @@ export function IdeaDetailPage() {
         confirmLabel={deleting ? "삭제 중..." : "삭제"}
         variant="danger"
       />
+
+      {reviewModalOpen && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.08)] shadow-xl w-full max-w-md p-6">
+            <h3 className="text-base font-bold text-[#111118] mb-4">검토 요청</h3>
+            {reviewersLoading ? (
+              <p className="text-sm text-[#6b6b80]">검토자 목록을 불러오는 중...</p>
+            ) : eligibleReviewers.length === 0 ? (
+              <p className="text-sm text-[#6b6b80] mb-4">
+                현재 공개 범위에서는 검토를 요청할 수 있는 사용자가 없습니다.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-[#111118] block mb-1.5">검토자</label>
+                  <select
+                    value={reviewerId}
+                    onChange={(e) => setReviewerId(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+                  >
+                    <option value="">선택하세요</option>
+                    {eligibleReviewers.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-[#111118] block mb-1.5">검토 유형</label>
+                  <select
+                    value={reviewKind}
+                    onChange={(e) =>
+                      setReviewKind(e.target.value as "GENERAL" | "NEEDS_INFO" | "NEXT_STAGE")
+                    }
+                    className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+                  >
+                    {REVIEW_KIND_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-[#111118] block mb-1.5">메시지 (선택)</label>
+                  <textarea
+                    value={reviewMessage}
+                    onChange={(e) => setReviewMessage(e.target.value)}
+                    className="w-full h-16 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-[#111118] block mb-1.5">검토 기한 (선택)</label>
+                  <input
+                    type="date"
+                    value={reviewDueDate}
+                    onChange={(e) => setReviewDueDate(e.target.value)}
+                    className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#4f46e5]/20"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 mt-5">
+              <Button variant="ghost" className="flex-1" onClick={() => setReviewModalOpen(false)}>
+                취소
+              </Button>
+              {eligibleReviewers.length > 0 && (
+                <Button
+                  variant="primary"
+                  className="flex-1"
+                  loading={submittingReview}
+                  disabled={submittingReview || !reviewerId}
+                  onClick={() => void handleSubmitReview()}
+                >
+                  요청
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

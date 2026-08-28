@@ -120,3 +120,33 @@ class FieldProvenanceSource(StrEnum):
 class AiLlmDecision(StrEnum):
     READY_FOR_REVIEW = "READY_FOR_REVIEW"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+
+
+# --- Step 10: Review / Comment / Notification ---
+
+
+class ReviewKind(StrEnum):
+    GENERAL = "GENERAL"
+    NEEDS_INFO = "NEEDS_INFO"
+    NEXT_STAGE = "NEXT_STAGE"
+
+
+class ReviewStatus(StrEnum):
+    OPEN = "OPEN"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class ReviewResult(StrEnum):
+    ADVANCE_RECOMMENDED = "ADVANCE_RECOMMENDED"
+    KEEP = "KEEP"
+    HOLD = "HOLD"
+    NEEDS_INFO = "NEEDS_INFO"
+
+
+class NotificationType(StrEnum):
+    REVIEW_REQUESTED = "REVIEW_REQUESTED"
+    REVIEW_COMPLETED = "REVIEW_COMPLETED"
+    COMMENT_ADDED = "COMMENT_ADDED"
+    MENTION = "MENTION"
+    ASSIGNED = "ASSIGNED"

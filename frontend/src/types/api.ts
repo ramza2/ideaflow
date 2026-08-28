@@ -408,3 +408,164 @@ export interface IdeaEvidenceItem {
 export interface IdeaEvidenceResponse {
   items: IdeaEvidenceItem[];
 }
+
+// --- Step 10: Review / Comment / Notification ---
+
+export type ReviewKind = "GENERAL" | "NEEDS_INFO" | "NEXT_STAGE";
+export type ReviewStatus = "OPEN" | "COMPLETED" | "CANCELLED";
+export type ReviewResult = "ADVANCE_RECOMMENDED" | "KEEP" | "HOLD" | "NEEDS_INFO";
+
+export interface UserRef {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface ReviewRequest {
+  id: string;
+  idea_id: string;
+  kind: ReviewKind;
+  status: ReviewStatus;
+  message?: string | null;
+  due_date?: string | null;
+  result?: ReviewResult | null;
+  completion_note?: string | null;
+  suggested_next_review_date?: string | null;
+  requested_by: UserRef;
+  reviewer: UserRef;
+  completed_at?: string | null;
+  cancelled_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewCreateRequest {
+  reviewer_id: string;
+  kind?: ReviewKind;
+  message?: string | null;
+  due_date?: string | null;
+}
+
+export interface ReviewCompleteRequest {
+  result: ReviewResult;
+  completion_note?: string | null;
+  suggested_next_review_date?: string | null;
+}
+
+export interface EligibleReviewerList {
+  items: UserRef[];
+}
+
+export type ReviewInboxTab =
+  | "scheduled"
+  | "overdue"
+  | "needs_info"
+  | "next_stage"
+  | "assigned"
+  | "mentioned";
+
+export interface ReviewInboxIdeaRef {
+  id: string;
+  idea_code: string;
+  title: string;
+  one_line_definition?: string | null;
+  stage?: { id: string; label: string } | null;
+  author?: UserRef | null;
+}
+
+export interface ReviewInboxReviewRef {
+  id: string;
+  kind: ReviewKind;
+  due_date?: string | null;
+  requested_by: UserRef;
+}
+
+export interface ReviewInboxCommentRef {
+  id: string;
+  body: string;
+  author: UserRef;
+  created_at: string;
+}
+
+export interface ReviewInboxItem {
+  source: "REVIEW_REQUEST" | "COMMENT" | "IDEA";
+  reason: ReviewInboxTab;
+  idea: ReviewInboxIdeaRef;
+  review_request?: ReviewInboxReviewRef | null;
+  comment?: ReviewInboxCommentRef | null;
+  created_at: string;
+}
+
+export interface ReviewInboxResponse {
+  items: ReviewInboxItem[];
+  total: number;
+}
+
+export interface ReviewInboxCounts {
+  scheduled: number;
+  overdue: number;
+  needs_info: number;
+  next_stage: number;
+  assigned: number;
+  mentioned: number;
+  pending_total: number;
+}
+
+export interface CommentMention {
+  id: string;
+  name: string;
+}
+
+export interface IdeaComment {
+  id: string;
+  body: string;
+  author: UserRef;
+  mentions: CommentMention[];
+  created_at: string;
+  updated_at: string;
+  edited: boolean;
+  can_edit: boolean;
+  can_delete: boolean;
+}
+
+export interface CommentListResponse {
+  items: IdeaComment[];
+  total: number;
+}
+
+export interface CommentCreateRequest {
+  body: string;
+  mention_user_ids?: string[];
+}
+
+export interface CommentUpdateRequest {
+  body: string;
+  mention_user_ids?: string[] | null;
+}
+
+export type NotificationType =
+  | "REVIEW_REQUESTED"
+  | "REVIEW_COMPLETED"
+  | "COMMENT_ADDED"
+  | "MENTION"
+  | "ASSIGNED";
+
+export interface NotificationItem {
+  id: string;
+  type: NotificationType;
+  read: boolean;
+  created_at: string;
+  actor?: UserRef | null;
+  idea?: ReviewInboxIdeaRef | null;
+  comment_id?: string | null;
+  review_request_id?: string | null;
+}
+
+export interface NotificationListResponse {
+  items: NotificationItem[];
+  total: number;
+}
+
+export interface NotificationUnreadCount {
+  count: number;
+}
