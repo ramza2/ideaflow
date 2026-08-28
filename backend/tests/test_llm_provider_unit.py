@@ -37,7 +37,7 @@ def make_settings(**overrides) -> Settings:
         llm_max_tokens=1000,
         llm_enable_thinking=False,
         ai_worker_enabled=False,
-        ai_job_lease_seconds=60,
+        ai_job_lease_seconds=300,
         ai_job_max_attempts=3,
         ai_job_poll_interval_seconds=1.0,
         ai_job_retry_base_seconds=2.0,

@@ -18,8 +18,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { deleteIdea, getIdea } from "../../api/ideas";
+import { getIdeaEvidence } from "../../api/webResearch";
 import { ApiError, apiErrorMessage } from "../../api/client";
-import { MOCK_EVIDENCE } from "../../mocks/evidence";
 import { Button } from "../../components/common/Button";
 import { toast } from "../../components/common/Toast";
 import {
@@ -32,7 +32,7 @@ import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { toDisplayUser } from "../../utils/avatar";
-import type { IdeaDetail } from "../../types/api";
+import type { IdeaDetail, IdeaEvidenceItem } from "../../types/api";
 
 type DetailTab = "overview" | "research" | "discussion" | "history";
 
@@ -60,6 +60,9 @@ export function IdeaDetailPage() {
   const [aiDrawer, setAiDrawer] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [evidence, setEvidence] = useState<IdeaEvidenceItem[]>([]);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
 
   function setTab(t: DetailTab) {
     setSearchParams({ tab: t }, { replace: true });
@@ -90,6 +93,29 @@ export function IdeaDetailPage() {
       cancelled = true;
     };
   }, [workspaceId, ideaId]);
+
+  useEffect(() => {
+    if (!workspaceId || !ideaId || tab !== "research") return;
+    let cancelled = false;
+    setEvidenceLoading(true);
+    setEvidenceError(null);
+    void getIdeaEvidence(workspaceId, ideaId)
+      .then((data) => {
+        if (!cancelled) setEvidence(data.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setEvidenceError(apiErrorMessage(err, "근거를 불러오지 못했습니다."));
+          setEvidence([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setEvidenceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, ideaId, tab]);
 
   function handleShare() {
     navigator.clipboard?.writeText(window.location.href).catch(() => {});
@@ -279,13 +305,51 @@ export function IdeaDetailPage() {
             <div className="max-w-2xl space-y-4">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-[#111118]">출처 및 근거</h3>
-                <Button variant="ghost" size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />}>다시 조사</Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<RefreshCw className="w-3.5 h-3.5" />}
+                  disabled
+                  title="확정된 아이디어 재조사는 추후 제공됩니다."
+                >
+                  다시 조사
+                </Button>
               </div>
-              {MOCK_EVIDENCE.map((ev) => (
+              {evidenceLoading && (
+                <p className="text-sm text-[#6b6b80]">근거를 불러오는 중...</p>
+              )}
+              {evidenceError && (
+                <p className="text-sm text-[#dc2626]">{evidenceError}</p>
+              )}
+              {!evidenceLoading && !evidenceError && evidence.length === 0 && (
+                <p className="text-sm text-[#6b6b80]">등록된 외부 검색 근거가 없습니다.</p>
+              )}
+              {evidence.map((ev) => (
                 <div key={ev.id} className="bg-white rounded-xl border border-[rgba(0,0,0,0.07)] p-4">
-                  <p className="text-sm font-semibold text-[#111118] mb-2">{ev.title}</p>
-                  <p className="text-xs text-[#6b6b80] mb-2">{ev.publisher} · {ev.publishedAt}</p>
-                  <p className="text-sm text-[#111118] leading-relaxed mb-3">{ev.summary}</p>
+                  <a
+                    href={ev.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-semibold text-[#2563eb] hover:underline"
+                  >
+                    {ev.title}
+                  </a>
+                  <p className="text-xs text-[#6b6b80] mb-2">
+                    {[ev.source_name, ev.domain].filter(Boolean).join(" · ")}
+                    {ev.published_at
+                      ? ` · ${new Date(ev.published_at).toLocaleDateString("ko")}`
+                      : ""}
+                  </p>
+                  {ev.snippet && (
+                    <p className="text-sm text-[#111118] leading-relaxed whitespace-pre-wrap mb-2">
+                      {ev.snippet}
+                    </p>
+                  )}
+                  {ev.related_fields.length > 0 && (
+                    <p className="text-xs text-[#9ca3af]">
+                      관련 필드: {ev.related_fields.join(", ")}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>

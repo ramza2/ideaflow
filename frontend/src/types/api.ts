@@ -328,3 +328,83 @@ export interface AiSessionConfirmResponse {
   created: boolean;
   idea: IdeaDetail;
 }
+
+/* --- Step 9: Web Research --- */
+
+export type WebResearchRunStatus =
+  | "AWAITING_APPROVAL"
+  | "QUEUED"
+  | "SEARCHING"
+  | "REFINING"
+  | "READY"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface SanitizationNotePublic {
+  query_index: number;
+  changed: boolean;
+}
+
+export interface WebResearchFailure {
+  phase?: string | null;
+  code?: string | null;
+  message?: string | null;
+}
+
+export interface WebEvidence {
+  id: string;
+  query: string;
+  title: string;
+  url: string;
+  domain?: string | null;
+  source_name?: string | null;
+  snippet?: string | null;
+  published_at?: string | null;
+  fetched_at: string;
+  rank: number;
+  related_fields: string[];
+}
+
+export interface WebResearchRun {
+  id: string;
+  session_id: string;
+  status: WebResearchRunStatus;
+  queries_to_send: string[];
+  sanitization_notes: SanitizationNotePublic[];
+  provider?: string | null;
+  result_count?: number | null;
+  research_summary?: string | null;
+  failure?: WebResearchFailure | null;
+  evidence: WebEvidence[];
+  approved_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebResearchPreviewRequest {
+  queries: string[];
+  current_draft: AiDraft;
+  user_edited_fields: string[];
+}
+
+export interface WebResearchLatestResponse {
+  run: WebResearchRun | null;
+}
+
+export interface IdeaEvidenceItem {
+  id: string;
+  title: string;
+  url: string;
+  domain?: string | null;
+  source_name?: string | null;
+  snippet?: string | null;
+  published_at?: string | null;
+  fetched_at: string;
+  related_fields: string[];
+}
+
+export interface IdeaEvidenceResponse {
+  items: IdeaEvidenceItem[];
+}

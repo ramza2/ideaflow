@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -18,14 +18,23 @@ import { Select } from "../../components/common/Input";
 import { ProgressStepper, InlineAlert } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
 import { confirmAiSession } from "../../api/aiSessions";
+import {
+  approveWebResearch,
+  cancelWebResearch,
+  previewWebResearch,
+  retryWebResearchRun,
+} from "../../api/webResearch";
 import { listCategories, listMembers, listStages } from "../../api/workspaces";
 import { ApiError, apiErrorMessage } from "../../api/client";
 import { useAuth } from "../../auth/useAuth";
+import { useWebResearch } from "../../ai/useWebResearch";
 import {
   mapProvenanceSource,
   parseVisibilityParam,
   useAiSession,
 } from "../../ai/useAiSession";
+import { WebSearchApprovalPanel } from "../../components/ai/WebSearchApprovalPanel";
+import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import type {
   AiDraft,
   AiFieldProvenance,
@@ -38,6 +47,7 @@ import type {
   IdeaVisibility,
   MemberPublic,
   StagePublic,
+  WebResearchRun,
 } from "../../types/api";
 import type { SourceBadgeType } from "../../types";
 
@@ -92,10 +102,21 @@ export function AIReviewPage() {
   const [searchParams] = useSearchParams();
   const initialVisibility = parseVisibilityParam(searchParams.get("visibility"));
   const { user } = useAuth();
+  const { currentWorkspace } = useWorkspace();
 
   const { session, loading, error, refresh } = useAiSession(workspaceId, sessionId, {
     pollWhenProcessing: false,
   });
+
+  const {
+    run: researchRun,
+    inProgress: researchInProgress,
+    refresh: refreshResearch,
+  } = useWebResearch(workspaceId, sessionId, {
+    enabled: Boolean(workspaceId && sessionId),
+  });
+
+  const allowWebSearch = currentWorkspace?.allow_web_search !== false;
 
   const [stages, setStages] = useState<StagePublic[]>([]);
   const [categories, setCategories] = useState<CategoryPublic[]>([]);
@@ -124,6 +145,14 @@ export function AIReviewPage() {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  const [researchPanelOpen, setResearchPanelOpen] = useState(false);
+  const [researchQueries, setResearchQueries] = useState<string[]>([]);
+  const [previewRun, setPreviewRun] = useState<WebResearchRun | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [approvingResearch, setApprovingResearch] = useState(false);
+  const [researchError, setResearchError] = useState<string | null>(null);
+  const lastAppliedResearchIdRef = useRef<string | null>(null);
 
   // Status guards
   useEffect(() => {
@@ -227,6 +256,32 @@ export function AIReviewPage() {
     initialVisibility,
   ]);
 
+  // Apply refreshed session draft after research completes (preserve user edits).
+  useEffect(() => {
+    if (!session || session.status !== "READY_FOR_REVIEW" || !initialized) return;
+    if (researchRun?.status !== "READY") return;
+    if (lastAppliedResearchIdRef.current === researchRun.id) return;
+
+    lastAppliedResearchIdRef.current = researchRun.id;
+    const serverDraft = session.draft ?? {};
+    setDraft((prev) => {
+      const merged: AiDraft = { ...serverDraft };
+      for (const key of editedKeys) {
+        if (key === "tags") continue;
+        const k = key as keyof AiDraft;
+        if (prev && prev[k] !== undefined) {
+          (merged as Record<string, unknown>)[k] = prev[k];
+        }
+      }
+      return merged;
+    });
+  }, [session, session?.draft, session?.updated_at, researchRun?.status, researchRun?.id, initialized, editedKeys]);
+
+  useEffect(() => {
+    if (researchRun?.status !== "READY") return;
+    void refresh();
+  }, [researchRun?.status, researchRun?.id, refresh]);
+
   const activeMembers = useMemo(
     () =>
       members.filter(
@@ -311,6 +366,10 @@ export function AIReviewPage() {
   }
 
   function handleRegister() {
+    if (researchInProgress) {
+      toast.warning("웹 조사 완료 후 등록할 수 있습니다.");
+      return;
+    }
     if (!titleOk) {
       toast.error("아이디어명을 입력해 주세요.");
       return;
@@ -382,6 +441,99 @@ export function AIReviewPage() {
       }
     } finally {
       setIsConfirming(false);
+    }
+  }
+
+  function openResearchPanel() {
+    const defaults =
+      researchQueries.length > 0
+        ? researchQueries
+        : (session?.research_topics ?? []).slice(0, 5);
+    setResearchQueries(defaults.length > 0 ? defaults : [""]);
+    setPreviewRun(
+      researchRun?.status === "AWAITING_APPROVAL" ? researchRun : null,
+    );
+    setResearchError(null);
+    setResearchPanelOpen(true);
+  }
+
+  async function handleResearchPreview() {
+    if (!workspaceId || !sessionId || loadingPreview) return;
+    const queries = researchQueries.map((q) => q.trim()).filter(Boolean);
+    if (queries.length === 0) return;
+
+    setLoadingPreview(true);
+    setResearchError(null);
+    try {
+      const run = await previewWebResearch(workspaceId, sessionId, {
+        queries,
+        current_draft: draft ?? {},
+        user_edited_fields: Array.from(editedKeys).filter((k) => k !== "tags"),
+      });
+      setPreviewRun(run);
+      await refreshResearch();
+    } catch (err) {
+      setResearchError(apiErrorMessage(err, "검색어 미리보기에 실패했습니다."));
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  async function handleResearchApprove() {
+    if (!workspaceId || !sessionId || !previewRun || approvingResearch) return;
+    setApprovingResearch(true);
+    setResearchError(null);
+    try {
+      await approveWebResearch(workspaceId, sessionId, previewRun.id);
+      setResearchPanelOpen(false);
+      setPreviewRun(null);
+      await refreshResearch();
+      toast.info("웹 검색을 시작합니다", "검색 결과로 초안을 보완합니다.");
+    } catch (err) {
+      setResearchError(apiErrorMessage(err, "검색 승인에 실패했습니다."));
+    } finally {
+      setApprovingResearch(false);
+    }
+  }
+
+  async function handleResearchCancel() {
+    if (previewRun?.status === "AWAITING_APPROVAL" && workspaceId && sessionId) {
+      try {
+        await cancelWebResearch(workspaceId, sessionId, previewRun.id);
+      } catch {
+        // ignore cancel errors on close
+      }
+    }
+    setResearchPanelOpen(false);
+    setPreviewRun(null);
+    setResearchError(null);
+  }
+
+  async function handleResearchRetry() {
+    if (!workspaceId || !sessionId || !researchRun) return;
+    try {
+      await retryWebResearchRun(workspaceId, sessionId, researchRun.id);
+      await refreshResearch();
+      toast.info("웹 검색을 다시 시도합니다");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "재시도에 실패했습니다."));
+    }
+  }
+
+  function researchStatusLabel(status: string | undefined): string {
+    switch (status) {
+      case "QUEUED":
+        return "검색 준비 중";
+      case "SEARCHING":
+        return "웹 자료 검색 중";
+      case "REFINING":
+        return "검색 근거로 초안 보완 중";
+      case "READY":
+        return "검색 완료";
+      case "FAILED":
+        return "검색/보완 실패";
+      default:
+        return "";
     }
   }
 
@@ -680,43 +832,124 @@ export function AIReviewPage() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              <div className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3">
-                <p className="text-xs font-semibold text-[#111118] mb-1">
-                  외부 검색 근거 없음
-                </p>
-                <p className="text-xs text-[#6b6b80]">
-                  현재 초안은 사용자 입력과 AI 구조화 결과로 작성되었습니다.
-                </p>
-              </div>
-
-              {session.research_recommended && (
+              {researchRun?.research_summary && (
                 <div className="bg-[#eff6ff] rounded-lg border border-[#bfdbfe] p-3">
-                  <p className="text-xs font-semibold text-[#1d4ed8] mb-1">
-                    웹 검색 권장
+                  <p className="text-xs font-semibold text-[#1d4ed8] mb-1">조사 요약 (AI)</p>
+                  <p className="text-xs text-[#1e40af] leading-relaxed">
+                    {researchRun.research_summary}
                   </p>
-                  <p className="text-xs text-[#6b6b80] mb-2">
-                    AI가 외부 조사를 권장합니다. (검색 실행은 Step 9)
+                </div>
+              )}
+
+              {researchInProgress && (
+                <div className="bg-[#fffbeb] rounded-lg border border-[#fde68a] p-3 flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-[#d97706]" />
+                  <p className="text-xs text-[#92400e]">
+                    {researchStatusLabel(researchRun?.status)}
                   </p>
-                  {(session.research_topics ?? []).length > 0 && (
-                    <ul className="list-disc pl-4 space-y-1">
-                      {(session.research_topics ?? []).map((t) => (
-                        <li key={t} className="text-xs text-[#1e40af]">
-                          {t}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="mt-3 w-full"
-                    disabled
-                    title="Step 9에서 제공"
-                  >
-                    웹 검색으로 보완
+                </div>
+              )}
+
+              {researchRun?.status === "FAILED" && (
+                <div className="bg-[#fef2f2] rounded-lg border border-[#fecaca] p-3">
+                  <p className="text-xs font-semibold text-[#b91c1c] mb-1">웹 조사 실패</p>
+                  <p className="text-xs text-[#7f1d1d] mb-2">
+                    {researchRun.failure?.message ?? "검색 또는 보완 중 오류가 발생했습니다."}
+                  </p>
+                  <Button variant="secondary" size="sm" onClick={() => void handleResearchRetry()}>
+                    다시 시도
                   </Button>
                 </div>
               )}
+
+              {(researchRun?.evidence ?? []).length > 0 ? (
+                <div className="space-y-2">
+                  {researchRun!.evidence.map((ev) => (
+                    <div
+                      key={ev.id}
+                      className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3"
+                    >
+                      <a
+                        href={ev.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-semibold text-[#2563eb] hover:underline line-clamp-2"
+                      >
+                        {ev.title}
+                      </a>
+                      <p className="text-xs text-[#9ca3af] mt-1">
+                        {[ev.source_name, ev.domain].filter(Boolean).join(" · ")}
+                        {ev.published_at
+                          ? ` · ${new Date(ev.published_at).toLocaleDateString("ko")}`
+                          : ""}
+                      </p>
+                      {ev.snippet && (
+                        <p className="text-xs text-[#6b6b80] mt-2 leading-relaxed whitespace-pre-wrap">
+                          {ev.snippet}
+                        </p>
+                      )}
+                      {ev.related_fields.length > 0 && (
+                        <p className="text-xs text-[#9ca3af] mt-2">
+                          관련 필드: {ev.related_fields.join(", ")}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : researchRun?.status === "READY" && (researchRun.result_count ?? 0) === 0 ? (
+                <div className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3">
+                  <p className="text-xs font-semibold text-[#111118] mb-1">
+                    검색 결과를 찾지 못했습니다.
+                  </p>
+                  <p className="text-xs text-[#6b6b80]">
+                    검색어를 수정하여 다시 시도할 수 있습니다.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg border border-[rgba(0,0,0,0.07)] p-3">
+                  <p className="text-xs font-semibold text-[#111118] mb-1">
+                    외부 검색 근거 없음
+                  </p>
+                  <p className="text-xs text-[#6b6b80]">
+                    현재 초안은 사용자 입력과 AI 구조화 결과로 작성되었습니다.
+                  </p>
+                </div>
+              )}
+
+              <div className="bg-[#eff6ff] rounded-lg border border-[#bfdbfe] p-3">
+                <p className="text-xs font-semibold text-[#1d4ed8] mb-1">웹 검색으로 보완</p>
+                {!allowWebSearch ? (
+                  <p className="text-xs text-[#6b6b80]">
+                    이 작업공간에서는 외부 웹 검색이 비활성화되어 있습니다.
+                  </p>
+                ) : (
+                  <>
+                    {session.research_recommended && (
+                      <p className="text-xs text-[#6b6b80] mb-2">
+                        AI가 외부 조사를 권장합니다.
+                      </p>
+                    )}
+                    {(session.research_topics ?? []).length > 0 && !researchRun && (
+                      <ul className="list-disc pl-4 space-y-1 mb-2">
+                        {(session.research_topics ?? []).map((t) => (
+                          <li key={t} className="text-xs text-[#1e40af]">
+                            {t}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="mt-1 w-full"
+                      disabled={researchInProgress || !allowWebSearch}
+                      onClick={openResearchPanel}
+                    >
+                      웹 검색으로 보완
+                    </Button>
+                  </>
+                )}
+              </div>
 
               {provenanceEntries.length > 0 && (
                 <div className="space-y-2">
@@ -778,7 +1011,8 @@ export function AIReviewPage() {
             variant="primary"
             icon={<Check className="w-4 h-4" />}
             onClick={handleRegister}
-            disabled={!titleOk || !selectedUsersOk}
+            disabled={!titleOk || !selectedUsersOk || researchInProgress}
+            title={researchInProgress ? "웹 조사 완료 후 등록할 수 있습니다." : undefined}
           >
             아이디어 등록
           </Button>
@@ -825,6 +1059,20 @@ export function AIReviewPage() {
           </div>
         </div>
       )}
+
+      <WebSearchApprovalPanel
+        open={researchPanelOpen}
+        onClose={() => void handleResearchCancel()}
+        initialQueries={researchQueries}
+        previewRun={previewRun}
+        loadingPreview={loadingPreview}
+        approving={approvingResearch}
+        error={researchError}
+        onQueriesChange={setResearchQueries}
+        onPreview={() => void handleResearchPreview()}
+        onApprove={() => void handleResearchApprove()}
+        onCancel={() => void handleResearchCancel()}
+      />
     </div>
   );
 }

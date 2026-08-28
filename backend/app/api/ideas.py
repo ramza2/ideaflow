@@ -20,8 +20,10 @@ from app.schemas.idea import (
     IdeaShareReplace,
     IdeaUpdate,
 )
+from app.schemas.research import IdeaEvidenceResponse
 from app.services import idea as idea_service
 from app.services import idea_access
+from app.services import web_research as web_research_service
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/ideas",
@@ -100,6 +102,20 @@ def get_idea(
         user_id=ctx.user.id,
     )
     return idea_service.to_detail(db, idea, user_id=ctx.user.id, share=share)
+
+
+@router.get("/{idea_id}/evidence", response_model=IdeaEvidenceResponse)
+def get_idea_evidence(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> IdeaEvidenceResponse:
+    return web_research_service.get_idea_evidence(
+        db,
+        workspace_id=ctx.workspace.id,
+        idea_id=idea_id,
+        user_id=ctx.user.id,
+    )
 
 
 @router.patch("/{idea_id}", response_model=IdeaDetail)
