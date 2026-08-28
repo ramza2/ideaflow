@@ -739,45 +739,36 @@ def test_notification_acl_revoked_on_share_removal(client: TestClient, db: Sessi
 
 
 def test_notification_recipient_isolation_404(client: TestClient, db: Session) -> None:
-    author_a, pw_a = _user(db)
-    author_b, pw_b = _user(db)
-    reviewer, _ = _user(db)
-    ws_a = _team(db, author_a)
-    ws_b = _team(db, author_b)
-    _add_member(db, ws_a, reviewer)
-    _add_member(db, ws_b, reviewer)
+    author, author_pw = _user(db)
+    reviewer, reviewer_pw = _user(db)
+    other_member, other_pw = _user(db)
+    ws = _team(db, author)
+    _add_member(db, ws, reviewer)
+    _add_member(db, ws, other_member)
 
-    _login(client, author_a.email, pw_a)
-    idea_a = _create_idea(client, ws_a.id, visibility="WORKSPACE")["id"]
-    review_a = client.post(
-        _reviews_url(ws_a.id, idea_a),
+    _login(client, author.email, author_pw)
+    idea_id = _create_idea(client, ws.id, visibility="WORKSPACE")["id"]
+    review_id = client.post(
+        _reviews_url(ws.id, idea_id),
         json={"reviewer_id": str(reviewer.id), "kind": "GENERAL"},
         headers=_headers(client),
     ).json()["id"]
 
-    _login(client, author_b.email, pw_b)
-    idea_b = _create_idea(client, ws_b.id, visibility="WORKSPACE")["id"]
-    client.post(
-        _reviews_url(ws_b.id, idea_b),
-        json={"reviewer_id": str(reviewer.id), "kind": "GENERAL"},
-        headers=_headers(client),
-    )
+    _login(client, reviewer.email, reviewer_pw)
+    note_id = client.get(_notifications_url(ws.id)).json()["items"][0]["id"]
 
-    _login(client, reviewer.email, "password-ok-1")
-    note_id = client.get(_notifications_url(ws_a.id)).json()["items"][0]["id"]
-
-    _login(client, author_b.email, pw_b)
+    _login(client, other_member.email, other_pw)
     r = client.post(
-        f"{_notifications_url(ws_a.id)}/{note_id}/read",
+        f"{_notifications_url(ws.id)}/{note_id}/read",
         headers=_headers(client),
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "NOTIFICATION_NOT_FOUND"
 
-    _login(client, reviewer.email, "password-ok-1")
+    _login(client, reviewer.email, reviewer_pw)
     assert (
         client.post(
-            f"/api/v1/workspaces/{ws_a.id}/reviews/{review_a}/complete",
+            f"/api/v1/workspaces/{ws.id}/reviews/{review_id}/complete",
             json={"result": "KEEP"},
             headers=_headers(client),
         ).status_code
