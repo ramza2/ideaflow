@@ -8,11 +8,33 @@ import sys
 from urllib.parse import quote
 
 
+_UNQUOTED_SAFE = re.compile(r"^[\w./:@+-]+$")
+_CONTROL_CHARS = re.compile(r"[\n\r\x00]")
+
+
+def _validate_dotenv_scalar(value: str) -> None:
+    if _CONTROL_CHARS.search(value):
+        raise ValueError("Value contains unsupported control characters")
+
+
 def _format_dotenv_value(value: str) -> str:
-    if re.fullmatch(r"[\w./:@+-]+", value):
+    """Format a value for Docker Compose .env literal preservation."""
+    _validate_dotenv_scalar(value)
+    if _UNQUOTED_SAFE.fullmatch(value):
         return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    escaped = value.replace("'", "'\\''")
+    return f"'{escaped}'"
+
+
+def _parse_raw_value(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        quote_char = raw[0]
+        inner = raw[1:-1]
+        if quote_char == "'":
+            return inner.replace("'\\''", "'")
+        return inner.replace('\\"', '"').replace("\\\\", "\\")
+    return raw
 
 
 def get_value(path: str, key: str) -> str | None:
@@ -25,14 +47,7 @@ def get_value(path: str, key: str) -> str | None:
             match = pattern.match(stripped)
             if not match:
                 continue
-            raw = match.group(1).strip()
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
-                quote_char = raw[0]
-                inner = raw[1:-1]
-                if quote_char == '"':
-                    inner = inner.replace('\\"', '"').replace("\\\\", "\\")
-                return inner
-            return raw
+            return _parse_raw_value(match.group(1))
     return None
 
 
@@ -81,8 +96,9 @@ def main() -> int:
         value = sys.stdin.read().rstrip("\n")
         set_value(sys.argv[2], sys.argv[3], value)
         return 0
-    if command == "database-url" and len(sys.argv) == 5:
-        print(build_database_url(sys.argv[2], sys.argv[3], sys.argv[4]))
+    if command == "database-url-stdin" and len(sys.argv) == 4:
+        password = sys.stdin.read().rstrip("\n")
+        print(build_database_url(sys.argv[2], password, sys.argv[3]))
         return 0
     return 2
 

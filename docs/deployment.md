@@ -148,7 +148,9 @@ To change deployment settings using the wizard with current `.env` values as def
 ./scripts/deploy.sh --configure
 ```
 
-PostgreSQL password is not displayed. Press Enter to keep the current password, or type a new value (hidden input). `DATABASE_URL` is regenerated when the password changes.
+You can update deployment mode, host/public URL, Traefik settings, CORS, and cookie options.
+
+**Database credential rotation is not performed by `--configure`.** Existing `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `DATABASE_URL` are kept unchanged to avoid mismatch with an already-initialized PostgreSQL volume. Coordinated PostgreSQL credential rotation requires a separate operational procedure (not implemented in this PR).
 
 ## Interactive setup
 

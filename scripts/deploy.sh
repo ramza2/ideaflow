@@ -382,7 +382,7 @@ or:
 
   log "No SYSTEM_ADMIN exists."
   log "Create initial administrator."
-  compose run --rm --no-deps -it backend python -m app.cli.create_admin
+  compose run --rm --no-deps backend python -m app.cli.create_admin
 }
 
 start_db() {

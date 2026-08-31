@@ -26,18 +26,17 @@ env_file_set_stdin() {
   python3 "${ENV_UTIL}" set-stdin "${file}" "${key}"
 }
 
-build_database_url() {
+build_database_url_stdin() {
   local user="$1"
-  local password="$2"
-  local database="$3"
-  python3 "${ENV_UTIL}" database-url "${user}" "${password}" "${database}"
+  local database="$2"
+  python3 "${ENV_UTIL}" database-url-stdin "${user}" "${database}"
 }
 
 prompt_with_default() {
   local label="$1"
   local default="$2"
   local input=""
-  printf '%s [%s]: ' "${label}" "${default}"
+  printf '%s [%s]: ' "${label}" "${default}" >&2
   IFS= read -r input || true
   input="${input#"${input%%[![:space:]]*}"}"
   input="${input%"${input##*[![:space:]]}"}"
@@ -50,7 +49,7 @@ prompt_with_default() {
 
 prompt_yes_no_default_yes() {
   local answer=""
-  printf 'Save this configuration? [Y/n]: '
+  printf 'Save this configuration? [Y/n]: ' >&2
   IFS= read -r answer || true
   answer="${answer#"${answer%%[![:space:]]*}"}"
   answer="${answer%"${answer##*[![:space:]]}"}"
@@ -63,37 +62,19 @@ generate_secure_password() {
 }
 
 prompt_postgres_password() {
-  local mode="$1"
   local password=""
 
-  if [[ "${mode}" == "keep" ]]; then
-    printf 'PostgreSQL password [Enter = keep current / type new value]:\n'
-    if ! IFS= read -r -s password; then
-      printf '\n' >&2
-      return 1
-    fi
-    printf '\n'
-    password="${password#"${password%%[![:space:]]*}"}"
-    password="${password%"${password##*[![:space:]]}"}"
-    if [[ -z "${password}" ]]; then
-      printf '%s' "__KEEP__"
-      return 0
-    fi
-    printf '%s' "${password}"
-    return 0
-  fi
-
-  printf 'PostgreSQL password [Enter = generate secure password]:\n'
+  printf 'PostgreSQL password [Enter = generate secure password]:\n' >&2
   if ! IFS= read -r -s password; then
     printf '\n' >&2
     return 1
   fi
-  printf '\n'
+  printf '\n' >&2
   password="${password#"${password%%[![:space:]]*}"}"
   password="${password%"${password##*[![:space:]]}"}"
   if [[ -z "${password}" ]]; then
     password="$(generate_secure_password)"
-    GENERATED_POSTGRES_PASSWORD=1
+    printf 'Generated a secure PostgreSQL password.\n' >&2
   fi
   printf '%s' "${password}"
 }
@@ -106,12 +87,13 @@ print_configuration_summary() {
   local certresolver="$5"
   local postgres_db="$6"
   local postgres_user="$7"
-  local secure_cookie="$8"
-  local cors_origin="$9"
-  local bind_address="${10:-}"
-  local http_port="${11:-}"
+  local postgres_pass_label="$8"
+  local secure_cookie="$9"
+  local cors_origin="${10}"
+  local bind_address="${11:-}"
+  local http_port="${12:-}"
 
-  cat <<EOF
+  cat <<EOF >&2
 
 Configuration summary
 
@@ -119,23 +101,23 @@ Deployment mode : ${deploy_mode}
 EOF
 
   if [[ "${deploy_mode}" == "traefik" ]]; then
-    cat <<EOF
+    cat <<EOF >&2
 Public URL      : ${public_url}
 Traefik network : ${traefik_network}
 Entrypoint      : ${entrypoint}
 Certresolver    : ${certresolver}
 EOF
   else
-    cat <<EOF
+    cat <<EOF >&2
 Bind address    : ${bind_address}
 HTTP port       : ${http_port}
 EOF
   fi
 
-  cat <<EOF
+  cat <<EOF >&2
 PostgreSQL DB   : ${postgres_db}
 PostgreSQL User : ${postgres_user}
-PostgreSQL Pass : configured
+PostgreSQL Pass : ${postgres_pass_label}
 
 Secure Cookie   : ${secure_cookie}
 CORS Origin     : ${cors_origin}
@@ -145,9 +127,7 @@ EOF
 run_configuration_wizard() {
   local source_env="${REPO_ROOT}/deploy/.env.example"
   local temp_env
-  local backup_env=""
-  local password_mode="generate"
-  local existing_password=""
+  local is_reconfigure=0
   local deploy_mode
   local ideaflow_host
   local public_url
@@ -161,28 +141,25 @@ run_configuration_wizard() {
   local postgres_db
   local postgres_user
   local postgres_password
+  local database_url
+  local postgres_pass_label="configured"
   local old_umask
 
   require_command python3
   require_command openssl
 
   if [[ -f .env ]]; then
-    backup_env=".env.backup"
-    cp .env "${backup_env}"
-    chmod 600 "${backup_env}" 2>/dev/null || true
+    is_reconfigure=1
+    cp .env .env.backup
+    chmod 600 .env.backup 2>/dev/null || true
     source_env=".env"
-    password_mode="keep"
   fi
 
   temp_env="$(mktemp "${REPO_ROOT}/.env.wizard.XXXXXX")"
   cp "${source_env}" "${temp_env}"
   chmod 600 "${temp_env}"
 
-  if [[ "${password_mode}" == "keep" ]]; then
-    existing_password="$(env_file_get "${temp_env}" POSTGRES_PASSWORD)"
-  fi
-
-  if [[ ! -f .env ]]; then
+  if [[ "${is_reconfigure}" -eq 0 ]]; then
     log ""
     log "IdeaFlow First Deployment Setup"
     log "-------------------------------"
@@ -205,7 +182,7 @@ run_configuration_wizard() {
   esac
 
   if [[ "${deploy_mode}" == "traefik" ]]; then
-    if [[ ! -f .env ]]; then
+    if [[ "${is_reconfigure}" -eq 0 ]]; then
       ideaflow_host="$(prompt_with_default "IdeaFlow host" "ideaflow.openlink.kr")"
       public_url="$(prompt_with_default "Public URL" "https://ideaflow.openlink.kr")"
       traefik_network="$(prompt_with_default "Traefik network" "traefik_proxy")"
@@ -223,7 +200,7 @@ run_configuration_wizard() {
       cors_origin="$(prompt_with_default "CORS origin" "$(env_file_get "${temp_env}" CORS_ORIGINS)")"
     fi
   else
-    if [[ ! -f .env ]]; then
+    if [[ "${is_reconfigure}" -eq 0 ]]; then
       bind_address="$(prompt_with_default "Bind address" "0.0.0.0")"
       http_port="$(prompt_with_default "HTTP port" "8080")"
       secure_cookie="$(prompt_with_default "Secure cookie" "false")"
@@ -236,33 +213,30 @@ run_configuration_wizard() {
     fi
   fi
 
-  if [[ ! -f .env ]]; then
+  if [[ "${is_reconfigure}" -eq 0 ]]; then
     postgres_db="$(prompt_with_default "PostgreSQL database" "ideaflow")"
     postgres_user="$(prompt_with_default "PostgreSQL user" "ideaflow")"
+    postgres_password="$(prompt_postgres_password)"
+    if [[ -z "${postgres_password}" ]]; then
+      rm -f "${temp_env}"
+      fail "PostgreSQL password is required."
+    fi
+    database_url="$(
+      printf '%s' "${postgres_password}" |
+        build_database_url_stdin "${postgres_user}" "${postgres_db}"
+    )"
+    printf '%s' "${postgres_password}" | env_file_set_stdin "${temp_env}" POSTGRES_PASSWORD
+    printf '%s' "${database_url}" | env_file_set_stdin "${temp_env}" DATABASE_URL
+    env_file_set "${temp_env}" POSTGRES_DB "${postgres_db}"
+    env_file_set "${temp_env}" POSTGRES_USER "${postgres_user}"
   else
-    postgres_db="$(prompt_with_default "PostgreSQL database" "$(env_file_get "${temp_env}" POSTGRES_DB)")"
-    postgres_user="$(prompt_with_default "PostgreSQL user" "$(env_file_get "${temp_env}" POSTGRES_USER)")"
-  fi
-
-  GENERATED_POSTGRES_PASSWORD=0
-  postgres_password="$(prompt_postgres_password "${password_mode}")"
-  if [[ "${postgres_password}" == "__KEEP__" ]]; then
-    postgres_password="${existing_password}"
-  elif [[ "${GENERATED_POSTGRES_PASSWORD}" -eq 1 ]]; then
-    log "Generated a secure PostgreSQL password."
-  fi
-
-  if [[ -z "${postgres_password}" ]]; then
-    rm -f "${temp_env}"
-    fail "PostgreSQL password is required."
+    postgres_db="$(env_file_get "${temp_env}" POSTGRES_DB)"
+    postgres_user="$(env_file_get "${temp_env}" POSTGRES_USER)"
+    postgres_pass_label="configured (unchanged)"
+    printf 'PostgreSQL password : configured (unchanged)\n' >&2
   fi
 
   env_file_set "${temp_env}" IDEAFLOW_DEPLOY_MODE "${deploy_mode}"
-  env_file_set "${temp_env}" POSTGRES_DB "${postgres_db}"
-  env_file_set "${temp_env}" POSTGRES_USER "${postgres_user}"
-  printf '%s' "${postgres_password}" | env_file_set_stdin "${temp_env}" POSTGRES_PASSWORD
-  database_url="$(build_database_url "${postgres_user}" "${postgres_password}" "${postgres_db}")"
-  env_file_set "${temp_env}" DATABASE_URL "${database_url}"
   env_file_set "${temp_env}" AUTH_COOKIE_SECURE "${secure_cookie}"
   env_file_set "${temp_env}" CORS_ORIGINS "${cors_origin}"
 
@@ -275,14 +249,15 @@ run_configuration_wizard() {
     env_file_set "${temp_env}" TRAEFIK_CERTRESOLVER "${traefik_certresolver}"
     print_configuration_summary \
       "${deploy_mode}" "${public_url}" "${traefik_network}" "${traefik_entrypoint}" \
-      "${traefik_certresolver}" "${postgres_db}" "${postgres_user}" "${secure_cookie}" \
-      "${cors_origin}"
+      "${traefik_certresolver}" "${postgres_db}" "${postgres_user}" "${postgres_pass_label}" \
+      "${secure_cookie}" "${cors_origin}"
   else
     env_file_set "${temp_env}" IDEAFLOW_BIND_ADDRESS "${bind_address}"
     env_file_set "${temp_env}" IDEAFLOW_HTTP_PORT "${http_port}"
     print_configuration_summary \
       "${deploy_mode}" "" "" "" "" "${postgres_db}" "${postgres_user}" \
-      "${secure_cookie}" "${cors_origin}" "${bind_address}" "${http_port}"
+      "${postgres_pass_label}" "${secure_cookie}" "${cors_origin}" \
+      "${bind_address}" "${http_port}"
   fi
 
   if ! prompt_yes_no_default_yes; then
