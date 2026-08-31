@@ -43,12 +43,15 @@ async def lifespan(_app: FastAPI):
     else:
         _ai_worker = None
         logger.info("AI worker disabled (AI_WORKER_ENABLED=false)")
-    if settings.embedding_worker_enabled:
+    if settings.embedding_worker_enabled and settings.embedding_enabled:
         _embedding_worker = EmbeddingWorker(settings=settings)
         _embedding_worker.start()
     else:
         _embedding_worker = None
-        logger.info("Embedding worker disabled (EMBEDDING_WORKER_ENABLED=false)")
+        if not settings.embedding_worker_enabled:
+            logger.info("Embedding worker disabled (EMBEDDING_WORKER_ENABLED=false)")
+        else:
+            logger.info("Embedding worker not started (EMBEDDING_ENABLED=false)")
     try:
         yield
     finally:

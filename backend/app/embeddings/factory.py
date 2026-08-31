@@ -18,5 +18,9 @@ def get_embedding_provider(settings: Settings | None = None) -> EmbeddingProvide
     if provider == "openai_compatible":
         return OpenAICompatibleEmbeddingProvider(cfg)
     if provider == "fake":
+        if cfg.app_env.strip().lower() == "production":
+            raise EmbeddingConfigurationError(
+                "EMBEDDING_PROVIDER=fake is not allowed when APP_ENV=production"
+            )
         return FakeEmbeddingProvider(cfg)
     raise EmbeddingConfigurationError(f"Unknown EMBEDDING_PROVIDER: {cfg.embedding_provider}")

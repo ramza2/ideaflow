@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -28,9 +28,26 @@ _ACTIVE_JOB_STATUSES = {
     IdeaEmbeddingJobStatus.RUNNING.value,
 }
 
+_EMBEDDING_STORAGE_READY: bool | None = None
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def embedding_storage_ready(db: Session) -> bool:
+    """Return whether pgvector embedding tables are available in this database."""
+    global _EMBEDDING_STORAGE_READY
+    if _EMBEDDING_STORAGE_READY is not None:
+        return _EMBEDDING_STORAGE_READY
+    try:
+        bind = db.get_bind()
+        with bind.connect() as conn:
+            conn.execute(text("SELECT 1 FROM idea_embeddings LIMIT 1"))
+        _EMBEDDING_STORAGE_READY = True
+    except Exception:
+        _EMBEDDING_STORAGE_READY = False
+    return _EMBEDDING_STORAGE_READY
 
 
 def load_idea_tag_names(db: Session, idea_id: UUID) -> list[str]:
@@ -56,20 +73,44 @@ def invalidate_embedding(db: Session, idea_id: UUID) -> None:
         db.flush()
 
 
-def enqueue_embedding_if_needed(
+def _reset_job_for_hash(
+    job: IdeaEmbeddingJob,
+    *,
+    content_hash: str,
+    max_attempts: int,
+) -> None:
+    job.content_hash = content_hash
+    job.status = IdeaEmbeddingJobStatus.QUEUED.value
+    job.available_at = utcnow()
+    job.attempts = 0
+    job.max_attempts = max_attempts
+    job.locked_at = None
+    job.lease_until = None
+    job.worker_id = None
+    job.last_error_code = None
+    job.last_error_message = None
+
+
+def sync_embedding_desired_state(
     db: Session,
     idea: Idea,
     *,
     settings: Settings | None = None,
     force: bool = False,
 ) -> bool:
-    """Enqueue or refresh an embedding job. Returns True if a job was queued/updated."""
+    """Invalidate stale vectors and sync the desired job hash.
+
+    Always removes outdated ``IdeaEmbedding`` rows when content is not current,
+    regardless of ``EMBEDDING_ENABLED``. Enqueue/API work only happens when
+    embeddings are enabled (or an existing job row must be updated).
+    """
     cfg = settings or get_settings()
-    if not cfg.embedding_enabled:
+    if not embedding_storage_ready(db):
         return False
 
     content_hash = compute_idea_content_hash(db, idea)
     existing = db.get(IdeaEmbedding, idea.id)
+
     if (
         not force
         and existing is not None
@@ -83,45 +124,54 @@ def enqueue_embedding_if_needed(
     ):
         return False
 
+    had_embedding = existing is not None
+    invalidate_embedding(db, idea.id)
+
     job = db.get(IdeaEmbeddingJob, idea.id)
     if job is not None:
         if (
             not force
+            and not had_embedding
             and job.content_hash == content_hash
             and job.status in _ACTIVE_JOB_STATUSES
         ):
             return False
-        if job.content_hash != content_hash:
-            invalidate_embedding(db, idea.id)
-        job.content_hash = content_hash
-        job.status = IdeaEmbeddingJobStatus.QUEUED.value
-        job.available_at = utcnow()
-        job.attempts = 0
-        job.max_attempts = cfg.embedding_job_max_attempts
-        job.locked_at = None
-        job.lease_until = None
-        job.worker_id = None
-        job.last_error_code = None
-        job.last_error_message = None
+        _reset_job_for_hash(job, content_hash=content_hash, max_attempts=cfg.embedding_job_max_attempts)
         db.add(job)
         db.flush()
         return True
 
-    invalidate_embedding(db, idea.id)
-    db.add(
-        IdeaEmbeddingJob(
-            idea_id=idea.id,
-            content_hash=content_hash,
-            status=IdeaEmbeddingJobStatus.QUEUED.value,
-            max_attempts=cfg.embedding_job_max_attempts,
+    if cfg.embedding_enabled:
+        db.add(
+            IdeaEmbeddingJob(
+                idea_id=idea.id,
+                content_hash=content_hash,
+                status=IdeaEmbeddingJobStatus.QUEUED.value,
+                max_attempts=cfg.embedding_job_max_attempts,
+            )
         )
-    )
-    db.flush()
-    return True
+        db.flush()
+        return True
+
+    return had_embedding
 
 
 def on_idea_embedding_content_changed(db: Session, idea: Idea) -> None:
-    enqueue_embedding_if_needed(db, idea)
+    sync_embedding_desired_state(db, idea)
+
+
+def enqueue_embedding_if_needed(
+    db: Session,
+    idea: Idea,
+    *,
+    settings: Settings | None = None,
+    force: bool = False,
+) -> bool:
+    """Enqueue or refresh an embedding job (requires embeddings enabled)."""
+    cfg = settings or get_settings()
+    if not cfg.embedding_enabled:
+        return False
+    return sync_embedding_desired_state(db, idea, settings=cfg, force=force)
 
 
 def scan_ideas_for_enqueue(
@@ -133,6 +183,9 @@ def scan_ideas_for_enqueue(
 ) -> tuple[int, int, int]:
     """Return (scanned, already_current, queued)."""
     cfg = settings or get_settings()
+    if not cfg.embedding_enabled:
+        return 0, 0, 0
+
     stmt = select(Idea).where(Idea.deleted_at.is_(None))
     if workspace_id is not None:
         stmt = stmt.where(Idea.workspace_id == workspace_id)
@@ -156,7 +209,7 @@ def scan_ideas_for_enqueue(
         ):
             already_current += 1
             continue
-        if enqueue_embedding_if_needed(db, idea, settings=cfg, force=force):
+        if sync_embedding_desired_state(db, idea, settings=cfg, force=force):
             queued += 1
     return scanned, already_current, queued
 

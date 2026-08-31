@@ -17,16 +17,20 @@ from app.embeddings.exceptions import (
     EmbeddingTimeoutError,
 )
 from app.embeddings.fake import FakeEmbeddingProvider
+from app.embeddings.exceptions import EmbeddingConfigurationError
+from app.embeddings.factory import get_embedding_provider
 from app.embeddings.openai_compatible import OpenAICompatibleEmbeddingProvider, _validate_vector
 
 
 def _settings(**overrides) -> Settings:
     base = {
+        "EMBEDDING_ENABLED": True,
         "EMBEDDING_API_URL": "http://embed.test",
         "EMBEDDING_MODEL_NAME": "BAAI/bge-m3",
         "EMBEDDING_DIMENSION": EMBEDDING_DIMENSION,
         "EMBEDDING_TIMEOUT_SECONDS": 5,
         "EMBEDDING_CONNECT_TIMEOUT_SECONDS": 1,
+        "APP_ENV": "development",
     }
     base.update(overrides)
     return Settings(_env_file=None, **base)
@@ -131,7 +135,7 @@ def test_openai_compatible_malformed_and_dimension() -> None:
 
 
 def test_fake_provider_is_deterministic() -> None:
-    settings = _settings(EMBEDDING_PROVIDER="fake")
+    settings = _settings(EMBEDDING_PROVIDER="fake", APP_ENV="development")
     provider = FakeEmbeddingProvider(settings)
     a = provider.embed_text("alpha")
     b = provider.embed_text("alpha")
@@ -139,3 +143,23 @@ def test_fake_provider_is_deterministic() -> None:
     assert a == b
     assert a != c
     assert all(math.isfinite(v) for v in a)
+
+
+def test_fake_provider_rejected_in_production() -> None:
+    settings = _settings(EMBEDDING_PROVIDER="fake", APP_ENV="production", EMBEDDING_ENABLED=True)
+    with pytest.raises(EmbeddingConfigurationError, match="fake"):
+        get_embedding_provider(settings)
+
+
+def test_fake_provider_allowed_in_development() -> None:
+    settings = _settings(EMBEDDING_PROVIDER="fake", APP_ENV="development", EMBEDDING_ENABLED=True)
+    provider = get_embedding_provider(settings)
+    assert isinstance(provider, FakeEmbeddingProvider)
+    provider.close()
+
+
+def test_fake_provider_allowed_in_test_env() -> None:
+    settings = _settings(EMBEDDING_PROVIDER="fake", APP_ENV="test", EMBEDDING_ENABLED=True)
+    provider = get_embedding_provider(settings)
+    assert isinstance(provider, FakeEmbeddingProvider)
+    provider.close()

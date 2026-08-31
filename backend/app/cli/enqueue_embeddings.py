@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from uuid import UUID
 
 from app.core.config import get_settings

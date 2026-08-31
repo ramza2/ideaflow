@@ -33,8 +33,13 @@ from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceStage
 from app.schemas.idea import IdeaCreate, IdeaUpdate
 from app.services import idea as idea_service
-from app.services.embedding_service import compute_idea_content_hash, enqueue_embedding_if_needed
-from app.services.embedding_worker import process_claimed_embedding_job, run_once
+from app.services.embedding_service import load_idea_tag_names
+from app.services.embedding_worker import (
+    finalize_embedding_result,
+    prepare_claimed_embedding_work,
+    process_claimed_embedding_job,
+    run_once,
+)
 from app.services.workspace import seed_workspace_defaults
 from tests.pgvector_helpers import DATABASE_URL, requires_database, requires_pgvector
 
@@ -79,8 +84,10 @@ def client(engine, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EMBEDDING_WORKER_ENABLED", "false")
     monkeypatch.setenv("EMBEDDING_ENABLED", "true")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.test")
     monkeypatch.setenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
+    monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
     reset_engine()
     with TestClient(app) as c:
@@ -226,11 +233,13 @@ def test_worker_success_stores_embedding(db: Session, monkeypatch: pytest.Monkey
     idea = _create_idea(db, ws, owner, title="Worker success")
     settings = get_settings()
     worker_id = "test-worker"
+    session_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
     processed = run_once(
         db,
         worker_id=worker_id,
         settings=settings,
         provider_factory=lambda s: FakeEmbeddingProvider(s),
+        session_factory=session_factory,
     )
     assert processed
     row = db.get(IdeaEmbedding, idea.id)
@@ -238,46 +247,156 @@ def test_worker_success_stores_embedding(db: Session, monkeypatch: pytest.Monkey
     assert row.dimension == EMBEDDING_DIMENSION
 
 
-def test_race_stale_hash_not_saved(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_race_two_independent_sessions_not_saved(engine, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDDING_ENABLED", "true")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
-    owner, _ = _user(db)
-    ws = _team(db, owner)
-    idea = _create_idea(db, ws, owner, title="Hash A", problem="alpha")
-    job = db.get(IdeaEmbeddingJob, idea.id)
+
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=True)
+    setup_session = SessionFactory()
+    owner, _ = _user(setup_session)
+    ws = _team(setup_session, owner)
+    idea = _create_idea(setup_session, ws, owner, title="Hash A", problem="alpha content")
+    job = setup_session.get(IdeaEmbeddingJob, idea.id)
     assert job is not None
     hash_a = job.content_hash
-
-    class SlowProvider(FakeEmbeddingProvider):
-        def embed_text(self, text: str) -> list[float]:
-            idea_service.update_idea(
-                db,
-                idea=db.get(Idea, idea.id),
-                access="OWNER",
-                payload=IdeaUpdate.model_validate({"problem": "beta changed"}),
-            )
-            db.commit()
-            return super().embed_text(text)
-
+    idea_id = idea.id
     job.status = IdeaEmbeddingJobStatus.RUNNING.value
-    job.worker_id = "w1"
+    job.worker_id = "worker-1"
     job.lease_until = datetime.now(timezone.utc) + timedelta(minutes=5)
     job.locked_at = datetime.now(timezone.utc)
-    db.commit()
+    setup_session.commit()
+    setup_session.close()
 
     settings = get_settings()
-    process_claimed_embedding_job(
+
+    class CrossSessionProvider(FakeEmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            request_session = SessionFactory()
+            try:
+                fresh_idea = request_session.get(Idea, idea_id)
+                idea_service.update_idea(
+                    request_session,
+                    idea=fresh_idea,
+                    access="OWNER",
+                    payload=IdeaUpdate.model_validate({"problem": "beta content changed"}),
+                )
+                request_session.commit()
+            finally:
+                request_session.close()
+            return super().embed_text(text)
+
+    worker_session = SessionFactory()
+    try:
+        worker_job = worker_session.get(IdeaEmbeddingJob, idea_id)
+        work = prepare_claimed_embedding_work(
+            worker_session,
+            job=worker_job,
+            worker_id="worker-1",
+        )
+        assert work is not None
+        assert work.content_hash == hash_a
+        worker_session.commit()
+
+        provider = CrossSessionProvider(settings)
+        vector = provider.embed_text(work.embedding_text)
+
+        finalize_session = SessionFactory()
+        try:
+            finalize_embedding_result(
+                finalize_session,
+                idea_id=work.idea_id,
+                workspace_id=work.workspace_id,
+                worker_id="worker-1",
+                claimed_hash=work.content_hash,
+                vector=vector,
+                settings=settings,
+            )
+        finally:
+            finalize_session.close()
+    finally:
+        worker_session.close()
+
+    verify_session = SessionFactory()
+    try:
+        row = verify_session.get(IdeaEmbedding, idea_id)
+        assert row is None or row.content_hash != hash_a
+
+        refreshed_job = verify_session.get(IdeaEmbeddingJob, idea_id)
+        assert refreshed_job is not None
+        assert refreshed_job.content_hash != hash_a
+        assert refreshed_job.status != IdeaEmbeddingJobStatus.SUCCEEDED.value
+
+        worker_session2 = SessionFactory()
+        try:
+            processed = run_once(
+                worker_session2,
+                worker_id="worker-2",
+                settings=settings,
+                provider_factory=lambda s: FakeEmbeddingProvider(s),
+                session_factory=SessionFactory,
+            )
+            assert processed
+        finally:
+            worker_session2.close()
+
+        final_row = verify_session.get(IdeaEmbedding, idea_id)
+        assert final_row is not None
+        assert final_row.content_hash == refreshed_job.content_hash
+    finally:
+        verify_session.close()
+
+
+def test_disabled_content_update_invalidates_embedding(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    idea = _create_idea(db, ws, owner, title="Stale guard", problem="alpha semantic content")
+    from app.embeddings.canonical import build_idea_embedding_text
+
+    text_a = build_idea_embedding_text(idea, load_idea_tag_names(db, idea.id))
+    _store_embedding(db, idea, text=text_a)
+    assert db.get(IdeaEmbedding, idea.id) is not None
+
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    get_settings.cache_clear()
+
+    idea = db.get(Idea, idea.id)
+    idea_service.update_idea(
         db,
-        job=db.get(IdeaEmbeddingJob, idea.id),
-        worker_id="w1",
-        provider=SlowProvider(settings),
-        settings=settings,
+        idea=idea,
+        access="OWNER",
+        payload=IdeaUpdate.model_validate({"problem": "beta semantic content"}),
     )
-    refreshed_job = db.get(IdeaEmbeddingJob, idea.id)
-    assert refreshed_job.content_hash != hash_a
-    row = db.get(IdeaEmbedding, idea.id)
-    assert row is None or row.content_hash != hash_a
+    db.commit()
+
+    assert db.get(IdeaEmbedding, idea.id) is None
+
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        assert job.content_hash != compute_content_hash(text_a)
+
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    get_settings.cache_clear()
+    reset_engine()
+
+    headers = _login(client, owner.email, pw)
+    r = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas",
+        params={"q": "beta semantic content", "search_mode": "semantic"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    ids = [item["id"] for item in r.json()["items"]]
+    assert str(idea.id) not in ids
 
 
 def test_semantic_private_acl(client: TestClient, db: Session) -> None:
