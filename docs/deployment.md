@@ -369,6 +369,8 @@ Optional frontend build-time search mode (default `keyword`):
 VITE_IDEA_SEARCH_MODE=hybrid
 ```
 
+Hybrid search (`search_mode=hybrid`) fuses keyword and semantic rankings within a **top-300 result window**. Requests where `offset + limit` exceeds `300` return `400` with code `HYBRID_RESULT_WINDOW_EXCEEDED`. The `total` field reflects the fused match count within that window (at most 300). Keyword and semantic search pagination are unchanged.
+
 Changing `EMBEDDING_DIMENSION` requires a new database migration — the schema is fixed at `vector(1024)`.
 
 Example:

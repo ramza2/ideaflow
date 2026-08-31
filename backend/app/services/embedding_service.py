@@ -38,16 +38,16 @@ def utcnow() -> datetime:
 def embedding_storage_ready(db: Session) -> bool:
     """Return whether pgvector embedding tables are available in this database."""
     global _EMBEDDING_STORAGE_READY
-    if _EMBEDDING_STORAGE_READY is not None:
-        return _EMBEDDING_STORAGE_READY
+    if _EMBEDDING_STORAGE_READY is True:
+        return True
     try:
         bind = db.get_bind()
         with bind.connect() as conn:
             conn.execute(text("SELECT 1 FROM idea_embeddings LIMIT 1"))
-        _EMBEDDING_STORAGE_READY = True
     except Exception:
-        _EMBEDDING_STORAGE_READY = False
-    return _EMBEDDING_STORAGE_READY
+        return False
+    _EMBEDDING_STORAGE_READY = True
+    return True
 
 
 def load_idea_tag_names(db: Session, idea_id: UUID) -> list[str]:

@@ -23,9 +23,19 @@ from app.services.idea import (
 )
 
 RRF_K = 60
+HYBRID_MAX_RESULT_WINDOW = 300
 HYBRID_CANDIDATE_MIN = 50
 HYBRID_CANDIDATE_MULTIPLIER = 3
-HYBRID_CANDIDATE_MAX = 300
+HYBRID_CANDIDATE_MAX = HYBRID_MAX_RESULT_WINDOW
+
+
+def _validate_hybrid_result_window(offset: int, limit: int) -> None:
+    if offset + limit > HYBRID_MAX_RESULT_WINDOW:
+        raise AppError(
+            f"Hybrid search supports offset + limit up to {HYBRID_MAX_RESULT_WINDOW}.",
+            code="HYBRID_RESULT_WINDOW_EXCEEDED",
+            status_code=400,
+        )
 
 
 def _require_semantic_enabled(settings: Settings | None = None) -> Settings:
@@ -247,10 +257,11 @@ def list_hybrid_ideas(
     provider_factory=None,
 ) -> tuple[list[Idea], int]:
     cfg = _require_semantic_enabled(settings)
+    limit, offset = _normalize_list_pagination(limit, offset)
+    _validate_hybrid_result_window(offset, limit)
     factory = provider_factory or get_embedding_provider
     query_vector = _embed_query(q, settings=cfg, provider_factory=factory)
-    limit, offset = _normalize_list_pagination(limit, offset)
-    pool = _candidate_limit(limit, offset)
+    pool = HYBRID_MAX_RESULT_WINDOW
 
     keyword_ids = _keyword_ranked_ids(
         db,

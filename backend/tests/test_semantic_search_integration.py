@@ -614,3 +614,34 @@ def test_hybrid_acl_race_revalidates_final_fetch(
     ids = [item["id"] for item in payload["items"]]
     assert str(idea_id) not in ids
     assert payload["total"] == 0
+
+
+def test_hybrid_result_window_within_limit(client: TestClient, db: Session) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    idea = _create_idea(db, ws, owner, title="window ok", problem="hybrid window content")
+    from app.embeddings.canonical import build_idea_embedding_text
+
+    _store_embedding(db, idea, text=build_idea_embedding_text(idea, load_idea_tag_names(db, idea.id)))
+
+    headers = _login(client, owner.email, pw)
+    r = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas",
+        params={"q": "hybrid window", "search_mode": "hybrid", "offset": 0, "limit": 50},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] <= 300
+
+
+def test_hybrid_result_window_exceeded_returns_400(client: TestClient, db: Session) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    headers = _login(client, owner.email, pw)
+    r = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas",
+        params={"q": "anything", "search_mode": "hybrid", "offset": 300, "limit": 1},
+        headers=headers,
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "HYBRID_RESULT_WINDOW_EXCEEDED"
