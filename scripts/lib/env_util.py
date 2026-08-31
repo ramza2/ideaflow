@@ -17,13 +17,31 @@ def _validate_dotenv_scalar(value: str) -> None:
         raise ValueError("Value contains unsupported control characters")
 
 
+def _escape_single_quoted(value: str) -> str:
+  """Escape a value for Docker Compose single-quoted .env syntax."""
+  return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _unescape_single_quoted(inner: str) -> str:
+    """Unescape Docker Compose single-quoted .env syntax."""
+    chars: list[str] = []
+    index = 0
+    while index < len(inner):
+        if inner[index] == "\\" and index + 1 < len(inner):
+            chars.append(inner[index + 1])
+            index += 2
+            continue
+        chars.append(inner[index])
+        index += 1
+    return "".join(chars)
+
+
 def _format_dotenv_value(value: str) -> str:
     """Format a value for Docker Compose .env literal preservation."""
     _validate_dotenv_scalar(value)
     if _UNQUOTED_SAFE.fullmatch(value):
         return value
-    escaped = value.replace("'", "'\\''")
-    return f"'{escaped}'"
+    return f"'{_escape_single_quoted(value)}'"
 
 
 def _parse_raw_value(raw: str) -> str:
@@ -32,7 +50,7 @@ def _parse_raw_value(raw: str) -> str:
         quote_char = raw[0]
         inner = raw[1:-1]
         if quote_char == "'":
-            return inner.replace("'\\''", "'")
+            return _unescape_single_quoted(inner)
         return inner.replace('\\"', '"').replace("\\\\", "\\")
     return raw
 

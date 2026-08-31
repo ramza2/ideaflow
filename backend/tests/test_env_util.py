@@ -15,6 +15,18 @@ _spec.loader.exec_module(env_util)
 
 
 @pytest.mark.parametrize(
+    ("value", "expected_formatted"),
+    [
+        ("abc$123 xyz", "'abc$123 xyz'"),
+        ("${HOME}-password", "'${HOME}-password'"),
+        ("quote'value", "'quote\\'value'"),
+    ],
+)
+def test_format_dotenv_value_explicit_compose_quoting(value: str, expected_formatted: str) -> None:
+    assert env_util._format_dotenv_value(value) == expected_formatted
+
+
+@pytest.mark.parametrize(
     ("password", "expected_encoded"),
     [
         ("simple-password", "simple-password"),
@@ -84,6 +96,19 @@ def test_dotenv_dollar_brace_literal_uses_single_quotes(tmp_path) -> None:
         if line.startswith("POSTGRES_PASSWORD=")
     )
     assert line == "POSTGRES_PASSWORD='${HOME}-password'"
+
+
+def test_dotenv_single_quote_escape_uses_compose_syntax(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    env_util.set_value(str(env_path), "POSTGRES_PASSWORD", "quote'value")
+    line = next(
+        line
+        for line in env_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("POSTGRES_PASSWORD=")
+    )
+    assert line == "POSTGRES_PASSWORD='quote\\'value'"
+    assert env_util.get_value(str(env_path), "POSTGRES_PASSWORD") == "quote'value"
 
 
 def test_dotenv_rejects_control_characters() -> None:
