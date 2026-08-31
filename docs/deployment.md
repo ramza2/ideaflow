@@ -56,7 +56,7 @@ cp deploy/.env.example .env
 2. Edit `.env` and set at least:
 
 - `POSTGRES_PASSWORD` — use a long random password (do not keep the placeholder)
-- `DATABASE_URL` — password must match `POSTGRES_PASSWORD`; hostname must be `db` inside Docker
+- `DATABASE_URL` — password must match `POSTGRES_PASSWORD` (URL-encode special characters if needed); hostname must be `db` inside Docker
 - `CORS_ORIGINS` — browser origin users will use (for example `http://192.168.1.50:8080`)
 - `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME` — if AI features are required
 - `WEB_SEARCH_API_URL`, `WEB_SEARCH_API_KEY` — optional; empty is valid (`NOT_CONFIGURED`)
@@ -100,7 +100,7 @@ Options:
 | `--force-recreate` | Recreate backend and frontend containers |
 | `--migrate-only` | DB healthy → migration → exit (minimal app impact) |
 
-The script uses `set -Eeuo pipefail`, validates `.env`, refuses the placeholder password, and does not print secrets.
+The script uses `set -Eeuo pipefail`, validates `.env` via Docker Compose's resolved environment (not Bash `source .env`), refuses placeholder passwords in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and does not print secrets.
 
 ## First deployment
 
@@ -157,16 +157,16 @@ docker compose logs -f --tail=200 db
 
 ## Restart / stop
 
-Restart one service:
+Restart application services (does not re-run the one-shot `migrate` service):
 
 ```bash
-docker compose restart backend
+docker compose restart backend frontend
 ```
 
-Restart all long-running services:
+Restart the database only when needed:
 
 ```bash
-docker compose restart
+docker compose restart db
 ```
 
 Stop the stack (keeps the database volume):
@@ -242,7 +242,10 @@ CORS_ORIGINS=https://ideas.example.com
 
 Public URL: `https://ideas.example.com` → proxy → `http://127.0.0.1:8080`
 
-If the site is served over HTTPS but `AUTH_COOKIE_SECURE=false`, browsers may not send session cookies. If served over HTTP with `AUTH_COOKIE_SECURE=true`, login sessions will not persist.
+**Cookie security notes:**
+
+- For HTTPS deployments, set `AUTH_COOKIE_SECURE=true`. Using `false` on HTTPS can still work in some browsers, but cookies are sent without the Secure flag, which increases HTTP downgrade and plaintext exposure risk.
+- For HTTP deployments (for example LAN), use `AUTH_COOKIE_SECURE=false`. If set to `true` over plain HTTP, browsers will not send Secure cookies and login/session will not work.
 
 ## Environment variable behavior
 
@@ -272,7 +275,7 @@ Inside Docker, `DATABASE_URL` must use host `db`, not `localhost`.
 
 ### DB password mismatch
 
-`POSTGRES_PASSWORD` and the password in `DATABASE_URL` must match. A mismatch prevents backend readiness (`503` on `/api/v1/health/ready`).
+`POSTGRES_PASSWORD` and the password embedded in `DATABASE_URL` must refer to the same value. `deploy.sh` rejects the placeholder in either field. URL-encode special characters in `DATABASE_URL` when needed (for example `p@ss:word` → `p%40ss%3Aword`). A mismatch prevents backend readiness (`503` on `/api/v1/health/ready`).
 
 ### Migration failures
 
@@ -306,3 +309,45 @@ Confirm Nginx `try_files` is configured (`deploy/nginx.conf`). Routes such as `/
 ### LLM works in Admin diagnostic but app AI fails
 
 App health can be normal while an external LLM provider is down. Use Admin → Integrations → LLM Diagnostic. Web Search with empty `WEB_SEARCH_API_URL` reports `NOT_CONFIGURED` and does not block startup.
+
+## Pre-merge Docker smoke checklist
+
+Run on a host with Docker Engine before merging deployment changes:
+
+```bash
+cp deploy/.env.example .env
+# Edit POSTGRES_PASSWORD and DATABASE_URL (and other values as needed)
+
+./scripts/deploy.sh
+./scripts/deploy.sh --migrate-only
+./scripts/deploy.sh --no-build
+```
+
+Verify services:
+
+```bash
+docker compose ps
+```
+
+Expected:
+
+```text
+db       healthy
+backend  healthy
+frontend healthy
+migrate  exited 0 (one-shot; not running during normal deploy)
+```
+
+HTTP checks:
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/api/v1/health
+curl -fsS http://127.0.0.1:8080/api/v1/health/ready
+curl -I http://127.0.0.1:8080/login
+curl -I http://127.0.0.1:8080/admin/users
+```
+
+`/api/nonexistent` must return HTTP 404 from the backend (not React `index.html`).
+
+`deploy.sh` runs migration once per deploy (`docker compose run --rm migrate`) and starts backend/frontend with `--no-deps` so the compose `migrate` dependency is not triggered again. Manual `docker compose up` still enforces `db → migrate → backend → frontend` safety.

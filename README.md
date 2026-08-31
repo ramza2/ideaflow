@@ -27,7 +27,9 @@ Linux mini PC 등 단일 서버에 Docker Compose로 배포할 수 있습니다.
 
 ```bash
 cp deploy/.env.example .env
-# .env 수정 (특히 POSTGRES_PASSWORD)
+# .env 수정
+# - POSTGRES_PASSWORD placeholder 변경
+# - DATABASE_URL의 password도 동일 값(URL encoding 필요 시 적용)으로 변경
 
 ./scripts/deploy.sh
 

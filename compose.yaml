@@ -24,6 +24,7 @@ services:
       - ideaflow
 
   migrate:
+    image: ${COMPOSE_PROJECT_NAME:-ideaflow}-backend
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -38,6 +39,7 @@ services:
       - ideaflow
 
   backend:
+    image: ${COMPOSE_PROJECT_NAME:-ideaflow}-backend
     build:
       context: .
       dockerfile: backend/Dockerfile
