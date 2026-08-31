@@ -139,3 +139,90 @@ def test_create_admin_exists_exit_code_on_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("app.cli.create_admin.active_system_admin_exists", _boom)
     monkeypatch.setattr(sys, "argv", ["create_admin", "--exists"])
     assert main() == 2
+
+
+def _mock_interactive_create(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inputs: list[str],
+    passwords: list[str],
+) -> None:
+    mock_user = type("MockUser", (), {"id": "user-id", "email": "admin@example.com"})()
+    mock_session = type(
+        "MockSession",
+        (),
+        {
+            "commit": lambda self: None,
+            "rollback": lambda self: None,
+            "close": lambda self: None,
+        },
+    )()
+
+    monkeypatch.setattr("app.cli.create_admin.reset_engine", lambda: None)
+    monkeypatch.setattr("app.cli.create_admin.get_session_factory", lambda: (lambda: mock_session))
+    monkeypatch.setattr(
+        "app.cli.create_admin.create_admin_user",
+        lambda _session, *, email, name, password: mock_user,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": inputs.pop(0))
+    monkeypatch.setattr(
+        "app.cli.create_admin.getpass.getpass",
+        lambda _prompt="": passwords.pop(0),
+    )
+    monkeypatch.setattr(sys, "argv", ["create_admin"])
+
+
+def test_create_admin_retries_short_password_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_interactive_create(
+        monkeypatch,
+        inputs=["admin@example.com", "Admin User"],
+        passwords=["short", "short", "validpass12", "validpass12"],
+    )
+    assert main() == 0
+
+
+def test_create_admin_retries_long_password_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_password = "a" * 257
+    _mock_interactive_create(
+        monkeypatch,
+        inputs=["admin@example.com", "Admin User"],
+        passwords=[long_password, long_password, "validpass12", "validpass12"],
+    )
+    assert main() == 0
+
+
+def test_create_admin_retries_password_mismatch_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_interactive_create(
+        monkeypatch,
+        inputs=["admin@example.com", "Admin User"],
+        passwords=["validpass12", "different12", "validpass12", "validpass12"],
+    )
+    assert main() == 0
+
+
+def test_create_admin_retries_empty_email_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_interactive_create(
+        monkeypatch,
+        inputs=["", "admin@example.com", "Admin User"],
+        passwords=["validpass12", "validpass12"],
+    )
+    assert main() == 0
+
+
+def test_create_admin_retries_empty_name_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_interactive_create(
+        monkeypatch,
+        inputs=["admin@example.com", "", "Admin User"],
+        passwords=["validpass12", "validpass12"],
+    )
+    assert main() == 0
