@@ -104,6 +104,75 @@ If `POSTGRES_PASSWORD` contains URL reserved characters (`@`, `:`, `/`, `?`, `#`
 
 Changing `VITE_*` values requires rebuilding the frontend image (`./scripts/deploy.sh`).
 
+## First deployment
+
+The recommended first-time flow is a single interactive command:
+
+```bash
+git clone https://github.com/ramza2/ideaflow.git
+cd ideaflow
+
+chmod +x scripts/deploy.sh   # only if executable bit was not preserved
+./scripts/deploy.sh
+```
+
+If `.env` does not exist and the terminal is interactive, `deploy.sh` runs the **First Deployment Setup Wizard**. It:
+
+1. Prompts for deployment mode (`direct` or `traefik`) and mode-specific settings
+2. Generates a secure PostgreSQL password (unless you enter one manually)
+3. Derives `DATABASE_URL` automatically from the PostgreSQL settings
+4. Writes `.env` atomically with mode `600`
+5. Builds images, starts PostgreSQL, runs migrations
+6. Creates the initial `SYSTEM_ADMIN` if none exists (interactive prompt)
+7. Starts backend and frontend, then runs health smoke checks
+
+First-run Traefik defaults match the OpenLink GPU server pattern (`ideaflow.openlink.kr`, `traefik_proxy`, `websecure`, `letsencrypt`).
+
+### Non-interactive deployment
+
+If `.env` is missing and stdin is not a TTY, deployment fails with instructions to run interactively or copy `deploy/.env.example` manually.
+
+Advanced users may still create `.env` by hand:
+
+```bash
+cp deploy/.env.example .env
+# edit values, then:
+./scripts/deploy.sh
+```
+
+## Reconfiguration
+
+To change deployment settings using the wizard with current `.env` values as defaults:
+
+```bash
+./scripts/deploy.sh --configure
+```
+
+PostgreSQL password is not displayed. Press Enter to keep the current password, or type a new value (hidden input). `DATABASE_URL` is regenerated when the password changes.
+
+## Interactive setup
+
+The wizard only runs when:
+
+- `.env` is missing (first deployment), or
+- `--configure` is passed
+
+Normal redeployments with an existing `.env` skip the wizard.
+
+## Initial administrator
+
+After migrations, `deploy.sh` checks for an **ACTIVE** `SYSTEM_ADMIN` (`deleted_at IS NULL`). If one exists, bootstrap is skipped. If none exists and the terminal is interactive, the existing `create_admin` CLI runs inside a one-off backend container.
+
+Administrator credentials are **not** stored in `.env`.
+
+Manual bootstrap later:
+
+```bash
+docker compose -f compose.yaml -f compose.direct.yaml run --rm --no-deps backend python -m app.cli.create_admin
+```
+
+Use the Traefik compose overlay instead of `compose.direct.yaml` when in traefik mode.
+
 ## deploy.sh usage
 
 The official deployment entry point is:
@@ -128,6 +197,7 @@ Options:
 | `--no-build` | Use existing images; DB → migrate → up → health |
 | `--force-recreate` | Recreate backend and frontend containers |
 | `--migrate-only` | DB healthy → migration → exit (minimal app impact) |
+| `--configure` | Interactive reconfiguration using current `.env` as defaults, then deploy |
 
 The script uses `set -Eeuo pipefail`, validates `.env` via Docker Compose's resolved environment (not Bash `source .env`), refuses placeholder passwords in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and does not print secrets.
 

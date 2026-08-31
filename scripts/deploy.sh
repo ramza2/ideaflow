@@ -8,6 +8,7 @@ cd "${REPO_ROOT}"
 DO_BUILD=1
 FORCE_RECREATE=0
 MIGRATE_ONLY=0
+DO_CONFIGURE=0
 
 PLACEHOLDER_PASSWORD="CHANGE_ME_USE_LONG_RANDOM_PASSWORD"
 PLACEHOLDER_IDEAFLOW_HOST="CHANGE_ME_IDEAFLOW_HOST"
@@ -40,12 +41,14 @@ Options:
   --no-build         Skip image build; use existing images
   --force-recreate   Recreate backend and frontend containers
   --migrate-only     Start DB, wait for health, run migrations, then exit
+  --configure        Re-run interactive configuration (existing .env as defaults)
   --help             Show this help message
 
 Examples:
   ./scripts/deploy.sh
   ./scripts/deploy.sh --no-build
   ./scripts/deploy.sh --migrate-only
+  ./scripts/deploy.sh --configure
 EOF
 }
 
@@ -83,6 +86,9 @@ parse_args() {
         ;;
       --migrate-only)
         MIGRATE_ONLY=1
+        ;;
+      --configure)
+        DO_CONFIGURE=1
         ;;
       --help|-h)
         usage
@@ -124,11 +130,8 @@ check_prerequisites() {
   docker info >/dev/null 2>&1 || fail "Docker daemon is not accessible."
 }
 
-check_env_file_exists() {
-  if [[ ! -f .env ]]; then
-    fail ".env 파일이 없습니다. cp deploy/.env.example .env 후 값을 설정하십시오."
-  fi
-}
+# shellcheck source=scripts/lib/deploy-config.sh
+source "${SCRIPT_DIR}/lib/deploy-config.sh"
 
 load_compose_env_cache() {
   if [[ -n "${COMPOSE_ENV_CACHE}" ]]; then
@@ -350,6 +353,38 @@ run_migration() {
   log "Migration completed."
 }
 
+bootstrap_system_admin() {
+  local exit_code=0
+  compose run --rm --no-deps backend python -m app.cli.create_admin --exists || exit_code=$?
+  case "${exit_code}" in
+    0)
+      log "SYSTEM_ADMIN already exists. Skipping admin bootstrap."
+      return 0
+      ;;
+    1) ;;
+    2)
+      fail "Failed to check SYSTEM_ADMIN existence (database error)."
+      ;;
+    *)
+      fail "Unexpected exit code from create_admin --exists: ${exit_code}"
+      ;;
+  esac
+
+  if ! is_interactive; then
+    fail "No SYSTEM_ADMIN exists and interactive bootstrap is unavailable.
+
+Run interactively:
+  ./scripts/deploy.sh
+
+or:
+  docker compose $(compose_files_display) run --rm --no-deps backend python -m app.cli.create_admin"
+  fi
+
+  log "No SYSTEM_ADMIN exists."
+  log "Create initial administrator."
+  compose run --rm --no-deps -it backend python -m app.cli.create_admin
+}
+
 start_db() {
   log "Starting database..."
   compose up -d db
@@ -504,7 +539,7 @@ EOF
 main() {
   parse_args "$@"
   check_prerequisites
-  check_env_file_exists
+  ensure_env_configured
   compose_quiet_config
   validate_resolved_env
 
@@ -521,6 +556,7 @@ main() {
     exit 0
   fi
 
+  bootstrap_system_admin
   start_backend
   start_frontend
   smoke_http

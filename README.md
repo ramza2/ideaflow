@@ -23,21 +23,18 @@ IdeaFlow/
 
 ## Docker Compose 배포
 
-- **Direct (mini PC / LAN):** [docs/deployment.md](docs/deployment.md) — host port `:8080`
-- **Traefik (GPU server):** [docs/deployment.md#traefik-deployment](docs/deployment.md#traefik-deployment) — existing Traefik network labels
-
-Quick start (direct mode):
-
 ```bash
-cp deploy/.env.example .env
-# .env 수정
-# - POSTGRES_PASSWORD placeholder 변경
-# - DATABASE_URL의 password도 동일 값(URL encoding 필요 시 적용)으로 변경
-
+git clone https://github.com/ramza2/ideaflow.git
+cd ideaflow
 ./scripts/deploy.sh
 ```
 
-자세한 내용은 [docs/deployment.md](docs/deployment.md)를 참고하십시오.
+첫 실행 시 interactive setup wizard가 `.env` 생성, migration, 초기 `SYSTEM_ADMIN` 생성까지 진행합니다.
+
+- **Direct (mini PC / LAN):** [docs/deployment.md](docs/deployment.md)
+- **Traefik (GPU server):** [docs/deployment.md#traefik-deployment](docs/deployment.md#traefik-deployment)
+
+고급 사용자는 `cp deploy/.env.example .env` 후 수동 설정도 가능합니다.
 
 ## Step 11 — Admin / SystemSetting
 
