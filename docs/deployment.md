@@ -88,7 +88,7 @@ cp deploy/.env.example .env
 - `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME` — if AI features are required
 - `WEB_SEARCH_API_URL`, `WEB_SEARCH_API_KEY` — optional; empty is valid (`NOT_CONFIGURED`)
 
-For **traefik** mode, also set `IDEAFLOW_HOST`, `IDEAFLOW_PUBLIC_URL`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, and `AUTH_COOKIE_SECURE=true`.
+For **traefik** mode, also set `IDEAFLOW_HOST`, `IDEAFLOW_PUBLIC_URL`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERTRESOLVER`, and `AUTH_COOKIE_SECURE=true`.
 
 ### URL-encoding database passwords
 
@@ -152,9 +152,18 @@ http://<host>:8080
 
 ## Traefik deployment
 
-Use this on a GPU server that already runs Traefik. IdeaFlow attaches only the **frontend** container to the existing Traefik Docker network; Traefik routes HTTPS to frontend port 80. Backend and PostgreSQL stay on the internal `ideaflow` network only.
+Use this on a GPU server that already runs Traefik (v3.x with `web` / `websecure` entrypoints and an ACME cert resolver). IdeaFlow attaches only the **frontend** container to the existing Traefik Docker network. Traefik routes HTTP to HTTPS redirect, then HTTPS to frontend port 80. Backend and PostgreSQL stay on the internal `ideaflow` network only.
 
-Example `.env` (replace placeholders with your actual hostname and network):
+The label pattern matches existing services on the GPU server (for example `modelflow.openlink.kr`, `alzi.openlink.kr`):
+
+```text
+ideaflow-web-http (web) → ideaflow-redirect → HTTPS
+ideaflow-web (websecure) → letsencrypt → ideaflow-service:80
+```
+
+### Generic example
+
+Replace placeholders with your actual hostname and network:
 
 ```text
 IDEAFLOW_DEPLOY_MODE=traefik
@@ -164,11 +173,29 @@ IDEAFLOW_PUBLIC_URL=https://<actual-hostname>
 
 TRAEFIK_NETWORK=<existing-traefik-network>
 TRAEFIK_ENTRYPOINT=websecure
-TRAEFIK_TLS=true
+TRAEFIK_CERTRESOLVER=letsencrypt
 
 AUTH_COOKIE_SECURE=true
 CORS_ORIGINS=https://<actual-hostname>
 ```
+
+### GPU server example (OpenLink)
+
+```text
+IDEAFLOW_DEPLOY_MODE=traefik
+
+IDEAFLOW_HOST=ideaflow.openlink.kr
+IDEAFLOW_PUBLIC_URL=https://ideaflow.openlink.kr
+
+TRAEFIK_NETWORK=traefik_proxy
+TRAEFIK_ENTRYPOINT=websecure
+TRAEFIK_CERTRESOLVER=letsencrypt
+
+AUTH_COOKIE_SECURE=true
+CORS_ORIGINS=https://ideaflow.openlink.kr
+```
+
+`ideaflow.openlink.kr` DNS must point to the GPU server before Traefik can issue a certificate and route traffic.
 
 Deploy:
 
@@ -179,7 +206,7 @@ Deploy:
 **Important:**
 
 - `TRAEFIK_NETWORK` must already exist (`docker network inspect <name>`). IdeaFlow does not create or manage Traefik.
-- No `traefik.http.routers.ideaflow.tls.certresolver` label is set; TLS follows your existing Traefik certificate policy.
+- HTTP router uses entrypoint `web`; HTTPS router uses `websecure` with `tls.certresolver` (default `letsencrypt`).
 - Do not create a separate Traefik router for `/api` — same-origin Nginx proxies `/api/v1` to the backend.
 - `VITE_API_BASE_URL=/api/v1` stays relative; the browser calls `https://<hostname>/api/v1/...`.
 
@@ -430,7 +457,8 @@ Expected last command: `404`.
 ```bash
 cp deploy/.env.example .env
 # IDEAFLOW_DEPLOY_MODE=traefik
-# Set IDEAFLOW_HOST, IDEAFLOW_PUBLIC_URL, TRAEFIK_NETWORK, AUTH_COOKIE_SECURE=true, CORS_ORIGINS
+# Set IDEAFLOW_HOST, IDEAFLOW_PUBLIC_URL, TRAEFIK_NETWORK,
+# TRAEFIK_ENTRYPOINT, TRAEFIK_CERTRESOLVER, AUTH_COOKIE_SECURE=true, CORS_ORIGINS
 
 ./scripts/deploy.sh
 ```
@@ -442,6 +470,16 @@ docker compose -f compose.yaml -f compose.traefik.yaml ps
 
 Expected: `db`, `backend`, `frontend` healthy; frontend attached to Traefik network; backend/db not on Traefik network.
 
+HTTP redirect:
+
+```bash
+curl -I http://<IDEAFLOW_HOST>
+```
+
+Expected: `301` or `308` with `Location: https://<IDEAFLOW_HOST>/...`
+
+HTTPS and API:
+
 ```bash
 curl -fsS https://<IDEAFLOW_HOST>/healthz
 curl -fsS https://<IDEAFLOW_HOST>/api/v1/health
@@ -450,5 +488,11 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<IDEAFLOW_HOST>/api/nonexistent
 ```
 
 Expected last command: `404`.
+
+Optional certificate inspection:
+
+```bash
+openssl s_client -connect <IDEAFLOW_HOST>:443 -servername <IDEAFLOW_HOST>
+```
 
 `deploy.sh` runs migration once per deploy (`docker compose run --rm migrate`) and starts backend/frontend with `--no-deps`. Manual `docker compose up` still enforces `db → migrate → backend → frontend` safety.

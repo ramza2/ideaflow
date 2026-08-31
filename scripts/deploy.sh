@@ -26,6 +26,7 @@ DEPLOY_SMOKE_HOST=""
 DEPLOY_IDEAFLOW_HOST=""
 DEPLOY_TRAEFIK_NETWORK=""
 DEPLOY_TRAEFIK_ENTRYPOINT=""
+DEPLOY_TRAEFIK_CERTRESOLVER=""
 DEPLOY_PUBLIC_URL=""
 
 usage() {
@@ -248,6 +249,7 @@ validate_traefik_env() {
   DEPLOY_IDEAFLOW_HOST="$(compose_env_value IDEAFLOW_HOST)"
   DEPLOY_TRAEFIK_NETWORK="$(compose_env_value TRAEFIK_NETWORK)"
   DEPLOY_TRAEFIK_ENTRYPOINT="$(compose_env_value TRAEFIK_ENTRYPOINT)"
+  DEPLOY_TRAEFIK_CERTRESOLVER="$(compose_env_value TRAEFIK_CERTRESOLVER)"
   DEPLOY_PUBLIC_URL="$(compose_env_value IDEAFLOW_PUBLIC_URL)"
 
   if [[ -z "${DEPLOY_IDEAFLOW_HOST}" || "${DEPLOY_IDEAFLOW_HOST}" == "${PLACEHOLDER_IDEAFLOW_HOST}" ]]; then
@@ -260,6 +262,10 @@ validate_traefik_env() {
 
   if [[ -z "${DEPLOY_TRAEFIK_ENTRYPOINT}" ]]; then
     fail "TRAEFIK_ENTRYPOINT is required for traefik mode."
+  fi
+
+  if [[ -z "${DEPLOY_TRAEFIK_CERTRESOLVER}" ]]; then
+    DEPLOY_TRAEFIK_CERTRESOLVER="letsencrypt"
   fi
 
   if [[ -z "${DEPLOY_PUBLIC_URL}" ]]; then
@@ -378,6 +384,7 @@ Check:
 - TRAEFIK_NETWORK
 - IDEAFLOW_HOST
 - TRAEFIK_ENTRYPOINT
+- TRAEFIK_CERTRESOLVER
 - existing Traefik TLS configuration"
 }
 
