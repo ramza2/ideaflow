@@ -68,7 +68,26 @@ cd backend
 uvicorn app.main:app --reload
 ```
 
-Health check: `http://127.0.0.1:8000/api/v1/health`
+Health checks:
+
+- Liveness: `http://127.0.0.1:8000/api/v1/health`
+- Readiness (DB): `http://127.0.0.1:8000/api/v1/health/ready`
+
+## Docker Compose deployment (Step 12)
+
+Production deployment uses the repository root Compose stack and `scripts/deploy.sh`. The backend image is built from `backend/Dockerfile` (Python 3.11-slim, non-root `app` user, `WORKDIR /app/backend`).
+
+```bash
+cp deploy/.env.example .env
+# Edit .env — POSTGRES_PASSWORD, DATABASE_URL host must be db
+
+./scripts/deploy.sh
+docker compose exec backend python -m app.cli.create_admin
+```
+
+Inside Docker, `DATABASE_URL` must use hostname `db`, not `localhost`. Migrations run as a separate one-shot `migrate` service (`alembic upgrade head`), not in the backend entrypoint.
+
+See `docs/deployment.md` for backup, update, HTTPS reverse proxy, and troubleshooting.
 
 With `AI_WORKER_ENABLED=true`, an in-process daemon thread polls `ai_jobs` and calls the LLM provider. Set `AI_WORKER_ENABLED=false` in tests so the worker does not consume jobs during FastAPI lifespan.
 

@@ -19,6 +19,22 @@ IdeaFlow/
 - Step 9: Review 단계에서 승인된 Web Search → Evidence 저장 → Qwen 근거 기반 초안 보완 → Idea Detail 조사 및 근거 탭
 - Step 10: Review Request / Inbox, Comment + @Mention, In-app Notification (Bell). Review/Mention/Assignee는 Idea read ACL을 부여하지 않음. Email/Push 없음.
 - Step 11: SYSTEM_ADMIN Admin Console (사용자 관리, SystemSetting 4개 정책, Integration diagnostics). Connection config는 ENV read-only; API key DB 저장/노출 없음. Workspace `effective_allow_llm` / `effective_allow_web_search`.
+- Step 12: Docker Compose 배포 패키징 (`compose.yaml`, Nginx SPA + API proxy, `scripts/deploy.sh`).
+
+## Docker Compose 배포
+
+```bash
+git clone https://github.com/ramza2/ideaflow.git
+cd ideaflow
+./scripts/deploy.sh
+```
+
+첫 실행 시 interactive setup wizard가 `.env` 생성, migration, 초기 `SYSTEM_ADMIN` 생성까지 진행합니다.
+
+- **Direct (mini PC / LAN):** [docs/deployment.md](docs/deployment.md)
+- **Traefik (GPU server):** [docs/deployment.md#traefik-deployment](docs/deployment.md#traefik-deployment)
+
+고급 사용자는 `cp deploy/.env.example .env` 후 수동 설정도 가능합니다.
 
 ## Step 11 — Admin / SystemSetting
 

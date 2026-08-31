@@ -1,0 +1,31 @@
+services:
+  frontend:
+    networks:
+      - ideaflow
+      - traefik_proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK}"
+
+      # HTTP → HTTPS
+      - "traefik.http.routers.ideaflow-web-http.rule=Host(`${IDEAFLOW_HOST}`)"
+      - "traefik.http.routers.ideaflow-web-http.entrypoints=web"
+      - "traefik.http.routers.ideaflow-web-http.middlewares=ideaflow-redirect"
+
+      - "traefik.http.middlewares.ideaflow-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.ideaflow-redirect.redirectscheme.permanent=true"
+
+      # HTTPS
+      - "traefik.http.routers.ideaflow-web.rule=Host(`${IDEAFLOW_HOST}`)"
+      - "traefik.http.routers.ideaflow-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.ideaflow-web.service=ideaflow-service"
+      - "traefik.http.routers.ideaflow-web.tls=true"
+      - "traefik.http.routers.ideaflow-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+
+      # frontend nginx
+      - "traefik.http.services.ideaflow-service.loadbalancer.server.port=80"
+
+networks:
+  traefik_proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK}

@@ -4,7 +4,7 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, Step 10 Review/Comment/Notification, and Step 11 Admin/SystemSetting. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, Step 10 collaboration APIs, and Step 11 admin APIs.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, Step 10 Review/Comment/Notification, Step 11 Admin/SystemSetting, and Step 12 Docker Compose deployment packaging. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, Step 10 collaboration APIs, Step 11 admin APIs, and Step 12 readiness health (`GET /api/v1/health/ready`).
 
 - `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, **Web Search approval on Review**, **Reviews inbox**, **Idea Detail discussion**, **TopHeader notifications**, and **Admin Console** (`/admin/*`, SYSTEM_ADMIN only) use real APIs.
 - `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
@@ -23,7 +23,8 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Install: `pip install -e ".[dev]"`
 - Dev server: `uvicorn app.main:app --reload` (default `http://127.0.0.1:8000`)
 - Tests: `pytest` (DB integration tests require `DATABASE_URL`)
-- Health: `GET /api/v1/health`
+- Health: `GET /api/v1/health` (liveness), `GET /api/v1/health/ready` (DB readiness)
+- Docker Compose (Step 12): `compose.yaml` + `compose.direct.yaml` / `compose.traefik.yaml` (`IDEAFLOW_DEPLOY_MODE`); official deploy entry `scripts/deploy.sh` (interactive first-run wizard, `--configure`, initial SYSTEM_ADMIN bootstrap); deployment env `deploy/.env.example`; guide `docs/deployment.md`. Direct mode publishes frontend host port (default `8080`); Traefik mode attaches frontend only to an existing external Traefik network (HTTP→HTTPS redirect + `letsencrypt`). Local dev unchanged.
 - Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin` (also provisions Personal Workspace)
 - Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Ideas: workspace-scoped CRUD + ACL + `?q=` ILIKE/FTS search
