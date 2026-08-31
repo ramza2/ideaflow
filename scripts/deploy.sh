@@ -10,15 +10,23 @@ FORCE_RECREATE=0
 MIGRATE_ONLY=0
 
 PLACEHOLDER_PASSWORD="CHANGE_ME_USE_LONG_RANDOM_PASSWORD"
+PLACEHOLDER_IDEAFLOW_HOST="CHANGE_ME_IDEAFLOW_HOST"
+PLACEHOLDER_TRAEFIK_NETWORK="CHANGE_ME_TRAEFIK_NETWORK"
 
-# Resolved from `docker compose config --environment` (never log these values).
+COMPOSE_FILES=(-f compose.yaml)
+COMPOSE_ENV_CACHE=""
+
+# Resolved from `docker compose config --environment` (never log secret values).
+DEPLOY_MODE="direct"
 DEPLOY_POSTGRES_PASSWORD=""
 DEPLOY_DATABASE_URL=""
 DEPLOY_HTTP_PORT=""
 DEPLOY_BIND_ADDRESS=""
 DEPLOY_SMOKE_HOST=""
-
-COMPOSE_ENV_CACHE=""
+DEPLOY_IDEAFLOW_HOST=""
+DEPLOY_TRAEFIK_NETWORK=""
+DEPLOY_TRAEFIK_ENTRYPOINT=""
+DEPLOY_PUBLIC_URL=""
 
 usage() {
   cat <<'EOF'
@@ -52,7 +60,7 @@ fail() {
 on_error() {
   local line="${1:-unknown}"
   printf 'Deployment failed near line %s.\n' "${line}" >&2
-  printf 'Check service logs with: docker compose logs\n' >&2
+  printf 'Check service logs with: docker compose %s logs\n' "$(compose_files_display)" >&2
 }
 
 trap 'on_error ${LINENO}' ERR
@@ -92,6 +100,23 @@ require_command() {
   command -v "${cmd}" >/dev/null 2>&1 || fail "${cmd} is required but not found."
 }
 
+compose_files_display() {
+  local display=""
+  local item
+  for item in "${COMPOSE_FILES[@]}"; do
+    display+="${item} "
+  done
+  printf '%s' "${display% }"
+}
+
+compose_base() {
+  docker compose -f compose.yaml "$@"
+}
+
+compose() {
+  docker compose "${COMPOSE_FILES[@]}" "$@"
+}
+
 check_prerequisites() {
   require_command docker
   docker compose version >/dev/null 2>&1 || fail "docker compose is not available."
@@ -104,15 +129,11 @@ check_env_file_exists() {
   fi
 }
 
-compose_quiet_config() {
-  docker compose config --quiet
-}
-
 load_compose_env_cache() {
   if [[ -n "${COMPOSE_ENV_CACHE}" ]]; then
     return 0
   fi
-  COMPOSE_ENV_CACHE="$(docker compose config --environment)"
+  COMPOSE_ENV_CACHE="$(compose config --environment)"
 }
 
 compose_env_value() {
@@ -124,6 +145,36 @@ compose_env_value() {
       exit
     }
   ' <<<"${COMPOSE_ENV_CACHE}"
+}
+
+resolve_deploy_mode_from_base() {
+  COMPOSE_ENV_CACHE="$(compose_base config --environment)"
+  DEPLOY_MODE="$(compose_env_value IDEAFLOW_DEPLOY_MODE)"
+  if [[ -z "${DEPLOY_MODE}" ]]; then
+    DEPLOY_MODE="direct"
+  fi
+}
+
+setup_compose_files() {
+  case "${DEPLOY_MODE}" in
+    direct)
+      COMPOSE_FILES+=(-f compose.direct.yaml)
+      ;;
+    traefik)
+      COMPOSE_FILES+=(-f compose.traefik.yaml)
+      ;;
+    *)
+      fail "IDEAFLOW_DEPLOY_MODE must be 'direct' or 'traefik' (got: ${DEPLOY_MODE})."
+      ;;
+  esac
+}
+
+compose_quiet_config() {
+  compose_base config --quiet
+  resolve_deploy_mode_from_base
+  setup_compose_files
+  COMPOSE_ENV_CACHE=""
+  compose config --quiet
 }
 
 resolve_smoke_host() {
@@ -141,6 +192,14 @@ resolve_smoke_host() {
   esac
 }
 
+normalize_public_url() {
+  local url="$1"
+  while [[ "${url}" == */ ]]; do
+    url="${url%/}"
+  done
+  printf '%s' "${url}"
+}
+
 validate_http_port() {
   local port="$1"
 
@@ -153,11 +212,9 @@ validate_http_port() {
   fi
 }
 
-validate_resolved_env() {
+validate_common_env() {
   DEPLOY_POSTGRES_PASSWORD="$(compose_env_value POSTGRES_PASSWORD)"
   DEPLOY_DATABASE_URL="$(compose_env_value DATABASE_URL)"
-  DEPLOY_HTTP_PORT="$(compose_env_value IDEAFLOW_HTTP_PORT)"
-  DEPLOY_BIND_ADDRESS="$(compose_env_value IDEAFLOW_BIND_ADDRESS)"
 
   if [[ -z "${DEPLOY_POSTGRES_PASSWORD}" ]]; then
     fail "POSTGRES_PASSWORD is required in .env"
@@ -174,13 +231,63 @@ validate_resolved_env() {
   if [[ "${DEPLOY_DATABASE_URL}" == *"${PLACEHOLDER_PASSWORD}"* ]]; then
     fail "DATABASE_URL에 placeholder password가 남아 있습니다. POSTGRES_PASSWORD와 동일한 값(URL encoding 필요 시 적용)으로 변경하십시오."
   fi
+}
+
+validate_direct_env() {
+  DEPLOY_HTTP_PORT="$(compose_env_value IDEAFLOW_HTTP_PORT)"
+  DEPLOY_BIND_ADDRESS="$(compose_env_value IDEAFLOW_BIND_ADDRESS)"
 
   if [[ -z "${DEPLOY_HTTP_PORT}" ]]; then
     DEPLOY_HTTP_PORT="8080"
   fi
   validate_http_port "${DEPLOY_HTTP_PORT}"
-
   DEPLOY_SMOKE_HOST="$(resolve_smoke_host "${DEPLOY_BIND_ADDRESS}")"
+}
+
+validate_traefik_env() {
+  DEPLOY_IDEAFLOW_HOST="$(compose_env_value IDEAFLOW_HOST)"
+  DEPLOY_TRAEFIK_NETWORK="$(compose_env_value TRAEFIK_NETWORK)"
+  DEPLOY_TRAEFIK_ENTRYPOINT="$(compose_env_value TRAEFIK_ENTRYPOINT)"
+  DEPLOY_PUBLIC_URL="$(compose_env_value IDEAFLOW_PUBLIC_URL)"
+
+  if [[ -z "${DEPLOY_IDEAFLOW_HOST}" || "${DEPLOY_IDEAFLOW_HOST}" == "${PLACEHOLDER_IDEAFLOW_HOST}" ]]; then
+    fail "IDEAFLOW_HOST is required for traefik mode (placeholder 값을 실제 hostname으로 변경하십시오)."
+  fi
+
+  if [[ -z "${DEPLOY_TRAEFIK_NETWORK}" || "${DEPLOY_TRAEFIK_NETWORK}" == "${PLACEHOLDER_TRAEFIK_NETWORK}" ]]; then
+    fail "TRAEFIK_NETWORK is required for traefik mode (placeholder 값을 기존 Traefik external network 이름으로 변경하십시오)."
+  fi
+
+  if [[ -z "${DEPLOY_TRAEFIK_ENTRYPOINT}" ]]; then
+    fail "TRAEFIK_ENTRYPOINT is required for traefik mode."
+  fi
+
+  if [[ -z "${DEPLOY_PUBLIC_URL}" ]]; then
+    fail "IDEAFLOW_PUBLIC_URL is required for traefik mode."
+  fi
+
+  DEPLOY_PUBLIC_URL="$(normalize_public_url "${DEPLOY_PUBLIC_URL}")"
+}
+
+check_traefik_network_exists() {
+  if ! docker network inspect "${DEPLOY_TRAEFIK_NETWORK}" >/dev/null 2>&1; then
+    fail "Traefik external network '${DEPLOY_TRAEFIK_NETWORK}' does not exist. Check the existing Traefik Docker network."
+  fi
+}
+
+validate_resolved_env() {
+  load_compose_env_cache
+  validate_common_env
+
+  case "${DEPLOY_MODE}" in
+    direct)
+      validate_direct_env
+      ;;
+    traefik)
+      validate_traefik_env
+      check_traefik_network_exists
+      ;;
+  esac
 }
 
 wait_for_db_healthy() {
@@ -190,10 +297,10 @@ wait_for_db_healthy() {
 
   log "Waiting for database to become healthy..."
   while (( elapsed < timeout_seconds )); do
-    if docker compose ps --status running --services db 2>/dev/null | grep -qx db; then
+    if compose ps --status running --services db 2>/dev/null | grep -qx db; then
       local health
       health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' \
-        "$(docker compose ps -q db)" 2>/dev/null || true)"
+        "$(compose ps -q db)" 2>/dev/null || true)"
       if [[ "${health}" == "healthy" ]]; then
         log "Database is healthy."
         return 0
@@ -203,7 +310,7 @@ wait_for_db_healthy() {
     elapsed=$((elapsed + interval))
   done
 
-  fail "Database did not become healthy. Run: docker compose logs db"
+  fail "Database did not become healthy. Run: docker compose $(compose_files_display) logs db"
 }
 
 wait_for_service_healthy() {
@@ -215,7 +322,7 @@ wait_for_service_healthy() {
   log "Waiting for ${service} to become healthy..."
   while (( elapsed < timeout_seconds )); do
     local container_id health
-    container_id="$(docker compose ps -q "${service}" 2>/dev/null || true)"
+    container_id="$(compose ps -q "${service}" 2>/dev/null || true)"
     if [[ -n "${container_id}" ]]; then
       health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' \
         "${container_id}" 2>/dev/null || true)"
@@ -228,18 +335,18 @@ wait_for_service_healthy() {
     elapsed=$((elapsed + interval))
   done
 
-  fail "${service} did not become healthy. Run: docker compose ps && docker compose logs ${service}"
+  fail "${service} did not become healthy. Run: docker compose $(compose_files_display) ps && docker compose $(compose_files_display) logs ${service}"
 }
 
 run_migration() {
   log "Running database migrations..."
-  docker compose run --rm migrate
+  compose run --rm migrate
   log "Migration completed."
 }
 
 start_db() {
   log "Starting database..."
-  docker compose up -d db
+  compose up -d db
   wait_for_db_healthy
 }
 
@@ -249,7 +356,7 @@ start_backend() {
     up_args+=(--force-recreate)
   fi
   log "Starting backend..."
-  docker compose "${up_args[@]}"
+  compose "${up_args[@]}"
   wait_for_service_healthy backend
 }
 
@@ -259,8 +366,19 @@ start_frontend() {
     up_args+=(--force-recreate)
   fi
   log "Starting frontend..."
-  docker compose "${up_args[@]}"
+  compose "${up_args[@]}"
   wait_for_service_healthy frontend
+}
+
+fail_traefik_public_smoke() {
+  fail "Container services are healthy, but Traefik public route failed.
+
+Check:
+- DNS
+- TRAEFIK_NETWORK
+- IDEAFLOW_HOST
+- TRAEFIK_ENTRYPOINT
+- existing Traefik TLS configuration"
 }
 
 wait_for_http_ok() {
@@ -281,10 +399,14 @@ wait_for_http_ok() {
     elapsed=$((elapsed + interval))
   done
 
+  if [[ "${DEPLOY_MODE}" == "traefik" ]]; then
+    fail_traefik_public_smoke
+  fi
+
   fail "${label} check failed: ${url}"
 }
 
-smoke_http() {
+smoke_http_direct() {
   local base="http://${DEPLOY_SMOKE_HOST}:${DEPLOY_HTTP_PORT}"
 
   wait_for_http_ok "${base}/healthz" "Frontend healthz" 120
@@ -299,24 +421,76 @@ smoke_http() {
   log "API 404 routing OK: /api/nonexistent"
 }
 
+smoke_http_traefik() {
+  local base="${DEPLOY_PUBLIC_URL}"
+
+  wait_for_http_ok "${base}/healthz" "Frontend healthz" 120
+  wait_for_http_ok "${base}/api/v1/health" "API liveness" 120
+  wait_for_http_ok "${base}/api/v1/health/ready" "API readiness" 120
+
+  local status
+  status="$(curl -s -o /dev/null -w '%{http_code}' "${base}/api/nonexistent")"
+  if [[ "${status}" != "404" ]]; then
+    fail_traefik_public_smoke
+  fi
+  log "API 404 routing OK: /api/nonexistent"
+}
+
+smoke_http() {
+  case "${DEPLOY_MODE}" in
+    direct)
+      smoke_http_direct
+      ;;
+    traefik)
+      smoke_http_traefik
+      ;;
+  esac
+}
+
 print_summary() {
-  cat <<EOF
+  local compose_hint
+  compose_hint="$(compose_files_display)"
+
+  if [[ "${DEPLOY_MODE}" == "traefik" ]]; then
+    cat <<EOF
 
 IdeaFlow deployment completed.
 
-URL:
-http://${DEPLOY_SMOKE_HOST}:${DEPLOY_HTTP_PORT}
+Deployment mode: traefik
+URL: ${DEPLOY_PUBLIC_URL}
+Traefik network: ${DEPLOY_TRAEFIK_NETWORK}
 
 Services:
-$(docker compose ps)
+$(compose ps)
 
 Migration:
 completed
 
 Useful commands:
-  docker compose ps
-  docker compose logs -f backend
-  docker compose exec backend python -m app.cli.create_admin
+  docker compose ${compose_hint} ps
+  docker compose ${compose_hint} logs -f backend
+  docker compose ${compose_hint} exec backend python -m app.cli.create_admin
+EOF
+    return
+  fi
+
+  cat <<EOF
+
+IdeaFlow deployment completed.
+
+Deployment mode: direct
+URL: http://${DEPLOY_SMOKE_HOST}:${DEPLOY_HTTP_PORT}
+
+Services:
+$(compose ps)
+
+Migration:
+completed
+
+Useful commands:
+  docker compose ${compose_hint} ps
+  docker compose ${compose_hint} logs -f backend
+  docker compose ${compose_hint} exec backend python -m app.cli.create_admin
 EOF
 }
 
@@ -329,7 +503,7 @@ main() {
 
   if [[ "${DO_BUILD}" -eq 1 ]]; then
     log "Building images..."
-    docker compose build
+    compose build
   fi
 
   start_db

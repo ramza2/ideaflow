@@ -1,0 +1,17 @@
+services:
+  frontend:
+    networks:
+      - ideaflow
+      - traefik_proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK}"
+      - "traefik.http.routers.ideaflow.rule=Host(`${IDEAFLOW_HOST}`)"
+      - "traefik.http.routers.ideaflow.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.ideaflow.tls=${TRAEFIK_TLS:-true}"
+      - "traefik.http.services.ideaflow.loadbalancer.server.port=80"
+
+networks:
+  traefik_proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK}

@@ -36,6 +36,32 @@ Recommended for a home / mini-PC deployment:
 
 ## Architecture
 
+IdeaFlow supports two deployment modes (selected via `IDEAFLOW_DEPLOY_MODE` in `.env`):
+
+### Direct mode (default)
+
+```text
+Browser → host:8080 → frontend Nginx → /api → backend → PostgreSQL
+```
+
+### Traefik mode
+
+```text
+Browser → HTTPS → existing GPU server Traefik → frontend:80 → /api → backend → PostgreSQL
+```
+
+Traefik routes **only** the frontend container. Backend, database, and migrate are not attached to the Traefik network.
+
+Compose files:
+
+| File | Purpose |
+|------|---------|
+| `compose.yaml` | Base services (`db`, `migrate`, `backend`, `frontend`); no host ports |
+| `compose.direct.yaml` | Publishes frontend host port for LAN/mini-PC |
+| `compose.traefik.yaml` | Traefik labels + external network for GPU server |
+
+`./scripts/deploy.sh` selects the overlay automatically from `IDEAFLOW_DEPLOY_MODE`.
+
 | Service | Image / build | Purpose |
 |---------|---------------|---------|
 | `db` | `postgres:16-alpine` | PostgreSQL database |
@@ -43,7 +69,7 @@ Recommended for a home / mini-PC deployment:
 | `backend` | backend image | FastAPI + in-process AI worker (`--workers 1`) |
 | `frontend` | frontend image | Nginx serving built SPA + `/api/` proxy |
 
-Only the frontend publishes a host port (default `8080`). PostgreSQL and the backend API are not exposed on the host.
+In **direct** mode, only the frontend publishes a host port (default `8080`). In **traefik** mode, no IdeaFlow host ports are published; browsers reach the app through the existing Traefik reverse proxy.
 
 ## Environment setup
 
@@ -55,11 +81,14 @@ cp deploy/.env.example .env
 
 2. Edit `.env` and set at least:
 
+- `IDEAFLOW_DEPLOY_MODE` — `direct` (default) or `traefik`
 - `POSTGRES_PASSWORD` — use a long random password (do not keep the placeholder)
 - `DATABASE_URL` — password must match `POSTGRES_PASSWORD` (URL-encode special characters if needed); hostname must be `db` inside Docker
-- `CORS_ORIGINS` — browser origin users will use (for example `http://192.168.1.50:8080`)
+- `CORS_ORIGINS` — browser origin users will use
 - `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME` — if AI features are required
 - `WEB_SEARCH_API_URL`, `WEB_SEARCH_API_KEY` — optional; empty is valid (`NOT_CONFIGURED`)
+
+For **traefik** mode, also set `IDEAFLOW_HOST`, `IDEAFLOW_PUBLIC_URL`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, and `AUTH_COOKIE_SECURE=true`.
 
 ### URL-encoding database passwords
 
@@ -115,21 +144,68 @@ chmod +x scripts/deploy.sh   # only if executable bit was not preserved
 ./scripts/deploy.sh
 ```
 
-Default URL after deployment:
+Default URL after **direct** deployment:
 
 ```text
 http://<host>:8080
 ```
 
-## Create initial SYSTEM_ADMIN
+## Traefik deployment
 
-After a successful deployment:
+Use this on a GPU server that already runs Traefik. IdeaFlow attaches only the **frontend** container to the existing Traefik Docker network; Traefik routes HTTPS to frontend port 80. Backend and PostgreSQL stay on the internal `ideaflow` network only.
 
-```bash
-docker compose exec backend python -m app.cli.create_admin
+Example `.env` (replace placeholders with your actual hostname and network):
+
+```text
+IDEAFLOW_DEPLOY_MODE=traefik
+
+IDEAFLOW_HOST=<actual-hostname>
+IDEAFLOW_PUBLIC_URL=https://<actual-hostname>
+
+TRAEFIK_NETWORK=<existing-traefik-network>
+TRAEFIK_ENTRYPOINT=websecure
+TRAEFIK_TLS=true
+
+AUTH_COOKIE_SECURE=true
+CORS_ORIGINS=https://<actual-hostname>
 ```
 
-This uses the existing interactive CLI. No separate bootstrap API is provided.
+Deploy:
+
+```bash
+./scripts/deploy.sh
+```
+
+**Important:**
+
+- `TRAEFIK_NETWORK` must already exist (`docker network inspect <name>`). IdeaFlow does not create or manage Traefik.
+- No `traefik.http.routers.ideaflow.tls.certresolver` label is set; TLS follows your existing Traefik certificate policy.
+- Do not create a separate Traefik router for `/api` — same-origin Nginx proxies `/api/v1` to the backend.
+- `VITE_API_BASE_URL=/api/v1` stays relative; the browser calls `https://<hostname>/api/v1/...`.
+
+Operational commands (traefik mode example):
+
+```bash
+docker compose -f compose.yaml -f compose.traefik.yaml ps
+docker compose -f compose.yaml -f compose.traefik.yaml logs -f backend
+docker compose -f compose.yaml -f compose.traefik.yaml exec backend python -m app.cli.create_admin
+```
+
+Direct mode uses `-f compose.yaml -f compose.direct.yaml` instead.
+
+## Create initial SYSTEM_ADMIN
+
+After a successful deployment (use the compose file set matching your `IDEAFLOW_DEPLOY_MODE`):
+
+```bash
+# direct mode
+docker compose -f compose.yaml -f compose.direct.yaml exec backend python -m app.cli.create_admin
+
+# traefik mode
+docker compose -f compose.yaml -f compose.traefik.yaml exec backend python -m app.cli.create_admin
+```
+
+Or rely on the compose files hint printed by `./scripts/deploy.sh` at the end of deployment.
 
 ## Health checks
 
@@ -150,9 +226,11 @@ curl -fsS http://127.0.0.1:8080/api/v1/health/ready
 ## Logs
 
 ```bash
-docker compose logs -f --tail=200 backend
-docker compose logs -f --tail=200 frontend
-docker compose logs -f --tail=200 db
+# direct mode
+docker compose -f compose.yaml -f compose.direct.yaml logs -f --tail=200 backend
+
+# traefik mode
+docker compose -f compose.yaml -f compose.traefik.yaml logs -f --tail=200 backend
 ```
 
 ## Restart / stop
@@ -160,19 +238,21 @@ docker compose logs -f --tail=200 db
 Restart application services (does not re-run the one-shot `migrate` service):
 
 ```bash
-docker compose restart backend frontend
+docker compose -f compose.yaml -f compose.direct.yaml restart backend frontend
 ```
 
 Restart the database only when needed:
 
 ```bash
-docker compose restart db
+docker compose -f compose.yaml -f compose.direct.yaml restart db
 ```
+
+Use `-f compose.traefik.yaml` instead of `compose.direct.yaml` in traefik mode.
 
 Stop the stack (keeps the database volume):
 
 ```bash
-docker compose down
+docker compose -f compose.yaml -f compose.direct.yaml down
 ```
 
 **Warning:** `docker compose down -v` deletes the `ideaflow_pgdata` volume and all database data. Do not use this in production unless you intend to wipe data.
@@ -214,11 +294,12 @@ docker compose exec -T db sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-## LAN HTTP deployment
+## LAN HTTP deployment (direct mode)
 
-Default settings suit a trusted LAN over HTTP:
+Set in `.env`:
 
 ```text
+IDEAFLOW_DEPLOY_MODE=direct
 IDEAFLOW_BIND_ADDRESS=0.0.0.0
 IDEAFLOW_HTTP_PORT=8080
 AUTH_COOKIE_SECURE=false
@@ -227,11 +308,11 @@ CORS_ORIGINS=http://<mini-pc-ip>:8080
 
 Access: `http://<mini-pc-ip>:8080`
 
-Do not expose plain HTTP directly to the public Internet. Use HTTPS and a reverse proxy for internet-facing deployments.
+Do not expose plain HTTP directly to the public Internet.
 
-## HTTPS reverse proxy deployment
+## HTTPS reverse proxy deployment (external proxy in front of direct mode)
 
-If Nginx, Caddy, or another reverse proxy terminates TLS in front of IdeaFlow:
+If a separate Nginx/Caddy instance terminates TLS in front of IdeaFlow **direct** mode:
 
 ```text
 IDEAFLOW_BIND_ADDRESS=127.0.0.1
@@ -256,10 +337,12 @@ Public URL: `https://ideas.example.com` → proxy → `http://127.0.0.1:8080`
 
 ## Security notes
 
-- Only port `8080` (or your chosen `IDEAFLOW_HTTP_PORT`) needs to be reachable by browsers.
+- **Direct mode:** only `IDEAFLOW_HTTP_PORT` (default `8080`) needs to be reachable by browsers.
+- **Traefik mode:** no IdeaFlow host ports; only the existing Traefik entrypoint is public.
 - Do not publish PostgreSQL (`5432`) or the backend API (`8000`) on the host.
+- Backend and database are not attached to the Traefik external network.
 - Never commit `.env` or real secrets to Git.
-- Secrets are not copied into Docker images.
+- Secrets are not copied into Docker images. No TLS certificates are mounted into IdeaFlow containers.
 - `VITE_*` variables are embedded in the frontend bundle — never pass database or API keys as Vite build args.
 
 ## Troubleshooting
@@ -312,42 +395,60 @@ App health can be normal while an external LLM provider is down. Use Admin → I
 
 ## Pre-merge Docker smoke checklist
 
-Run on a host with Docker Engine before merging deployment changes:
+### Direct mode
+
+Run on a host with Docker Engine:
 
 ```bash
 cp deploy/.env.example .env
-# Edit POSTGRES_PASSWORD and DATABASE_URL (and other values as needed)
+# IDEAFLOW_DEPLOY_MODE=direct
+# Edit POSTGRES_PASSWORD and DATABASE_URL
 
 ./scripts/deploy.sh
 ./scripts/deploy.sh --migrate-only
 ./scripts/deploy.sh --no-build
 ```
 
-Verify services:
-
 ```bash
-docker compose ps
+docker compose -f compose.yaml -f compose.direct.yaml ps
 ```
 
-Expected:
-
-```text
-db       healthy
-backend  healthy
-frontend healthy
-migrate  exited 0 (one-shot; not running during normal deploy)
-```
-
-HTTP checks:
+Expected: `db`, `backend`, `frontend` healthy.
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/api/v1/health
 curl -fsS http://127.0.0.1:8080/api/v1/health/ready
 curl -I http://127.0.0.1:8080/login
-curl -I http://127.0.0.1:8080/admin/users
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/api/nonexistent
 ```
 
-`/api/nonexistent` must return HTTP 404 from the backend (not React `index.html`).
+Expected last command: `404`.
 
-`deploy.sh` runs migration once per deploy (`docker compose run --rm migrate`) and starts backend/frontend with `--no-deps` so the compose `migrate` dependency is not triggered again. Manual `docker compose up` still enforces `db → migrate → backend → frontend` safety.
+### Traefik mode (GPU server)
+
+```bash
+cp deploy/.env.example .env
+# IDEAFLOW_DEPLOY_MODE=traefik
+# Set IDEAFLOW_HOST, IDEAFLOW_PUBLIC_URL, TRAEFIK_NETWORK, AUTH_COOKIE_SECURE=true, CORS_ORIGINS
+
+./scripts/deploy.sh
+```
+
+```bash
+docker network inspect <TRAEFIK_NETWORK>
+docker compose -f compose.yaml -f compose.traefik.yaml ps
+```
+
+Expected: `db`, `backend`, `frontend` healthy; frontend attached to Traefik network; backend/db not on Traefik network.
+
+```bash
+curl -fsS https://<IDEAFLOW_HOST>/healthz
+curl -fsS https://<IDEAFLOW_HOST>/api/v1/health
+curl -fsS https://<IDEAFLOW_HOST>/api/v1/health/ready
+curl -s -o /dev/null -w '%{http_code}\n' https://<IDEAFLOW_HOST>/api/nonexistent
+```
+
+Expected last command: `404`.
+
+`deploy.sh` runs migration once per deploy (`docker compose run --rm migrate`) and starts backend/frontend with `--no-deps`. Manual `docker compose up` still enforces `db → migrate → backend → frontend` safety.

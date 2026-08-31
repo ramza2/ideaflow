@@ -1,0 +1,4 @@
+services:
+  frontend:
+    ports:
+      - "${IDEAFLOW_BIND_ADDRESS:-0.0.0.0}:${IDEAFLOW_HTTP_PORT:-8080}:80"

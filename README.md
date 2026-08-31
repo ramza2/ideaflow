@@ -23,7 +23,10 @@ IdeaFlow/
 
 ## Docker Compose 배포
 
-Linux mini PC 등 단일 서버에 Docker Compose로 배포할 수 있습니다.
+- **Direct (mini PC / LAN):** [docs/deployment.md](docs/deployment.md) — host port `:8080`
+- **Traefik (GPU server):** [docs/deployment.md#traefik-deployment](docs/deployment.md#traefik-deployment) — existing Traefik network labels
+
+Quick start (direct mode):
 
 ```bash
 cp deploy/.env.example .env
@@ -32,11 +35,7 @@ cp deploy/.env.example .env
 # - DATABASE_URL의 password도 동일 값(URL encoding 필요 시 적용)으로 변경
 
 ./scripts/deploy.sh
-
-docker compose exec backend python -m app.cli.create_admin
 ```
-
-기본 접속: `http://<host>:8080`
 
 자세한 내용은 [docs/deployment.md](docs/deployment.md)를 참고하십시오.
 

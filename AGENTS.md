@@ -24,7 +24,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Dev server: `uvicorn app.main:app --reload` (default `http://127.0.0.1:8000`)
 - Tests: `pytest` (DB integration tests require `DATABASE_URL`)
 - Health: `GET /api/v1/health` (liveness), `GET /api/v1/health/ready` (DB readiness)
-- Docker Compose (Step 12): repository root `compose.yaml` (`db`, `migrate`, `backend`, `frontend`); official deploy entry `scripts/deploy.sh`; deployment env template `deploy/.env.example`; guide `docs/deployment.md`. Production frontend is Nginx static SPA with `/api/` reverse proxy; only frontend publishes host port (default `8080`). Backend runs `uvicorn` with `--workers 1` (single in-process AI worker). Local dev (`uvicorn --reload`, `npm run dev`) remains unchanged.
+- Docker Compose (Step 12): `compose.yaml` + `compose.direct.yaml` / `compose.traefik.yaml` (`IDEAFLOW_DEPLOY_MODE`); official deploy entry `scripts/deploy.sh`; deployment env `deploy/.env.example`; guide `docs/deployment.md`. Direct mode publishes frontend host port (default `8080`); Traefik mode attaches frontend only to an existing external Traefik network (no IdeaFlow host ports). Production frontend is Nginx static SPA with `/api/` reverse proxy. Backend runs `uvicorn` with `--workers 1`. Local dev unchanged.
 - Auth: session cookie (`ideaflow_session`) + CSRF (`ideaflow_csrf` / `X-CSRF-Token`); bootstrap admin via `python -m app.cli.create_admin` (also provisions Personal Workspace)
 - Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Ideas: workspace-scoped CRUD + ACL + `?q=` ILIKE/FTS search
