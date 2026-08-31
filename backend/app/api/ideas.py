@@ -23,6 +23,7 @@ from app.schemas.idea import (
 from app.schemas.research import IdeaEvidenceResponse
 from app.services import idea as idea_service
 from app.services import idea_access
+from app.services import idea_search
 from app.services import web_research as web_research_service
 
 router = APIRouter(
@@ -43,14 +44,16 @@ def list_ideas(
     visibility: Annotated[str | None, Query()] = None,
     author_id: Annotated[UUID | None, Query()] = None,
     assignee_id: Annotated[UUID | None, Query()] = None,
+    search_mode: Annotated[str, Query()] = "keyword",
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> IdeaListResponse:
-    return idea_service.list_ideas(
+    return idea_search.list_ideas_with_search_mode(
         db,
         workspace_id=ctx.workspace.id,
         user_id=ctx.user.id,
         q=q,
+        search_mode=search_mode,
         stage_id=stage_id,
         category_id=category_id,
         priority=priority,

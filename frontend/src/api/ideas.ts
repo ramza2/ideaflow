@@ -9,9 +9,23 @@ import type {
   IdeaUpdateRequest,
 } from "../types/api";
 
+type IdeaSearchMode = NonNullable<IdeaListParams["search_mode"]>;
+
+function defaultSearchMode(): IdeaSearchMode {
+  const raw = import.meta.env.VITE_IDEA_SEARCH_MODE;
+  if (raw === "semantic" || raw === "hybrid" || raw === "keyword") {
+    return raw;
+  }
+  return "keyword";
+}
+
 function buildQuery(params: IdeaListParams = {}): string {
   const search = new URLSearchParams();
   if (params.q) search.set("q", params.q);
+  const searchMode: IdeaSearchMode = params.search_mode ?? defaultSearchMode();
+  if (searchMode !== "keyword") {
+    search.set("search_mode", searchMode);
+  }
   if (params.stage_id) search.set("stage_id", params.stage_id);
   if (params.category_id) search.set("category_id", params.category_id);
   if (params.priority) search.set("priority", params.priority);

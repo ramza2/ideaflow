@@ -312,7 +312,64 @@ Or rely on the compose files hint printed by `./scripts/deploy.sh` at the end of
 |----------|---------|
 | `GET /healthz` | Nginx liveness (returns `ok`) |
 | `GET /api/v1/health` | API liveness |
-| `GET /api/v1/health/ready` | API readiness (PostgreSQL `SELECT 1`; does not call LLM/Web Search) |
+| `GET /api/v1/health/ready` | API readiness (PostgreSQL `SELECT 1`; does not call LLM/Web Search/Embedding) |
+
+Embedding provider outages do **not** mark readiness unhealthy — keyword search and core CRUD remain available.
+
+## pgvector (Step 13)
+
+The `db` service uses `pgvector/pgvector:pg16` (PostgreSQL 16 with the `vector` extension). Existing `ideaflow_pgdata` volumes are preserved across upgrades.
+
+After deployment, verify the extension and migration:
+
+```bash
+# traefik mode example
+docker compose \
+  -f compose.yaml \
+  -f compose.traefik.yaml \
+  exec db \
+  sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "SELECT extversion FROM pg_extension WHERE extname = '\''vector'\'';"'
+
+docker compose \
+  -f compose.yaml \
+  -f compose.traefik.yaml \
+  exec backend alembic current
+
+docker compose \
+  -f compose.yaml \
+  -f compose.traefik.yaml \
+  exec db \
+  sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d idea_embeddings"'
+```
+
+Semantic search is **disabled by default** (`EMBEDDING_ENABLED=false`). Enable only after configuring an external OpenAI-compatible embedding endpoint:
+
+```text
+EMBEDDING_ENABLED=true
+EMBEDDING_PROVIDER=openai_compatible
+EMBEDDING_API_URL=https://<embedding-server>
+EMBEDDING_MODEL_NAME=BAAI/bge-m3
+EMBEDDING_DIMENSION=1024
+```
+
+Backfill embeddings for existing Ideas (enqueue only — worker processes asynchronously):
+
+```bash
+docker compose \
+  -f compose.yaml \
+  -f compose.traefik.yaml \
+  exec backend \
+  python -m app.cli.enqueue_embeddings --all
+```
+
+Optional frontend build-time search mode (default `keyword`):
+
+```text
+VITE_IDEA_SEARCH_MODE=hybrid
+```
+
+Changing `EMBEDDING_DIMENSION` requires a new database migration — the schema is fixed at `vector(1024)`.
 
 Example:
 

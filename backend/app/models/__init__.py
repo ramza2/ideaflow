@@ -7,11 +7,14 @@ from app.models.collaboration import (
     IdeaReviewRequest,
     Notification,
 )
+from app.models.embedding import IdeaEmbedding, IdeaEmbeddingJob
 from app.models.system_setting import SystemSetting
 from app.models.research import WebEvidence, WebResearchRun
 from app.models.auth import AuthSession
 from app.models.enums import (
     AiJobStatus,
+    IdeaEmbeddingJobStatus,
+    SearchMode,
     AiJobType,
     AiLlmDecision,
     FieldProvenanceSource,
@@ -67,10 +70,14 @@ __all__ = [
     "IdeaParticipant",
     "IdeaAiSession",
     "AiJob",
+    "IdeaEmbedding",
+    "IdeaEmbeddingJob",
     "IdeaAiSessionPurpose",
     "IdeaAiSessionStatus",
     "AiJobType",
     "AiJobStatus",
+    "IdeaEmbeddingJobStatus",
+    "SearchMode",
     "FieldProvenanceSource",
     "AiLlmDecision",
     "WebResearchRun",

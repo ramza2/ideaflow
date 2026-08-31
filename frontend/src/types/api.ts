@@ -203,6 +203,7 @@ export interface IdeaListParams {
   assignee_id?: string;
   limit?: number;
   offset?: number;
+  search_mode?: "keyword" | "semantic" | "hybrid";
 }
 
 /* --- Step 8: AI Session --- */
