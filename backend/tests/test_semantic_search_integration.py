@@ -33,6 +33,7 @@ from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceStage
 from app.schemas.idea import IdeaCreate, IdeaUpdate
 from app.services import idea as idea_service
+from app.services import idea_search
 from app.services.embedding_service import load_idea_tag_names
 from app.services.embedding_worker import (
     finalize_embedding_result,
@@ -242,6 +243,28 @@ def test_worker_success_stores_embedding(db: Session, monkeypatch: pytest.Monkey
         session_factory=session_factory,
     )
     assert processed
+    row = db.get(IdeaEmbedding, idea.id)
+    assert row is not None
+    assert row.dimension == EMBEDDING_DIMENSION
+
+
+def test_run_once_without_explicit_session_factory(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    owner, _ = _user(db)
+    ws = _team(db, owner)
+    idea = _create_idea(db, ws, owner, title="Default factory path")
+    settings = get_settings()
+    processed = run_once(
+        db,
+        worker_id="default-factory-worker",
+        settings=settings,
+        provider_factory=lambda s: FakeEmbeddingProvider(s),
+    )
+    assert processed
+    db.expire_all()
     row = db.get(IdeaEmbedding, idea.id)
     assert row is not None
     assert row.dimension == EMBEDDING_DIMENSION
@@ -538,3 +561,56 @@ def test_hybrid_combines_keyword_and_semantic(client: TestClient, db: Session) -
     assert r.status_code == 200
     ids = [item["id"] for item in r.json()["items"]]
     assert str(sem.id) in ids
+
+
+def test_hybrid_acl_race_revalidates_final_fetch(
+    client: TestClient,
+    db: Session,
+    engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, owner_pw = _user(db)
+    member, member_pw = _user(db)
+    ws = _team(db, owner)
+    _member(db, ws, member)
+    idea = _create_idea(
+        db,
+        ws,
+        owner,
+        title="hybrid race keyword",
+        problem="hybrid race semantic content",
+        visibility=IdeaVisibility.WORKSPACE,
+    )
+    from app.embeddings.canonical import build_idea_embedding_text
+
+    text = build_idea_embedding_text(idea, load_idea_tag_names(db, idea.id))
+    _store_embedding(db, idea, text=text)
+    idea_id = idea.id
+
+    original_semantic = idea_search._semantic_ranked_ids
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def semantic_then_revoke_acl(*args, **kwargs):
+        ids = original_semantic(*args, **kwargs)
+        revoke_session = SessionFactory()
+        try:
+            target = revoke_session.get(Idea, idea_id)
+            target.visibility = IdeaVisibility.PRIVATE.value
+            revoke_session.commit()
+        finally:
+            revoke_session.close()
+        return ids
+
+    monkeypatch.setattr(idea_search, "_semantic_ranked_ids", semantic_then_revoke_acl)
+
+    headers = _login(client, member.email, member_pw)
+    r = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas",
+        params={"q": "hybrid race", "search_mode": "hybrid"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    ids = [item["id"] for item in payload["items"]]
+    assert str(idea_id) not in ids
+    assert payload["total"] == 0

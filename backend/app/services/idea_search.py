@@ -209,8 +209,12 @@ def _rrf_merge(
 ) -> list[Idea]:
     scores: dict[UUID, float] = {}
     for rank, idea_id in enumerate(keyword_ids, start=1):
+        if idea_id not in ideas_by_id:
+            continue
         scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (RRF_K + rank)
     for rank, idea_id in enumerate(semantic_ids, start=1):
+        if idea_id not in ideas_by_id:
+            continue
         scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (RRF_K + rank)
 
     ranked = sorted(
@@ -283,8 +287,26 @@ def list_hybrid_ideas(
     if not all_ids:
         return [], 0
 
-    ideas = list(db.scalars(select(Idea).where(Idea.id.in_(all_ids))))
+    final_stmt = select(Idea).where(
+        Idea.id.in_(all_ids),
+        Idea.workspace_id == workspace_id,
+    )
+    final_stmt = idea_access.apply_readable_filter(final_stmt, user_id)
+    final_stmt = _apply_list_filters(
+        final_stmt,
+        stage_id=stage_id,
+        category_id=category_id,
+        priority=priority,
+        feasibility=feasibility,
+        visibility=visibility,
+        author_id=author_id,
+        assignee_id=assignee_id,
+    )
+    ideas = list(db.scalars(final_stmt))
     ideas_by_id = {idea.id: idea for idea in ideas}
+    valid_ids = set(ideas_by_id)
+    keyword_ids = [idea_id for idea_id in keyword_ids if idea_id in valid_ids]
+    semantic_ids = [idea_id for idea_id in semantic_ids if idea_id in valid_ids]
     merged = _rrf_merge(keyword_ids, semantic_ids, ideas_by_id=ideas_by_id)
     total = len(merged)
     page = merged[offset : offset + limit]

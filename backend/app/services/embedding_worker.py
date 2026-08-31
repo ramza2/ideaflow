@@ -336,7 +336,7 @@ def process_claimed_embedding_job(
     try:
         vector = provider.embed_text(work.embedding_text)
     except EmbeddingError as exc:
-        factory = session_factory or get_session_factory
+        factory = session_factory or get_session_factory()
         with factory() as retry_db:
             _fail_or_retry_job_locked(
                 retry_db,
@@ -347,7 +347,7 @@ def process_claimed_embedding_job(
             )
         return
 
-    factory = session_factory or get_session_factory
+    factory = session_factory or get_session_factory()
     with factory() as finalize_db:
         finalize_embedding_result(
             finalize_db,
@@ -372,7 +372,7 @@ def run_once(
     if not cfg.embedding_enabled:
         return False
 
-    factory_sf = session_factory or get_session_factory
+    factory_sf = session_factory or get_session_factory()
 
     recover_stale_embedding_jobs(db, settings=cfg)
     job = claim_next_embedding_job(db, worker_id=worker_id, settings=cfg)
