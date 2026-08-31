@@ -429,12 +429,14 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
               <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]">
                 <User className="w-4 h-4 text-[#6b6b80]" /> 프로필
               </button>
-              <button
-                onClick={() => { navigate("/admin/integrations"); setProfileOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]"
-              >
-                <Shield className="w-4 h-4 text-[#6b6b80]" /> 시스템 관리
-              </button>
+              {user?.system_role === "SYSTEM_ADMIN" && (
+                <button
+                  onClick={() => { navigate("/admin/users"); setProfileOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]"
+                >
+                  <Shield className="w-4 h-4 text-[#6b6b80]" /> 시스템 관리
+                </button>
+              )}
               <div className="border-t border-[rgba(0,0,0,0.06)] mt-1 pt-1">
                 <button
                   type="button"

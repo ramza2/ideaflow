@@ -56,8 +56,8 @@ export function AIInputPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const selectedWorkspaceId = currentWorkspace?.id ?? workspaceId;
-  const allowLlm = currentWorkspace?.allow_llm !== false;
-  const llmDisabled = currentWorkspace != null && !currentWorkspace.allow_llm;
+  const allowLlm = currentWorkspace?.effective_allow_llm !== false;
+  const llmDisabled = currentWorkspace != null && !currentWorkspace.effective_allow_llm;
 
   const workspaceOptions = useMemo(
     () =>
@@ -93,7 +93,9 @@ export function AIInputPage() {
       );
     } catch (err) {
       if (err instanceof ApiError && err.code === "WORKSPACE_LLM_DISABLED") {
-        setSubmitError("이 작업공간에서는 AI 기능이 비활성화되어 있습니다.");
+        setSubmitError("AI 기능이 현재 시스템 또는 작업공간 정책으로 비활성화되어 있습니다.");
+      } else if (err instanceof ApiError && err.code === "SYSTEM_LLM_DISABLED") {
+        setSubmitError("AI 기능이 현재 시스템 또는 작업공간 정책으로 비활성화되어 있습니다.");
       } else {
         setSubmitError(apiErrorMessage(err, "AI 세션을 시작하지 못했습니다."));
       }
@@ -125,7 +127,7 @@ export function AIInputPage() {
       {llmDisabled && (
         <div className="mb-6">
           <InlineAlert type="warning" title="AI 기능 비활성">
-            이 작업공간에서는 AI 기능이 비활성화되어 있습니다.
+            AI 기능이 현재 시스템 또는 작업공간 정책으로 비활성화되어 있습니다.
           </InlineAlert>
         </div>
       )}

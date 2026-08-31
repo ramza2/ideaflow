@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.db.defaults import DEFAULT_WORKSPACE_CATEGORIES, DEFAULT_WORKSPACE_STAGES
 from app.models.enums import (
+    SystemSettingKey,
     UserStatus,
     WorkspaceMemberStatus,
     WorkspaceRole,
@@ -25,6 +26,7 @@ from app.models.workspace import (
     WorkspaceStage,
 )
 from app.services.auth import normalize_email
+from app.services import system_setting as system_setting_service
 
 PERSONAL_WORKSPACE_NAME = "내 작업공간"
 
@@ -134,16 +136,30 @@ def create_team_workspace(
     *,
     owner: User,
     name: str,
-    allow_llm: bool = True,
-    allow_web_search: bool = True,
+    allow_llm: bool | None = None,
+    allow_web_search: bool | None = None,
 ) -> Workspace:
+    resolved_allow_llm = (
+        allow_llm
+        if allow_llm is not None
+        else system_setting_service.get_bool_setting(
+            db, SystemSettingKey.DEFAULT_TEAM_ALLOW_LLM
+        )
+    )
+    resolved_allow_web_search = (
+        allow_web_search
+        if allow_web_search is not None
+        else system_setting_service.get_bool_setting(
+            db, SystemSettingKey.DEFAULT_TEAM_ALLOW_WEB_SEARCH
+        )
+    )
     return _create_workspace_bundle(
         db,
         owner=owner,
         name=name,
         workspace_type=WorkspaceType.TEAM.value,
-        allow_llm=allow_llm,
-        allow_web_search=allow_web_search,
+        allow_llm=resolved_allow_llm,
+        allow_web_search=resolved_allow_web_search,
     )
 
 

@@ -43,6 +43,7 @@ from app.schemas.research import (
     WebResearchRunPublic,
 )
 from app.services import ai_session as ai_session_service
+from app.services import system_setting as system_setting_service
 from app.web_search.sanitize import validate_and_sanitize_queries
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _require_web_search_enabled(workspace: Workspace) -> None:
+def _require_web_search_enabled(db: Session, workspace: Workspace) -> None:
+    system_setting_service.require_global_llm_enabled(db)
+    system_setting_service.require_global_web_search_enabled(db)
+    if not workspace.allow_llm:
+        raise AppError(
+            "LLM is disabled for this workspace.",
+            code="WORKSPACE_LLM_DISABLED",
+            status_code=403,
+        )
     if not workspace.allow_web_search:
         raise AppError(
             "Web search is disabled for this workspace.",
@@ -113,7 +122,8 @@ def _require_web_search_enabled(workspace: Workspace) -> None:
         )
 
 
-def _require_llm_enabled(workspace: Workspace) -> None:
+def _require_llm_enabled(db: Session, workspace: Workspace) -> None:
+    system_setting_service.require_global_llm_enabled(db)
     if not workspace.allow_llm:
         raise AppError(
             "LLM is disabled for this workspace.",
@@ -197,8 +207,8 @@ def preview_research_run(
     payload: WebResearchPreviewRequest,
     settings: Settings | None = None,
 ) -> WebResearchRun:
-    _require_web_search_enabled(workspace)
-    _require_llm_enabled(workspace)
+    _require_web_search_enabled(db, workspace)
+    _require_llm_enabled(db, workspace)
     cfg = settings or get_settings()
 
     session = ai_session_service.get_session_for_requester(
@@ -247,8 +257,8 @@ def approve_research_run(
     run_id: UUID,
     settings: Settings | None = None,
 ) -> WebResearchRun:
-    _require_web_search_enabled(workspace)
-    _require_llm_enabled(workspace)
+    _require_web_search_enabled(db, workspace)
+    _require_llm_enabled(db, workspace)
     cfg = settings or get_settings()
 
     session = ai_session_service.get_session_for_requester(
@@ -330,8 +340,8 @@ def retry_research_run(
     run_id: UUID,
     settings: Settings | None = None,
 ) -> WebResearchRun:
-    _require_web_search_enabled(workspace)
-    _require_llm_enabled(workspace)
+    _require_web_search_enabled(db, workspace)
+    _require_llm_enabled(db, workspace)
     cfg = settings or get_settings()
 
     session = ai_session_service.get_session_for_requester(

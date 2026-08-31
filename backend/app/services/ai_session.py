@@ -35,6 +35,7 @@ from app.schemas.ai import (
 )
 from app.schemas.idea import IdeaCreate
 from app.services import idea as idea_service
+from app.services import system_setting as system_setting_service
 
 _DRAFT_COMPARE_FIELDS = (
     "title",
@@ -58,7 +59,8 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _require_llm_enabled(workspace: Workspace) -> None:
+def _require_llm_enabled(db: Session, workspace: Workspace) -> None:
+    system_setting_service.require_global_llm_enabled(db)
     if not workspace.allow_llm:
         raise AppError(
             "LLM is disabled for this workspace.",
@@ -131,7 +133,7 @@ def create_ai_session(
     payload: AiSessionCreate,
     settings: Settings | None = None,
 ) -> IdeaAiSession:
-    _require_llm_enabled(workspace)
+    _require_llm_enabled(db, workspace)
     if payload.purpose != IdeaAiSessionPurpose.CREATE:
         raise AppError(
             "Only purpose=CREATE is supported.",
@@ -175,7 +177,7 @@ def submit_clarifications(
     payload: ClarificationSubmit,
     settings: Settings | None = None,
 ) -> IdeaAiSession:
-    _require_llm_enabled(workspace)
+    _require_llm_enabled(db, workspace)
     cfg = settings or get_settings()
     session = get_session_for_requester(
         db,
@@ -235,7 +237,7 @@ def retry_ai_session(
     session_id: UUID,
     settings: Settings | None = None,
 ) -> IdeaAiSession:
-    _require_llm_enabled(workspace)
+    _require_llm_enabled(db, workspace)
     cfg = settings or get_settings()
     session = get_session_for_requester(
         db,

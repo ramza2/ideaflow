@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
 from app.api.ai_sessions import router as ai_sessions_router
 from app.api.auth import router as auth_router
 from app.api.comments import router as comments_router
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
     application.include_router(reviews_router, prefix=settings.api_v1_prefix)
     application.include_router(comments_router, prefix=settings.api_v1_prefix)
     application.include_router(notifications_router, prefix=settings.api_v1_prefix)
+    application.include_router(admin_router, prefix=settings.api_v1_prefix)
     application.include_router(ai_sessions_router, prefix=settings.api_v1_prefix)
     application.include_router(web_research_router, prefix=settings.api_v1_prefix)
     return application

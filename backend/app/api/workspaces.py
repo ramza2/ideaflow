@@ -27,12 +27,13 @@ from app.schemas.workspace import (
     WorkspacePublic,
     WorkspaceUpdate,
 )
+from app.services import system_setting as system_setting_service
 from app.services import workspace as workspace_service
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
-def _workspace_public(workspace, role: str) -> WorkspacePublic:
+def _workspace_public(db: Session, workspace, role: str) -> WorkspacePublic:
     return WorkspacePublic(
         id=workspace.id,
         name=workspace.name,
@@ -40,6 +41,10 @@ def _workspace_public(workspace, role: str) -> WorkspacePublic:
         owner_id=workspace.owner_id,
         allow_llm=workspace.allow_llm,
         allow_web_search=workspace.allow_web_search,
+        effective_allow_llm=system_setting_service.effective_allow_llm(db, workspace),
+        effective_allow_web_search=system_setting_service.effective_allow_web_search(
+            db, workspace
+        ),
         current_user_role=role,
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
@@ -64,7 +69,7 @@ def list_workspaces(
     user: Annotated[User, Depends(require_password_changed)],
 ) -> list[WorkspacePublic]:
     items = workspace_service.list_workspaces_for_user(db, user)
-    return [_workspace_public(item.workspace, item.current_user_role) for item in items]
+    return [_workspace_public(db, item.workspace, item.current_user_role) for item in items]
 
 
 @router.post("", response_model=WorkspacePublic, status_code=status.HTTP_201_CREATED)
@@ -91,14 +96,15 @@ def create_team_workspace(
     except Exception:
         db.rollback()
         raise
-    return _workspace_public(workspace, "ADMIN")
+    return _workspace_public(db, workspace, "ADMIN")
 
 
 @router.get("/{workspace_id}", response_model=WorkspacePublic)
 def get_workspace(
+    db: Annotated[Session, Depends(get_db)],
     ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
 ) -> WorkspacePublic:
-    return _workspace_public(ctx.workspace, ctx.membership.role)
+    return _workspace_public(db, ctx.workspace, ctx.membership.role)
 
 
 @router.patch("/{workspace_id}", response_model=WorkspacePublic)
@@ -125,7 +131,7 @@ def patch_workspace(
     except Exception:
         db.rollback()
         raise
-    return _workspace_public(workspace, ctx.membership.role)
+    return _workspace_public(db, workspace, ctx.membership.role)
 
 
 @router.get("/{workspace_id}/members", response_model=list[MemberPublic])

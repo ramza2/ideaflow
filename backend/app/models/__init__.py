@@ -7,6 +7,7 @@ from app.models.collaboration import (
     IdeaReviewRequest,
     Notification,
 )
+from app.models.system_setting import SystemSetting
 from app.models.research import WebEvidence, WebResearchRun
 from app.models.auth import AuthSession
 from app.models.enums import (
@@ -21,6 +22,7 @@ from app.models.enums import (
     IdeaSharePermission,
     IdeaVisibility,
     SystemRole,
+    SystemSettingKey,
     UserStatus,
     WorkspaceMemberStatus,
     WorkspaceRole,
@@ -78,6 +80,8 @@ __all__ = [
     "IdeaComment",
     "IdeaCommentMention",
     "Notification",
+    "SystemSetting",
+    "SystemSettingKey",
     "ReviewKind",
     "ReviewStatus",
     "ReviewResult",

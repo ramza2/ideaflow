@@ -4,9 +4,9 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, and Step 10 Review/Comment/Notification. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, and Step 10 collaboration APIs.
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, Step 10 Review/Comment/Notification, and Step 11 Admin/SystemSetting. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, Step 10 collaboration APIs, and Step 11 admin APIs.
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, **Web Search approval on Review**, **Reviews inbox**, **Idea Detail discussion**, and **TopHeader notifications** use real APIs.
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, **Web Search approval on Review**, **Reviews inbox**, **Idea Detail discussion**, **TopHeader notifications**, and **Admin Console** (`/admin/*`, SYSTEM_ADMIN only) use real APIs.
 - `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
 
 ### Frontend service
@@ -30,6 +30,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - AI (Step 7): `IdeaAiSession` + `AiJob` PostgreSQL queue; in-process worker (`AI_WORKER_ENABLED`); OpenAI-compatible LLM via `httpx`; probe with `python -m app.cli.llm_probe`. Tests should set `AI_WORKER_ENABLED=false`.
 - Web Research (Step 9): `WebResearchRun` + `WebEvidence`; `AiJob` type `WEB_RESEARCH`; preview/approve APIs under `/ai-sessions/.../research-runs`; `http_json` search provider (`WEB_SEARCH_*` env); probe with `python -m app.cli.web_search_probe`. External search only after user approval; never send `input_text`/full draft to search provider.
 - Collaboration (Step 10): `IdeaReviewRequest`, `IdeaComment`, `IdeaCommentMention`, `Notification`; review inbox + comment CRUD + in-app notifications. Review/Mention/Assignee do **not** grant Idea read ACL. No email/push/WebSocket.
+- Admin (Step 11): `SystemSetting` (4 known boolean keys), `/api/v1/admin/*` (SYSTEM_ADMIN + password changed), user management, integration config read + LLM/web-search diagnostic tests. Connection secrets stay in ENV only (`api_key_configured` bool in API). Global LLM/web-search policy enforced in AI/research services; workspace responses include `effective_allow_*`.
 - Migrations (PostgreSQL required):
 
 ```text

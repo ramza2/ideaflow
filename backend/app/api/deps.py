@@ -58,7 +58,9 @@ def require_csrf(
     return ctx
 
 
-def require_system_admin(user: Annotated[User, Depends(get_current_user)]) -> User:
+def require_system_admin(
+    user: Annotated[User, Depends(require_password_changed)],
+) -> User:
     if user.system_role != SystemRole.SYSTEM_ADMIN.value:
         raise AppError("System admin required.", code="FORBIDDEN", status_code=403)
     return user
