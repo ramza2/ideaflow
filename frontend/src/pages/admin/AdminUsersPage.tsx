@@ -193,6 +193,7 @@ export function AdminUsersPage() {
               <option value="ACTIVE">활성</option>
               <option value="INACTIVE">비활성</option>
               <option value="LOCKED">잠금</option>
+              <option value="WITHDRAWN">탈퇴</option>
             </select>
             <select
               value={roleFilter}
@@ -254,76 +255,80 @@ export function AdminUsersPage() {
                       <td className="px-4 py-3 text-xs text-[#6b6b80]">{formatDate(u.last_seen_at)}</td>
                       <td className="px-4 py-3 text-xs text-[#6b6b80]">{formatDate(u.created_at)}</td>
                       <td className="px-4 py-3 relative">
-                        <button
-                          type="button"
-                          onClick={() => setMenuUserId(menuUserId === u.id ? null : u.id)}
-                          className="p-1.5 rounded-lg hover:bg-[#f4f4f8]"
-                        >
-                          <MoreHorizontal className="w-4 h-4 text-[#6b6b80]" />
-                        </button>
-                        {menuUserId === u.id && (
-                          <div className="absolute right-4 top-10 z-20 w-48 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1">
-                            {u.status !== "ACTIVE" && !u.is_current_user && (
-                              <button
-                                className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                onClick={() => void handleStatusChange(u, "ACTIVE")}
-                              >
-                                활성화
-                              </button>
+                        {u.status !== "WITHDRAWN" && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setMenuUserId(menuUserId === u.id ? null : u.id)}
+                              className="p-1.5 rounded-lg hover:bg-[#f4f4f8]"
+                            >
+                              <MoreHorizontal className="w-4 h-4 text-[#6b6b80]" />
+                            </button>
+                            {menuUserId === u.id && (
+                              <div className="absolute right-4 top-10 z-20 w-48 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1">
+                                {u.status !== "ACTIVE" && !u.is_current_user && (
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
+                                    onClick={() => void handleStatusChange(u, "ACTIVE")}
+                                  >
+                                    활성화
+                                  </button>
+                                )}
+                                {u.status === "ACTIVE" && !u.is_current_user && (
+                                  <>
+                                    <button
+                                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
+                                      onClick={() => void handleStatusChange(u, "INACTIVE")}
+                                    >
+                                      비활성화
+                                    </button>
+                                    <button
+                                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
+                                      onClick={() => void handleStatusChange(u, "LOCKED")}
+                                    >
+                                      계정 잠금
+                                    </button>
+                                  </>
+                                )}
+                                {u.system_role === "USER" && !u.is_current_user && (
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
+                                    onClick={() => void handleRoleChange(u, "SYSTEM_ADMIN")}
+                                  >
+                                    시스템 관리자 지정
+                                  </button>
+                                )}
+                                {u.system_role === "SYSTEM_ADMIN" && !u.is_current_user && (
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
+                                    onClick={() => void handleRoleChange(u, "USER")}
+                                  >
+                                    일반 사용자로 변경
+                                  </button>
+                                )}
+                                {u.temporary_login_locked && (
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
+                                    onClick={() => void handleUnlock(u)}
+                                  >
+                                    <Unlock className="w-3.5 h-3.5" /> 로그인 잠금 해제
+                                  </button>
+                                )}
+                                {!u.is_current_user && (
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
+                                    onClick={() => {
+                                      setResetUserId(u.id);
+                                      setResetPassword("");
+                                      setMenuUserId(null);
+                                    }}
+                                  >
+                                    <KeyRound className="w-3.5 h-3.5" /> 임시 비밀번호 재설정
+                                  </button>
+                                )}
+                              </div>
                             )}
-                            {u.status === "ACTIVE" && !u.is_current_user && (
-                              <>
-                                <button
-                                  className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                  onClick={() => void handleStatusChange(u, "INACTIVE")}
-                                >
-                                  비활성화
-                                </button>
-                                <button
-                                  className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                  onClick={() => void handleStatusChange(u, "LOCKED")}
-                                >
-                                  계정 잠금
-                                </button>
-                              </>
-                            )}
-                            {u.system_role === "USER" && !u.is_current_user && (
-                              <button
-                                className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                onClick={() => void handleRoleChange(u, "SYSTEM_ADMIN")}
-                              >
-                                시스템 관리자 지정
-                              </button>
-                            )}
-                            {u.system_role === "SYSTEM_ADMIN" && !u.is_current_user && (
-                              <button
-                                className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                onClick={() => void handleRoleChange(u, "USER")}
-                              >
-                                일반 사용자로 변경
-                              </button>
-                            )}
-                            {u.temporary_login_locked && (
-                              <button
-                                className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
-                                onClick={() => void handleUnlock(u)}
-                              >
-                                <Unlock className="w-3.5 h-3.5" /> 로그인 잠금 해제
-                              </button>
-                            )}
-                            {!u.is_current_user && (
-                              <button
-                                className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
-                                onClick={() => {
-                                  setResetUserId(u.id);
-                                  setResetPassword("");
-                                  setMenuUserId(null);
-                                }}
-                              >
-                                <KeyRound className="w-3.5 h-3.5" /> 임시 비밀번호 재설정
-                              </button>
-                            )}
-                          </div>
+                          </>
                         )}
                       </td>
                     </tr>

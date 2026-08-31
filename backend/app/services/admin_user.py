@@ -89,6 +89,15 @@ def _lock_active_system_admins(db: Session) -> list[User]:
     )
 
 
+def _require_mutable_user(user: User) -> None:
+    if user.status == UserStatus.WITHDRAWN.value:
+        raise AppError(
+            "Withdrawn user is read-only.",
+            code="USER_WITHDRAWN_READ_ONLY",
+            status_code=409,
+        )
+
+
 def _ensure_not_last_system_admin(
     db: Session,
     *,
@@ -185,6 +194,7 @@ def update_user(
     user = db.get(User, user_id)
     if user is None or user.deleted_at is not None:
         raise AppError("User not found.", code="USER_NOT_FOUND", status_code=404)
+    _require_mutable_user(user)
 
     if user_id == actor_id:
         if payload.status in {UserStatus.INACTIVE, UserStatus.LOCKED}:
@@ -235,6 +245,7 @@ def reset_password(
     user = db.get(User, user_id)
     if user is None or user.deleted_at is not None:
         raise AppError("User not found.", code="USER_NOT_FOUND", status_code=404)
+    _require_mutable_user(user)
     user.password_hash = hash_password(temporary_password)
     user.must_change_password = True
     user.failed_login_count = 0
@@ -248,6 +259,7 @@ def unlock_login(db: Session, *, actor_id: UUID, user_id: UUID) -> AdminUserPubl
     user = db.get(User, user_id)
     if user is None or user.deleted_at is not None:
         raise AppError("User not found.", code="USER_NOT_FOUND", status_code=404)
+    _require_mutable_user(user)
     user.failed_login_count = 0
     user.locked_until = None
     db.flush()

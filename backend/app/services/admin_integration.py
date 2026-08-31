@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse
@@ -25,6 +26,8 @@ from app.models.enums import SystemSettingKey
 from app.web_search.exceptions import WebSearchConfigurationError, WebSearchError
 from app.web_search.factory import get_web_search_provider
 
+logger = logging.getLogger(__name__)
+
 PROBE_INPUT = "회의 내용을 정리해 팀 아이디어로 저장하는 도구"
 
 
@@ -45,6 +48,17 @@ def sanitize_url_for_display(url: str) -> str:
     return urlunparse((parsed.scheme, netloc, parsed.path or "", "", "", ""))
 
 
+def sanitize_path_for_display(path: str) -> str:
+    """Strip query/fragment from a path used only in Admin display responses."""
+    stripped = path.strip()
+    if not stripped:
+        return ""
+    parsed = urlparse(stripped)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path or "/"
+    return parsed.path or stripped.split("?", 1)[0].split("#", 1)[0]
+
+
 def get_integration_config(db: Session, settings: Settings | None = None) -> AdminIntegrationConfigResponse:
     cfg = settings or get_settings()
     ws_url = sanitize_url_for_display(cfg.web_search_api_url) if cfg.web_search_api_url.strip() else None
@@ -52,7 +66,7 @@ def get_integration_config(db: Session, settings: Settings | None = None) -> Adm
         llm=LlmIntegrationConfig(
             provider="openai_compatible",
             api_url=sanitize_url_for_display(cfg.llm_api_url),
-            chat_completions_path=cfg.llm_chat_completions_path,
+            chat_completions_path=sanitize_path_for_display(cfg.llm_chat_completions_path),
             model_name=cfg.llm_model_name,
             api_key_configured=bool(cfg.llm_api_key.strip()),
             timeout_seconds=cfg.llm_timeout_seconds,
@@ -85,17 +99,18 @@ def get_integration_config(db: Session, settings: Settings | None = None) -> Adm
 
 def test_llm_connection(settings: Settings | None = None) -> LlmConnectionTestResult:
     cfg = settings or get_settings()
-    provider = get_llm_provider(cfg)
     tested_at = utcnow()
-    request = IdeaStructuringRequest(
-        input_text=PROBE_INPUT,
-        categories=[
-            CategoryOption(slug="product_service", name="제품·서비스"),
-            CategoryOption(slug="technology_rd", name="기술·R&D"),
-        ],
-    )
+    provider = None
     started = time.perf_counter()
     try:
+        provider = get_llm_provider(cfg)
+        request = IdeaStructuringRequest(
+            input_text=PROBE_INPUT,
+            categories=[
+                CategoryOption(slug="product_service", name="제품·서비스"),
+                CategoryOption(slug="technology_rd", name="기술·R&D"),
+            ],
+        )
         result = provider.structure_idea(request)
         del result
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -110,16 +125,29 @@ def test_llm_connection(settings: Settings | None = None) -> LlmConnectionTestRe
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LlmConnectionTestResult(
             status="ERROR",
-            provider=provider.provider_name,
-            model=provider.model_name,
+            provider=getattr(provider, "provider_name", None),
+            model=getattr(provider, "model_name", None),
             latency_ms=latency_ms,
             tested_at=tested_at,
             error_code=exc.code,
             retryable=exc.retryable,
-            safe_message=str(exc),
+            safe_message=exc.safe_message,
+        )
+    except Exception:
+        logger.exception("Admin LLM diagnostic failed")
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return LlmConnectionTestResult(
+            status="ERROR",
+            provider=getattr(provider, "provider_name", None) if provider is not None else None,
+            latency_ms=latency_ms,
+            tested_at=tested_at,
+            error_code="LLM_ERROR",
+            retryable=False,
+            safe_message="AI 처리 중 오류가 발생했습니다.",
         )
     finally:
-        provider.close()
+        if provider is not None:
+            provider.close()
 
 
 def test_web_search_connection(
@@ -133,18 +161,23 @@ def test_web_search_connection(
             status="NOT_CONFIGURED",
             provider=cfg.web_search_provider,
             tested_at=tested_at,
+            error_code="WEB_SEARCH_NOT_CONFIGURED",
             safe_message="Web search API URL is not configured.",
         )
-    provider = get_web_search_provider(cfg)
+    provider = None
     started = time.perf_counter()
     try:
-        results = provider.search(query, max_results=min(cfg.web_search_max_results_per_query, 5))
+        provider = get_web_search_provider(cfg)
+        results = provider.search(
+            query=query,
+            max_results=min(cfg.web_search_max_results_per_query, 5),
+        )
         latency_ms = int((time.perf_counter() - started) * 1000)
         items = [
             WebSearchTestResultItem(
                 title=item.title,
                 url=item.url,
-                source=item.source_name,
+                source=item.source,
                 published_at=item.published_at.isoformat() if item.published_at else None,
             )
             for item in results[:5]
@@ -162,18 +195,33 @@ def test_web_search_connection(
             status="NOT_CONFIGURED",
             provider=cfg.web_search_provider,
             tested_at=tested_at,
-            safe_message=str(exc),
+            error_code=exc.code,
+            retryable=False,
+            safe_message=exc.safe_message,
         )
     except WebSearchError as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         return WebSearchConnectionTestResult(
             status="ERROR",
-            provider=provider.provider_name,
+            provider=getattr(provider, "provider_name", None) if provider is not None else None,
             latency_ms=latency_ms,
             tested_at=tested_at,
             error_code=exc.code,
             retryable=exc.retryable,
-            safe_message=str(exc),
+            safe_message=exc.safe_message,
+        )
+    except Exception:
+        logger.exception("Admin web search diagnostic failed")
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return WebSearchConnectionTestResult(
+            status="ERROR",
+            provider=getattr(provider, "provider_name", None) if provider is not None else None,
+            latency_ms=latency_ms,
+            tested_at=tested_at,
+            error_code="WEB_SEARCH_ERROR",
+            retryable=False,
+            safe_message="웹 검색 중 오류가 발생했습니다.",
         )
     finally:
-        provider.close()
+        if provider is not None:
+            provider.close()

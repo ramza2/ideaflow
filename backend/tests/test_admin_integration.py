@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.security import hash_password
 from app.db.session import reset_engine
+from app.llm.exceptions import LlmAuthenticationError, LlmTimeoutError
 from app.llm.schemas import (
     CategoryOption,
     FieldProvenanceEntry,
@@ -45,6 +46,12 @@ from app.services.workspace import (
     ensure_personal_workspace_for_user,
     get_active_personal_workspace,
     seed_workspace_defaults,
+)
+from app.web_search.base import WebSearchResult
+from app.web_search.exceptions import (
+    WebSearchAuthenticationError,
+    WebSearchRateLimitError,
+    WebSearchTimeoutError,
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -80,6 +87,28 @@ class FakeLlmProvider:
             research_recommended=False,
             research_topics=[],
         )
+
+    def close(self) -> None:
+        pass
+
+
+class FakeWebSearchProvider:
+    provider_name = "fake"
+
+    def __init__(
+        self,
+        results: list[WebSearchResult] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._results = list(results or [])
+        self._error = error
+
+    def search(self, *, query: str, max_results: int) -> list[WebSearchResult]:
+        self.calls.append({"query": query, "max_results": max_results})
+        if self._error is not None:
+            raise self._error
+        return self._results[:max_results]
 
     def close(self) -> None:
         pass
@@ -641,6 +670,11 @@ def test_integrations_get_does_not_leak_secret_keys(
 ) -> None:
     monkeypatch.setenv("LLM_API_KEY", "SUPER_SECRET_LLM_KEY_123")
     monkeypatch.setenv("WEB_SEARCH_API_KEY", "SUPER_SECRET_SEARCH_KEY_456")
+    monkeypatch.setenv("LLM_API_URL", "https://user:password@example.com/api?token=URL_SECRET")
+    monkeypatch.setenv("LLM_CHAT_COMPLETIONS_PATH", "/v1/chat/completions?token=PATH_SECRET")
+    monkeypatch.setenv(
+        "WEB_SEARCH_API_URL", "https://user:password@example.com/search?key=SEARCH_URL_SECRET"
+    )
     get_settings.cache_clear()
     reset_engine()
 
@@ -649,10 +683,21 @@ def test_integrations_get_does_not_leak_secret_keys(
     r = client.get("/api/v1/admin/integrations", headers=_auth_headers(client))
     assert r.status_code == 200, r.text
     dumped = json.dumps(r.json())
-    assert "SUPER_SECRET_LLM_KEY_123" not in dumped
-    assert "SUPER_SECRET_SEARCH_KEY_456" not in dumped
-    assert r.json()["llm"]["api_key_configured"] is True
-    assert r.json()["web_search"]["api_key_configured"] is True
+    for secret in (
+        "SUPER_SECRET_LLM_KEY_123",
+        "SUPER_SECRET_SEARCH_KEY_456",
+        "password",
+        "URL_SECRET",
+        "PATH_SECRET",
+        "SEARCH_URL_SECRET",
+    ):
+        assert secret not in dumped
+    body = r.json()
+    assert body["llm"]["api_key_configured"] is True
+    assert body["web_search"]["api_key_configured"] is True
+    assert body["llm"]["api_url"] == "https://example.com/api"
+    assert body["llm"]["chat_completions_path"] == "/v1/chat/completions"
+    assert body["web_search"]["api_url"] == "https://example.com/search"
 
 
 def test_llm_connection_test_uses_fake_provider_metadata_only(
@@ -701,4 +746,229 @@ def test_web_search_connection_test_not_configured_when_url_empty(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "NOT_CONFIGURED"
+    assert body["error_code"] == "WEB_SEARCH_NOT_CONFIGURED"
     assert body["safe_message"]
+
+
+def test_withdrawn_user_is_read_only(client: TestClient, db: Session) -> None:
+    admin, admin_pw = _admin_user(db)
+    target, _ = _user(db, status=UserStatus.WITHDRAWN.value)
+    _login(client, admin.email, admin_pw)
+    headers = _auth_headers(client)
+
+    listed = client.get("/api/v1/admin/users", params={"status": "WITHDRAWN"}, headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert any(item["id"] == str(target.id) for item in listed.json()["items"])
+
+    r = client.patch(
+        f"/api/v1/admin/users/{target.id}",
+        json={"status": "ACTIVE"},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "USER_WITHDRAWN_READ_ONLY"
+    db.refresh(target)
+    assert target.status == UserStatus.WITHDRAWN.value
+
+    r = client.patch(
+        f"/api/v1/admin/users/{target.id}",
+        json={"name": "복원된 사용자"},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "USER_WITHDRAWN_READ_ONLY"
+
+    r = client.patch(
+        f"/api/v1/admin/users/{target.id}",
+        json={"system_role": "SYSTEM_ADMIN"},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "USER_WITHDRAWN_READ_ONLY"
+
+    r = client.post(
+        f"/api/v1/admin/users/{target.id}/reset-password",
+        json={"temporary_password": "temporary-password"},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "USER_WITHDRAWN_READ_ONLY"
+
+    r = client.post(
+        f"/api/v1/admin/users/{target.id}/unlock-login",
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "USER_WITHDRAWN_READ_ONLY"
+
+
+def test_cannot_set_active_user_withdrawn(client: TestClient, db: Session) -> None:
+    admin, admin_pw = _admin_user(db)
+    target, _ = _user(db)
+    _login(client, admin.email, admin_pw)
+    r = client.patch(
+        f"/api/v1/admin/users/{target.id}",
+        json={"status": "WITHDRAWN"},
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INVALID_STATUS"
+    db.refresh(target)
+    assert target.status == UserStatus.ACTIVE.value
+
+
+def test_web_search_connection_test_configured_fake_provider(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.example.com")
+    get_settings.cache_clear()
+    reset_engine()
+
+    fake = FakeWebSearchProvider(
+        results=[
+            WebSearchResult(
+                title="Python",
+                url="https://docs.python.org/3/",
+                snippet="Official Python documentation",
+                source="Python Docs",
+                published_at=None,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        admin_integration_service, "get_web_search_provider", lambda _settings=None: fake
+    )
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/web-search/test",
+        json={"query": "Python official documentation"},
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "OK"
+    assert body["provider"] == "fake"
+    assert body["result_count"] == 1
+    assert body["results"][0]["title"] == "Python"
+    assert body["results"][0]["source"] == "Python Docs"
+    assert fake.calls == 1 or len(fake.calls) == 1
+    assert fake.calls[0]["query"] == "Python official documentation"
+    assert int(fake.calls[0]["max_results"]) <= 5  # type: ignore[arg-type]
+    dumped = json.dumps(fake.calls) + json.dumps(body)
+    assert "input_text" not in dumped
+    assert "draft" not in dumped
+    assert "one_line_definition" not in dumped
+
+
+def test_web_search_connection_test_unknown_provider(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.example.com")
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "unknown")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/web-search/test",
+        json={"query": "Python official documentation"},
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "NOT_CONFIGURED"
+    assert body["error_code"] == "WEB_SEARCH_NOT_CONFIGURED"
+    dumped = json.dumps(body)
+    assert "Traceback" not in dumped
+    assert "Exception" not in dumped
+    assert "SUPER_SECRET" not in dumped
+
+
+def test_llm_connection_test_configuration_error(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_API_URL", "")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/llm/test",
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ERROR"
+    assert body["error_code"] == "LLM_CONFIGURATION_ERROR"
+    assert body["retryable"] is False
+    dumped = json.dumps(body)
+    assert "Traceback" not in dumped
+
+
+def test_llm_connection_test_timeout_and_auth_errors(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+
+    class TimeoutProvider(FakeLlmProvider):
+        def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
+            self.calls += 1
+            raise LlmTimeoutError()
+
+    monkeypatch.setattr(
+        admin_integration_service, "get_llm_provider", lambda _settings=None: TimeoutProvider()
+    )
+    r = client.post("/api/v1/admin/integrations/llm/test", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ERROR"
+    assert r.json()["error_code"] == "LLM_TIMEOUT"
+    assert r.json()["retryable"] is True
+
+    class AuthProvider(FakeLlmProvider):
+        def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
+            self.calls += 1
+            raise LlmAuthenticationError()
+
+    monkeypatch.setattr(
+        admin_integration_service, "get_llm_provider", lambda _settings=None: AuthProvider()
+    )
+    r = client.post("/api/v1/admin/integrations/llm/test", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ERROR"
+    assert r.json()["error_code"] == "LLM_AUTH_ERROR"
+
+
+def test_web_search_connection_test_provider_errors(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.example.com")
+    get_settings.cache_clear()
+    reset_engine()
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+
+    cases = [
+        (WebSearchTimeoutError(), "WEB_SEARCH_TIMEOUT", True),
+        (WebSearchAuthenticationError(), "WEB_SEARCH_AUTH_ERROR", False),
+        (WebSearchRateLimitError(), "WEB_SEARCH_RATE_LIMIT", True),
+    ]
+    for error, code, retryable in cases:
+        fake = FakeWebSearchProvider(error=error)
+        monkeypatch.setattr(
+            admin_integration_service, "get_web_search_provider", lambda _settings=None, f=fake: f
+        )
+        r = client.post(
+            "/api/v1/admin/integrations/web-search/test",
+            json={"query": "Python official documentation"},
+            headers=_auth_headers(client),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ERROR"
+        assert body["error_code"] == code
+        assert body["retryable"] is retryable
