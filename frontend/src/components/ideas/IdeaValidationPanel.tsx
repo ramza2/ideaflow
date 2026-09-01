@@ -9,7 +9,7 @@ import {
   startValidation,
   updateValidation,
 } from "../../api/validations";
-import { apiErrorMessage } from "../../api/client";
+import { apiErrorMessage, ApiError } from "../../api/client";
 import { Button } from "../common/Button";
 import { Badge } from "../common/Badge";
 import { EmptyState } from "../common/EmptyState";
@@ -44,6 +44,20 @@ const OUTCOME_LABEL: Record<IdeaValidationOutcome, string> = {
   FAIL: "실패",
   INCONCLUSIVE: "결론 불충분",
 };
+
+const VALIDATION_ERROR_MESSAGES: Record<string, string> = {
+  IDEA_NOT_READY_FOR_VALIDATION: "아이디어 상태를 먼저 '검증 후보'로 변경해 주세요.",
+  INVALID_VALIDATION_TRANSITION: "현재 검증 상태에서는 이 작업을 수행할 수 없습니다.",
+  VALIDATION_NOT_EDITABLE: "완료되거나 취소된 검증 계획은 수정할 수 없습니다.",
+  VALIDATION_NOT_FOUND: "검증 계획을 찾을 수 없거나 접근 권한이 없습니다.",
+};
+
+function validationErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.code && VALIDATION_ERROR_MESSAGES[err.code]) {
+    return VALIDATION_ERROR_MESSAGES[err.code];
+  }
+  return apiErrorMessage(err);
+}
 
 interface FormState {
   title: string;
@@ -152,7 +166,7 @@ export function IdeaValidationPanel({
       setFormOpen(false);
       await reload();
     } catch (err) {
-      toast.error(apiErrorMessage(err));
+      toast.error(validationErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -167,7 +181,7 @@ export function IdeaValidationPanel({
       toast.success(successMessage);
       await reload();
     } catch (err) {
-      toast.error(apiErrorMessage(err));
+      toast.error(validationErrorMessage(err));
     }
   }
 
@@ -178,7 +192,7 @@ export function IdeaValidationPanel({
       toast.success("검증을 시작했습니다.");
       await reload();
     } catch (err) {
-      toast.error(apiErrorMessage(err));
+      toast.error(validationErrorMessage(err));
     }
   }
 
@@ -196,7 +210,7 @@ export function IdeaValidationPanel({
       setCompleteTargetId(null);
       await reload();
     } catch (err) {
-      toast.error(apiErrorMessage(err));
+      toast.error(validationErrorMessage(err));
     } finally {
       setCompleting(false);
     }
