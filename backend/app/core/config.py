@@ -11,6 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_FILE = _REPO_ROOT / ".env"
 
+# Fixed pgvector schema dimension (changing requires a new migration).
+EMBEDDING_DIMENSION = 1024
+
 
 def repo_root() -> Path:
     """Return the IdeaFlow repository root (absolute)."""
@@ -97,6 +100,31 @@ class Settings(BaseSettings):
     )
     web_search_max_total_results: int = Field(default=20, alias="WEB_SEARCH_MAX_TOTAL_RESULTS")
 
+    # Embeddings (Step 13 — separate from LLM)
+    embedding_enabled: bool = Field(default=False, alias="EMBEDDING_ENABLED")
+    embedding_provider: str = Field(default="openai_compatible", alias="EMBEDDING_PROVIDER")
+    embedding_api_url: str = Field(default="", alias="EMBEDDING_API_URL")
+    embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
+    embedding_model_name: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL_NAME")
+    embedding_path: str = Field(default="/v1/embeddings", alias="EMBEDDING_PATH")
+    embedding_dimension: int = Field(default=EMBEDDING_DIMENSION, alias="EMBEDDING_DIMENSION")
+    embedding_timeout_seconds: float = Field(default=30.0, alias="EMBEDDING_TIMEOUT_SECONDS")
+    embedding_connect_timeout_seconds: float = Field(
+        default=5.0, alias="EMBEDDING_CONNECT_TIMEOUT_SECONDS"
+    )
+    embedding_max_input_chars: int = Field(default=20000, alias="EMBEDDING_MAX_INPUT_CHARS")
+
+    # Embedding worker
+    embedding_worker_enabled: bool = Field(default=True, alias="EMBEDDING_WORKER_ENABLED")
+    embedding_job_poll_interval_seconds: float = Field(
+        default=1.0, alias="EMBEDDING_JOB_POLL_INTERVAL_SECONDS"
+    )
+    embedding_job_lease_seconds: int = Field(default=120, alias="EMBEDDING_JOB_LEASE_SECONDS")
+    embedding_job_max_attempts: int = Field(default=3, alias="EMBEDDING_JOB_MAX_ATTEMPTS")
+    embedding_job_retry_base_seconds: float = Field(
+        default=2.0, alias="EMBEDDING_JOB_RETRY_BASE_SECONDS"
+    )
+
     @field_validator("llm_enable_thinking", mode="before")
     @classmethod
     def parse_enable_thinking(cls, value: Any) -> bool | None:
@@ -130,6 +158,10 @@ class Settings(BaseSettings):
         "ai_job_retry_base_seconds",
         "web_search_timeout_seconds",
         "web_search_connect_timeout_seconds",
+        "embedding_timeout_seconds",
+        "embedding_connect_timeout_seconds",
+        "embedding_job_poll_interval_seconds",
+        "embedding_job_retry_base_seconds",
         mode="after",
     )
     @classmethod
@@ -145,6 +177,9 @@ class Settings(BaseSettings):
         "web_search_max_queries",
         "web_search_max_results_per_query",
         "web_search_max_total_results",
+        "embedding_job_lease_seconds",
+        "embedding_job_max_attempts",
+        "embedding_max_input_chars",
         mode="after",
     )
     @classmethod
@@ -179,6 +214,16 @@ class Settings(BaseSettings):
             raise ValueError("WEB_SEARCH_MAX_RESULTS_PER_QUERY must be between 1 and 10")
         if self.web_search_max_total_results < 1:
             raise ValueError("WEB_SEARCH_MAX_TOTAL_RESULTS must be >= 1")
+        if self.embedding_dimension != EMBEDDING_DIMENSION:
+            raise ValueError(
+                f"EMBEDDING_DIMENSION must be {EMBEDDING_DIMENSION} for the current schema"
+            )
+        if self.embedding_enabled and not self.embedding_api_url.strip():
+            raise ValueError("EMBEDDING_API_URL is required when EMBEDDING_ENABLED=true")
+        if self.embedding_job_lease_seconds <= self.embedding_timeout_seconds:
+            raise ValueError(
+                "EMBEDDING_JOB_LEASE_SECONDS must be greater than EMBEDDING_TIMEOUT_SECONDS"
+            )
         return self
 
     @property
@@ -192,6 +237,10 @@ class Settings(BaseSettings):
         if not path.startswith("/"):
             path = "/" + path
         return f"{base}{path}"
+
+    @property
+    def embedding_api_url_resolved(self) -> str:
+        return self.embedding_api_url.rstrip("/")
 
 
 @lru_cache

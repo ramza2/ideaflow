@@ -19,13 +19,15 @@ from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.services.ai_worker import AiWorker
+from app.services.embedding_worker import EmbeddingWorker
 
 _ai_worker: AiWorker | None = None
+_embedding_worker: EmbeddingWorker | None = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _ai_worker
+    global _ai_worker, _embedding_worker
     settings = get_settings()
     setup_logging(settings.log_level)
     logger = get_logger("app.main")
@@ -41,9 +43,21 @@ async def lifespan(_app: FastAPI):
     else:
         _ai_worker = None
         logger.info("AI worker disabled (AI_WORKER_ENABLED=false)")
+    if settings.embedding_worker_enabled and settings.embedding_enabled:
+        _embedding_worker = EmbeddingWorker(settings=settings)
+        _embedding_worker.start()
+    else:
+        _embedding_worker = None
+        if not settings.embedding_worker_enabled:
+            logger.info("Embedding worker disabled (EMBEDDING_WORKER_ENABLED=false)")
+        else:
+            logger.info("Embedding worker not started (EMBEDDING_ENABLED=false)")
     try:
         yield
     finally:
+        if _embedding_worker is not None:
+            _embedding_worker.stop()
+            _embedding_worker = None
         if _ai_worker is not None:
             _ai_worker.stop()
             _ai_worker = None

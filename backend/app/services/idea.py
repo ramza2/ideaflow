@@ -34,7 +34,9 @@ from app.schemas.idea import (
     StageRef,
     TagPublic,
 )
+from app.embeddings.canonical import embedding_fields_changed
 from app.services import idea_access
+from app.services.embedding_service import on_idea_embedding_content_changed
 
 _MAX_TAGS = 20
 _TAG_MAX_LEN = 64
@@ -345,6 +347,7 @@ def create_idea(
         replace_shares(db, idea=idea, shares=payload.shares)
 
     db.flush()
+    on_idea_embedding_content_changed(db, idea)
     return idea
 
 
@@ -472,6 +475,8 @@ def update_idea(
         sync_idea_tags(db, idea, payload.tags)
 
     db.flush()
+    if embedding_fields_changed(fields_set):
+        on_idea_embedding_content_changed(db, idea)
     return idea
 
 
@@ -623,12 +628,13 @@ def _search_predicate(q: str):
     return or_(ilike_clause, fts_clause)
 
 
-def list_ideas(
-    db: Session,
+def _normalize_list_pagination(limit: int, offset: int) -> tuple[int, int]:
+    return min(max(limit, 1), 100), max(offset, 0)
+
+
+def _apply_list_filters(
+    stmt,
     *,
-    workspace_id: UUID,
-    user_id: UUID,
-    q: str | None = None,
     stage_id: UUID | None = None,
     category_id: UUID | None = None,
     priority: str | None = None,
@@ -636,42 +642,63 @@ def list_ideas(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> IdeaListResponse:
-    limit = min(max(limit, 1), 100)
-    offset = max(offset, 0)
+):
+    if stage_id is not None:
+        stmt = stmt.where(Idea.stage_id == stage_id)
+    if category_id is not None:
+        stmt = stmt.where(Idea.category_id == category_id)
+    if priority is not None:
+        stmt = stmt.where(Idea.priority == priority)
+    if feasibility is not None:
+        stmt = stmt.where(Idea.feasibility == feasibility)
+    if visibility is not None:
+        stmt = stmt.where(Idea.visibility == visibility)
+    if author_id is not None:
+        stmt = stmt.where(Idea.author_id == author_id)
+    if assignee_id is not None:
+        stmt = stmt.where(Idea.assignee_id == assignee_id)
+    return stmt
 
+
+def _build_keyword_query(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    user_id: UUID,
+    q: str,
+    stage_id: UUID | None = None,
+    category_id: UUID | None = None,
+    priority: str | None = None,
+    feasibility: str | None = None,
+    visibility: str | None = None,
+    author_id: UUID | None = None,
+    assignee_id: UUID | None = None,
+):
+    del db
     base = select(Idea).where(Idea.workspace_id == workspace_id)
     base = idea_access.apply_readable_filter(base, user_id)
-
-    if q and q.strip():
-        base = base.where(_search_predicate(q.strip()))
-    if stage_id is not None:
-        base = base.where(Idea.stage_id == stage_id)
-    if category_id is not None:
-        base = base.where(Idea.category_id == category_id)
-    if priority is not None:
-        base = base.where(Idea.priority == priority)
-    if feasibility is not None:
-        base = base.where(Idea.feasibility == feasibility)
-    if visibility is not None:
-        base = base.where(Idea.visibility == visibility)
-    if author_id is not None:
-        base = base.where(Idea.author_id == author_id)
-    if assignee_id is not None:
-        base = base.where(Idea.assignee_id == assignee_id)
-
-    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
-
-    rows = list(
-        db.scalars(
-            base.order_by(Idea.updated_at.desc(), Idea.id.desc())
-            .offset(offset)
-            .limit(limit)
-        )
+    base = base.where(_search_predicate(q.strip()))
+    return _apply_list_filters(
+        base,
+        stage_id=stage_id,
+        category_id=category_id,
+        priority=priority,
+        feasibility=feasibility,
+        visibility=visibility,
+        author_id=author_id,
+        assignee_id=assignee_id,
     )
 
+
+def _finalize_list_response(
+    db: Session,
+    rows: list[Idea],
+    *,
+    user_id: UUID,
+    total: int,
+    limit: int,
+    offset: int,
+) -> IdeaListResponse:
     users, stages, categories, tags_by_idea = _load_related(db, rows)
     shares = {
         s.idea_id: s
@@ -696,6 +723,55 @@ def list_ideas(
         for idea in rows
     ]
     return IdeaListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+def list_ideas(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    user_id: UUID,
+    q: str | None = None,
+    stage_id: UUID | None = None,
+    category_id: UUID | None = None,
+    priority: str | None = None,
+    feasibility: str | None = None,
+    visibility: str | None = None,
+    author_id: UUID | None = None,
+    assignee_id: UUID | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> IdeaListResponse:
+    limit, offset = _normalize_list_pagination(limit, offset)
+
+    base = select(Idea).where(Idea.workspace_id == workspace_id)
+    base = idea_access.apply_readable_filter(base, user_id)
+
+    if q and q.strip():
+        base = base.where(_search_predicate(q.strip()))
+    base = _apply_list_filters(
+        base,
+        stage_id=stage_id,
+        category_id=category_id,
+        priority=priority,
+        feasibility=feasibility,
+        visibility=visibility,
+        author_id=author_id,
+        assignee_id=assignee_id,
+    )
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+    rows = list(
+        db.scalars(
+            base.order_by(Idea.updated_at.desc(), Idea.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    )
+
+    return _finalize_list_response(
+        db, rows, user_id=user_id, total=total, limit=limit, offset=offset
+    )
 
 
 def list_shares(db: Session, idea: Idea) -> list[IdeaSharePublic]:

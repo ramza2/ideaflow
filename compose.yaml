@@ -2,7 +2,7 @@ name: ideaflow
 
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ideaflow}
@@ -87,6 +87,7 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
         VITE_AUTH_CSRF_COOKIE_NAME: ${VITE_AUTH_CSRF_COOKIE_NAME:-ideaflow_csrf}
+        VITE_IDEA_SEARCH_MODE: ${VITE_IDEA_SEARCH_MODE:-keyword}
     restart: unless-stopped
     expose:
       - "80"

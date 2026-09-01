@@ -109,6 +109,19 @@ class AiJobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class IdeaEmbeddingJobStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class SearchMode(StrEnum):
+    KEYWORD = "keyword"
+    SEMANTIC = "semantic"
+    HYBRID = "hybrid"
+
+
 class FieldProvenanceSource(StrEnum):
     USER_INPUT = "USER_INPUT"
     LLM_SUMMARY = "LLM_SUMMARY"
