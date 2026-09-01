@@ -494,6 +494,72 @@ def test_validation_does_not_enqueue_embedding(client: TestClient, db: Session, 
         assert jobs == []
 
 
+def test_start_rejects_stale_identity_map_stage(engine, db: Session) -> None:
+    from app.core.errors import AppError
+    from app.schemas.validation import IdeaValidationCreateRequest
+    from app.services import validation as validation_service
+
+    owner, _ = _user(db)
+    ws = _team(db, owner)
+    idea = _create_idea(db, ws, owner, stage_slug="validation_candidate")
+    row = validation_service.create_validation(
+        db,
+        workspace_id=ws.id,
+        idea_id=idea.id,
+        user_id=owner.id,
+        payload=IdeaValidationCreateRequest(
+            title="stale",
+            hypothesis="h",
+            method="m",
+            success_criteria="s",
+        ),
+    )
+    validation_service.mark_ready(
+        db, workspace_id=ws.id, idea_id=idea.id, validation_id=row.id, user_id=owner.id
+    )
+    db.commit()
+
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+    session_a = SessionFactory()
+    try:
+        stale = session_a.get(Idea, idea.id)
+        assert stale is not None
+        stale_stage = session_a.get(WorkspaceStage, stale.stage_id)
+        assert stale_stage is not None and stale_stage.slug == "validation_candidate"
+
+        session_b = SessionFactory()
+        try:
+            reviewing = _stage(session_b, ws, "reviewing")
+            idea_b = session_b.get(Idea, idea.id)
+            assert idea_b is not None
+            idea_b.stage_id = reviewing.id
+            session_b.commit()
+        finally:
+            session_b.close()
+
+        with pytest.raises(AppError) as exc_info:
+            validation_service.start_validation(
+                session_a,
+                workspace_id=ws.id,
+                idea_id=idea.id,
+                validation_id=row.id,
+                user_id=owner.id,
+            )
+        assert exc_info.value.code == "IDEA_NOT_READY_FOR_VALIDATION"
+        session_a.rollback()
+    finally:
+        session_a.close()
+
+    verify = SessionFactory()
+    try:
+        final = verify.get(Idea, idea.id)
+        final_stage = verify.get(WorkspaceStage, final.stage_id)
+        assert final_stage is not None
+        assert final_stage.slug == "reviewing"
+    finally:
+        verify.close()
+
+
 def test_start_race_two_sessions(engine, db: Session) -> None:
     from app.schemas.validation import IdeaValidationCreateRequest
     from app.services import validation as validation_service
@@ -523,7 +589,7 @@ def test_start_race_two_sessions(engine, db: Session) -> None:
     db.commit()
 
     SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
-    results: list[str] = []
+    results: list[tuple[str, str | None]] = []
 
     def worker() -> None:
         session = SessionFactory()
@@ -536,19 +602,23 @@ def test_start_race_two_sessions(engine, db: Session) -> None:
                 user_id=owner.id,
             )
             session.commit()
-            results.append(out.validation.status.value)
+            results.append((out.validation.status.value, out.idea_stage.slug))
         except Exception as exc:  # noqa: BLE001
             session.rollback()
-            results.append(type(exc).__name__)
+            results.append((type(exc).__name__, None))
         finally:
             session.close()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda _: worker(), range(2)))
 
-    assert results.count("RUNNING") >= 1
-    assert "RUNNING" in results
-    assert set(results) <= {"RUNNING", "AppError"}
+    statuses = [r[0] for r in results]
+    assert statuses.count("RUNNING") >= 1
+    assert "RUNNING" in statuses
+    assert set(statuses) <= {"RUNNING", "AppError"}
+    for status, stage_slug in results:
+        if status == "RUNNING":
+            assert stage_slug == "validating"
     verify = SessionFactory()
     try:
         final = verify.get(IdeaValidation, row.id)

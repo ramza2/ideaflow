@@ -117,10 +117,31 @@ def _require_mutate_access(access: str) -> None:
         )
 
 
-def _lock_validation(
+def _lock_idea_for_update(
     db: Session,
     *,
     workspace_id: UUID,
+    idea_id: UUID,
+) -> Idea:
+    """Lock parent Idea and refresh ORM state from DB (identity-map safe)."""
+    idea = db.execute(
+        select(Idea)
+        .where(
+            Idea.id == idea_id,
+            Idea.workspace_id == workspace_id,
+            Idea.deleted_at.is_(None),
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if idea is None:
+        raise AppError("Validation not found.", code="VALIDATION_NOT_FOUND", status_code=404)
+    return idea
+
+
+def _lock_validation_row(
+    db: Session,
+    *,
     idea_id: UUID,
     validation_id: UUID,
 ) -> IdeaValidation:
@@ -131,10 +152,28 @@ def _lock_validation(
     ).scalar_one_or_none()
     if row is None or row.idea_id != idea_id:
         raise AppError("Validation not found.", code="VALIDATION_NOT_FOUND", status_code=404)
+    return row
+
+
+def _lock_validation(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    idea_id: UUID,
+    validation_id: UUID,
+) -> IdeaValidation:
+    row = _lock_validation_row(db, idea_id=idea_id, validation_id=validation_id)
     idea = db.get(Idea, idea_id)
     if idea is None or idea.workspace_id != workspace_id or idea.deleted_at is not None:
         raise AppError("Validation not found.", code="VALIDATION_NOT_FOUND", status_code=404)
     return row
+
+
+def _stage_ref_for_idea(db: Session, idea: Idea) -> StageRef:
+    stage = db.get(WorkspaceStage, idea.stage_id)
+    if stage is None or stage.deleted_at is not None:
+        raise AppError("Idea stage not found.", code="INVALID_IDEA_REFERENCE", status_code=500)
+    return StageRef(id=stage.id, label=stage.label, slug=stage.slug)
 
 
 def _assert_transition(current: str, target: str) -> None:
@@ -336,21 +375,19 @@ def start_validation(
     validation_id: UUID,
     user_id: UUID,
 ) -> IdeaValidationStartResponse:
-    idea, access = _get_readable_idea(
+    _idea, access = _get_readable_idea(
         db, workspace_id=workspace_id, idea_id=idea_id, user_id=user_id
     )
     _require_mutate_access(access)
-    row = _lock_validation(
-        db, workspace_id=workspace_id, idea_id=idea_id, validation_id=validation_id
-    )
+
+    # Lock parent Idea before Validation so stage checks use fresh DB state.
+    idea = _lock_idea_for_update(db, workspace_id=workspace_id, idea_id=idea_id)
+    row = _lock_validation_row(db, idea_id=idea_id, validation_id=validation_id)
 
     if row.status == IdeaValidationStatus.RUNNING.value:
-        stage = db.get(WorkspaceStage, idea.stage_id)
-        if stage is None:
-            raise AppError("Idea stage not found.", code="INVALID_IDEA_REFERENCE", status_code=500)
         return IdeaValidationStartResponse(
             validation=_to_public(db, row),
-            idea_stage=StageRef(id=stage.id, label=stage.label, slug=stage.slug),
+            idea_stage=_stage_ref_for_idea(db, idea),
         )
 
     _assert_transition(row.status, IdeaValidationStatus.RUNNING.value)
