@@ -14,7 +14,7 @@ IdeaFlow/
 ## 현재 상태
 
 - Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)** + **Admin / SystemSetting (Step 11)** + **Idea Validation tab (Step 14)**
-- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)** + **Admin / SystemSetting / Integration diagnostics (Step 11)** + **pgvector Semantic/Hybrid Search (Step 13)** + **Idea Validation (Step 14)**
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)** + **Admin / SystemSetting / Integration diagnostics (Step 11)** + **pgvector Semantic/Hybrid Search (Step 13)** + **Idea Validation (Step 14)** + **Tavily Web Search provider (Step 15)**
 - Step 8: Frontend AI Input → processing polling → clarification → review → confirm → Idea 연결 완료
 - Step 9: Review 단계에서 승인된 Web Search → Evidence 저장 → Qwen 근거 기반 초안 보완 → Idea Detail 조사 및 근거 탭
 - Step 10: Review Request / Inbox, Comment + @Mention, In-app Notification (Bell). Review/Mention/Assignee는 Idea read ACL을 부여하지 않음. Email/Push 없음.
@@ -22,6 +22,7 @@ IdeaFlow/
 - Step 12: Docker Compose 배포 패키징 (`compose.yaml`, Nginx SPA + API proxy, `scripts/deploy.sh`).
 - Step 13: pgvector semantic / hybrid idea search + BGE-M3-compatible embedding provider (`EMBEDDING_*`, default disabled).
 - Step 14: Idea Validation workflow (DRAFT→READY→RUNNING→COMPLETED/CANCELLED). Idea Detail **검증** 탭. ACL은 parent Idea. Start 시 `validation_candidate`→`validating`만 자동 이동.
+- Step 15: Tavily Web Search Provider (`WEB_SEARCH_PROVIDER=tavily`). Step 9 approval workflow 유지; production 외부 검색 연결.
 
 ## Docker Compose 배포
 
@@ -53,10 +54,10 @@ cd ideaflow
 
 ## Step 9 — Web Research architecture
 
-- **Approval boundary:** `POST .../research-runs/preview`는 외부 검색을 수행하지 않습니다. 사용자 승인(`approve`) 후 Worker만 `http_json` Web Search Provider를 호출합니다.
+- **Approval boundary:** `POST .../research-runs/preview`는 외부 검색을 수행하지 않습니다. 사용자 승인(`approve`) 후 Worker만 Web Search Provider(`http_json` 또는 `tavily`)를 호출합니다.
 - **Privacy:** Web Search Provider에는 승인·sanitize된 `query`와 `max_results`만 전송합니다. `input_text`와 전체 AI draft는 외부로 보내지 않습니다.
-- **Provider contract:** `POST WEB_SEARCH_API_URL` with JSON `{"query": "...", "max_results": N}`; response `{"results": [{"title","url","snippet",...}]}`.
-- **Evidence:** Search snippet metadata만 DB 저장 (전체 HTML/기사 본문 저장 금지). Confirmed Idea는 `GET /ideas/{id}/evidence` (Idea read ACL).
+- **Provider contract:** `http_json` — `POST WEB_SEARCH_API_URL` with JSON `{"query", "max_results"}`; `tavily` — `POST https://api.tavily.com/search` with Tavily Search fields (`search_depth=basic`, etc.). Response maps `content` → `snippet`.
+- **Evidence:** Search snippet metadata만 DB 저장 (전체 HTML/기사 본문 저장 금지). Confirmed Idea는 `GET /ideas/{id}/evidence` (Idea read ACL). Confirmed Idea re-research ("다시 조사")는 미구현.
 - **Probe:** `python -m app.cli.web_search_probe` (`WEB_SEARCH_API_URL` 미설정 시 `not_configured`).
 
 ## 개발 실행

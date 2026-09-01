@@ -24,7 +24,7 @@ from app.schemas.admin import (
 from app.services import system_setting as system_setting_service
 from app.models.enums import SystemSettingKey
 from app.web_search.exceptions import WebSearchConfigurationError, WebSearchError
-from app.web_search.factory import get_web_search_provider
+from app.web_search.factory import get_web_search_provider, is_web_search_configured
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def get_integration_config(db: Session, settings: Settings | None = None) -> Adm
             max_queries=cfg.web_search_max_queries,
             max_results_per_query=cfg.web_search_max_results_per_query,
             max_total_results=cfg.web_search_max_total_results,
-            configured=bool(cfg.web_search_api_url.strip()),
+            configured=is_web_search_configured(cfg),
             configuration_source="ENVIRONMENT",
         ),
         global_llm_enabled=system_setting_service.get_bool_setting(

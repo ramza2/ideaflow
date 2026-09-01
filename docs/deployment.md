@@ -551,6 +551,39 @@ Confirm Nginx `try_files` is configured (`deploy/nginx.conf`). Routes such as `/
 
 App health can be normal while an external LLM provider is down. Use Admin → Integrations → LLM Diagnostic. Web Search with empty `WEB_SEARCH_API_URL` reports `NOT_CONFIGURED` and does not block startup.
 
+## Tavily Web Search (Step 15)
+
+To connect production Web Research to [Tavily Search API](https://tavily.com):
+
+1. Obtain a Tavily API key from the Tavily dashboard.
+2. Set these values in the server `.env` (never commit real keys):
+
+```bash
+WEB_SEARCH_PROVIDER=tavily
+WEB_SEARCH_API_URL=https://api.tavily.com/search
+WEB_SEARCH_API_KEY=your-tavily-api-key
+```
+
+3. Deploy or recreate the backend as usual:
+
+```bash
+./scripts/deploy.sh
+```
+
+4. Verify connectivity from the backend container (no secrets in output):
+
+```bash
+docker compose \
+  -f compose.yaml \
+  -f compose.traefik.yaml \
+  exec -T backend \
+  python -m app.cli.web_search_probe
+```
+
+Expected when configured: `provider: tavily`, `status: ok`, `HTTP: 200`, `latency_ms`, `result_count`, `domains`.
+
+Keep `.env` permissions restrictive (e.g. `chmod 600 .env`). Do not echo API keys into shell history.
+
 ## Pre-merge Docker smoke checklist
 
 ### Direct mode

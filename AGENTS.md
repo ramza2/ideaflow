@@ -29,11 +29,12 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Workspaces: Personal ensure / Team create / member RBAC; backfill via `python -m app.cli.ensure_personal_workspaces`
 - Ideas: workspace-scoped CRUD + ACL + `?q=` ILIKE/FTS search
 - AI (Step 7): `IdeaAiSession` + `AiJob` PostgreSQL queue; in-process worker (`AI_WORKER_ENABLED`); OpenAI-compatible LLM via `httpx`; probe with `python -m app.cli.llm_probe`. Tests should set `AI_WORKER_ENABLED=false`.
-- Web Research (Step 9): `WebResearchRun` + `WebEvidence`; `AiJob` type `WEB_RESEARCH`; preview/approve APIs under `/ai-sessions/.../research-runs`; `http_json` search provider (`WEB_SEARCH_*` env); probe with `python -m app.cli.web_search_probe`. External search only after user approval; never send `input_text`/full draft to search provider.
+- Web Research (Step 9): `WebResearchRun` + `WebEvidence`; `AiJob` type `WEB_RESEARCH`; preview/approve APIs under `/ai-sessions/.../research-runs`; `http_json` or `tavily` search provider (`WEB_SEARCH_*` env); probe with `python -m app.cli.web_search_probe`. External search only after user approval; never send `input_text`/full draft to search provider.
 - Collaboration (Step 10): `IdeaReviewRequest`, `IdeaComment`, `IdeaCommentMention`, `Notification`; review inbox + comment CRUD + in-app notifications. Review/Mention/Assignee do **not** grant Idea read ACL. No email/push/WebSocket.
 - Admin (Step 11): `SystemSetting` (4 known boolean keys), `/api/v1/admin/*` (SYSTEM_ADMIN + password changed), user management, integration config read + LLM/web-search diagnostic tests. Connection secrets stay in ENV only (`api_key_configured` bool in API). Global LLM/web-search policy enforced in AI/research services; workspace responses include `effective_allow_*`.
 - Semantic search (Step 13): pgvector + `IdeaEmbedding` / `IdeaEmbeddingJob`; `search_mode=keyword|semantic|hybrid` on idea list. Default `EMBEDDING_ENABLED=false`.
 - Validation (Step 14): `IdeaValidation` manual workflow under Idea Detail; ACL inherits parent Idea; start may move `validation_candidate` → `validating`; complete does **not** auto-promote to `execution_candidate`.
+- Web Search provider (Step 15): production supports Tavily Search API (`WEB_SEARCH_PROVIDER=tavily`); `http_json` remains for generic/custom endpoints.
 - Migrations (PostgreSQL required):
 
 ```text
