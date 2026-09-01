@@ -4,10 +4,10 @@
 
 ### Project overview
 
-IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, Step 10 Review/Comment/Notification, Step 11 Admin/SystemSetting, and Step 12 Docker Compose deployment packaging. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, Step 10 collaboration APIs, Step 11 admin APIs, and Step 12 readiness health (`GET /api/v1/health/ready`).
+IdeaFlow is a natural-language idea-management product. The `frontend/` is an approved Figma Make UI prototype wired to the Backend API through Step 8 AI Session workflow, Step 9 Web Research approval flow, Step 10 Review/Comment/Notification, Step 11 Admin/SystemSetting, Step 12 Docker Compose deployment packaging, Step 13 pgvector semantic/hybrid search, and Step 14 Idea Validation workflow. The `backend/` FastAPI service includes foundation through Idea CRUD/ACL/search plus Step 7 AI Session/Job/LLM provider, Step 9 Web Research/Evidence, Step 10 collaboration APIs, Step 11 admin APIs, Step 12 readiness health (`GET /api/v1/health/ready`), Step 13 embeddings/search, and Step 14 validations.
 
-- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, **Web Search approval on Review**, **Reviews inbox**, **Idea Detail discussion**, **TopHeader notifications**, and **Admin Console** (`/admin/*`, SYSTEM_ADMIN only) use real APIs.
-- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`).
+- `frontend/` — Vite 6 + React 18 + TypeScript UI, generated from Figma Make (Tailwind CSS v4, MUI, Radix/shadcn components). Auth, Workspace, Members, Manual Idea CRUD, **AI Input/Analyzing/Review**, **Web Search approval on Review**, **Reviews inbox**, **Idea Detail discussion**, **Idea Detail Validation tab**, **TopHeader notifications**, and **Admin Console** (`/admin/*`, SYSTEM_ADMIN only) use real APIs.
+- `backend/` — FastAPI + SQLAlchemy 2 + Alembic + Auth + Workspace RBAC + Ideas + **AI Sessions/Jobs** + **Validations** (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/workspaces/*`, `/ideas`, `/ai-sessions`, `/validations`).
 
 ### Frontend service
 
@@ -32,6 +32,8 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Web Research (Step 9): `WebResearchRun` + `WebEvidence`; `AiJob` type `WEB_RESEARCH`; preview/approve APIs under `/ai-sessions/.../research-runs`; `http_json` search provider (`WEB_SEARCH_*` env); probe with `python -m app.cli.web_search_probe`. External search only after user approval; never send `input_text`/full draft to search provider.
 - Collaboration (Step 10): `IdeaReviewRequest`, `IdeaComment`, `IdeaCommentMention`, `Notification`; review inbox + comment CRUD + in-app notifications. Review/Mention/Assignee do **not** grant Idea read ACL. No email/push/WebSocket.
 - Admin (Step 11): `SystemSetting` (4 known boolean keys), `/api/v1/admin/*` (SYSTEM_ADMIN + password changed), user management, integration config read + LLM/web-search diagnostic tests. Connection secrets stay in ENV only (`api_key_configured` bool in API). Global LLM/web-search policy enforced in AI/research services; workspace responses include `effective_allow_*`.
+- Semantic search (Step 13): pgvector + `IdeaEmbedding` / `IdeaEmbeddingJob`; `search_mode=keyword|semantic|hybrid` on idea list. Default `EMBEDDING_ENABLED=false`.
+- Validation (Step 14): `IdeaValidation` manual workflow under Idea Detail; ACL inherits parent Idea; start may move `validation_candidate` → `validating`; complete does **not** auto-promote to `execution_candidate`.
 - Migrations (PostgreSQL required):
 
 ```text

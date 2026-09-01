@@ -13,13 +13,15 @@ IdeaFlow/
 
 ## 현재 상태
 
-- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)** + **Admin / SystemSetting (Step 11)**
-- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)** + **Admin / SystemSetting / Integration diagnostics (Step 11)**
+- Frontend: Figma Make UI + Backend API 연동 — Login, Workspace, Members, Manual Idea CRUD/Search + **AI Session workflow (Step 8)** + **Web Research approval flow (Step 9)** + **Review / Comment / Notification (Step 10)** + **Admin / SystemSetting (Step 11)** + **Idea Validation tab (Step 14)**
+- Backend: Auth + Workspace RBAC + Idea CRUD/ACL/search + AI Session/Job/LLM provider (Step 7) + **Web Research / Evidence (Step 9)** + **Review / Comment / In-app Notification (Step 10)** + **Admin / SystemSetting / Integration diagnostics (Step 11)** + **pgvector Semantic/Hybrid Search (Step 13)** + **Idea Validation (Step 14)**
 - Step 8: Frontend AI Input → processing polling → clarification → review → confirm → Idea 연결 완료
 - Step 9: Review 단계에서 승인된 Web Search → Evidence 저장 → Qwen 근거 기반 초안 보완 → Idea Detail 조사 및 근거 탭
 - Step 10: Review Request / Inbox, Comment + @Mention, In-app Notification (Bell). Review/Mention/Assignee는 Idea read ACL을 부여하지 않음. Email/Push 없음.
 - Step 11: SYSTEM_ADMIN Admin Console (사용자 관리, SystemSetting 4개 정책, Integration diagnostics). Connection config는 ENV read-only; API key DB 저장/노출 없음. Workspace `effective_allow_llm` / `effective_allow_web_search`.
 - Step 12: Docker Compose 배포 패키징 (`compose.yaml`, Nginx SPA + API proxy, `scripts/deploy.sh`).
+- Step 13: pgvector semantic / hybrid idea search + BGE-M3-compatible embedding provider (`EMBEDDING_*`, default disabled).
+- Step 14: Idea Validation workflow (DRAFT→READY→RUNNING→COMPLETED/CANCELLED). Idea Detail **검증** 탭. ACL은 parent Idea. Start 시 `validation_candidate`→`validating`만 자동 이동.
 
 ## Docker Compose 배포
 

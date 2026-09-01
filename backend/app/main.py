@@ -14,6 +14,7 @@ from app.api.ideas import router as ideas_router
 from app.api.notifications import router as notifications_router
 from app.api.reviews import router as reviews_router
 from app.api.web_research import router as web_research_router
+from app.api.validations import router as validations_router
 from app.api.workspaces import router as workspaces_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     application.include_router(admin_router, prefix=settings.api_v1_prefix)
     application.include_router(ai_sessions_router, prefix=settings.api_v1_prefix)
     application.include_router(web_research_router, prefix=settings.api_v1_prefix)
+    application.include_router(validations_router, prefix=settings.api_v1_prefix)
     return application
 
 
