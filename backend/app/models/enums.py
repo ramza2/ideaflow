@@ -122,6 +122,24 @@ class SearchMode(StrEnum):
     HYBRID = "hybrid"
 
 
+# --- Step 14: Idea Validation ---
+
+
+class IdeaValidationStatus(StrEnum):
+    DRAFT = "DRAFT"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class IdeaValidationOutcome(StrEnum):
+    PASS = "PASS"
+    PARTIAL = "PARTIAL"
+    FAIL = "FAIL"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
 class FieldProvenanceSource(StrEnum):
     USER_INPUT = "USER_INPUT"
     LLM_SUMMARY = "LLM_SUMMARY"

@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Trash2,
   ClipboardCheck,
+  FlaskConical,
   AtSign,
 } from "lucide-react";
 import { deleteIdea, getIdea } from "../../api/ideas";
@@ -41,12 +42,13 @@ import {
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { IdeaValidationPanel } from "../../components/ideas/IdeaValidationPanel";
 import { useAuth } from "../../auth/AuthProvider";
 import { toDisplayUser } from "../../utils/avatar";
 import { REVIEW_KIND_OPTIONS, dispatchReviewCountsChanged } from "../../utils/collaboration";
-import type { IdeaComment, IdeaDetail, IdeaEvidenceItem, UserRef } from "../../types/api";
+import type { IdeaComment, IdeaDetail, IdeaEvidenceItem, StageRef, UserRef } from "../../types/api";
 
-type DetailTab = "overview" | "research" | "discussion" | "history";
+type DetailTab = "overview" | "research" | "validation" | "discussion" | "history";
 
 const AI_EVOLVE_OPTIONS = [
   "더 구체적으로 확장",
@@ -322,6 +324,7 @@ export function IdeaDetailPage() {
   const TABS: { id: DetailTab; label: string; icon: typeof FileText }[] = [
     { id: "overview", label: "개요", icon: FileText },
     { id: "research", label: "조사 및 근거", icon: BookOpen },
+    { id: "validation", label: "검증", icon: FlaskConical },
     { id: "discussion", label: "논의", icon: MessageSquare },
     { id: "history", label: "이력", icon: History },
   ];
@@ -520,6 +523,17 @@ export function IdeaDetailPage() {
                 </div>
               ))}
             </div>
+          )}
+
+          {tab === "validation" && (
+            <IdeaValidationPanel
+              workspaceId={workspaceId}
+              idea={idea}
+              canEdit={canEdit}
+              onIdeaStageChange={(stage: StageRef) => {
+                setIdea((prev) => (prev ? { ...prev, stage } : prev));
+              }}
+            />
           )}
 
           {tab === "discussion" && (

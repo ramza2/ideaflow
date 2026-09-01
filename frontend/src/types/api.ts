@@ -698,3 +698,65 @@ export interface WebSearchConnectionTestResult {
   safe_message?: string | null;
   results?: WebSearchTestResultItem[] | null;
 }
+
+/* --- Step 14: Idea Validation --- */
+
+export type IdeaValidationStatus =
+  | "DRAFT"
+  | "READY"
+  | "RUNNING"
+  | "COMPLETED"
+  | "CANCELLED";
+
+export type IdeaValidationOutcome =
+  | "PASS"
+  | "PARTIAL"
+  | "FAIL"
+  | "INCONCLUSIVE";
+
+export interface IdeaValidation {
+  id: string;
+  idea_id: string;
+  title: string;
+  hypothesis: string;
+  method: string;
+  success_criteria: string;
+  planned_evidence: string | null;
+  status: IdeaValidationStatus;
+  outcome: IdeaValidationOutcome | null;
+  result_summary: string | null;
+  evidence_summary: string | null;
+  due_date: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_by: IdeaUserRef;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IdeaValidationListResponse {
+  items: IdeaValidation[];
+  total: number;
+}
+
+export interface IdeaValidationCreateRequest {
+  title: string;
+  hypothesis: string;
+  method: string;
+  success_criteria: string;
+  planned_evidence?: string | null;
+  due_date?: string | null;
+}
+
+export type IdeaValidationUpdateRequest = Partial<IdeaValidationCreateRequest>;
+
+export interface IdeaValidationCompleteRequest {
+  outcome: IdeaValidationOutcome;
+  result_summary: string;
+  evidence_summary?: string | null;
+}
+
+export interface IdeaValidationStartResponse {
+  validation: IdeaValidation;
+  idea_stage: StageRef;
+}
