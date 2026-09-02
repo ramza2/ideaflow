@@ -82,7 +82,7 @@ class FakeSearchProvider:
 class FakeProvider:
     provider_name = "fake"
     model_name = "fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self, results: list[Any] | None = None) -> None:
         self._results = list(results or [])
@@ -453,6 +453,7 @@ def test_research_success_updates_session(
     run = db.get(WebResearchRun, run_id)
     session = db.get(IdeaAiSession, session_id)
     assert run.status == WebResearchRunStatus.READY.value
+    assert run.prompt_version == "v2"
     assert session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
     assert session.draft_payload["background"] == "B from evidence"
     assert session.field_provenance["background"]["source"] == "WEB_EVIDENCE"

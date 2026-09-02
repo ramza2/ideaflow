@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(
 class FakeProvider:
     provider_name = "fake"
     model_name = "fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self, results: list[IdeaStructuringResult] | None = None) -> None:
         self._results = list(results or [])
@@ -76,7 +76,7 @@ class FakeProvider:
 class ParsingFakeProvider:
     provider_name = "parsing_fake"
     model_name = "parsing-fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self, contents: list[str]) -> None:
         self._contents = list(contents)

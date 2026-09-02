@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(
 class FakeProvider:
     provider_name = "fake"
     model_name = "fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self, results: list[IdeaStructuringResult | Exception] | None = None) -> None:
         self._results = list(results or [])
@@ -87,7 +87,7 @@ class FakeProvider:
 class ParsingFakeProvider:
     provider_name = "parsing_fake"
     model_name = "parsing-fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self, contents: list[str]) -> None:
         self._contents = list(contents)
@@ -405,6 +405,8 @@ def test_worker_success(
     )
     assert r.status_code == 202
     session_id = uuid.UUID(r.json()["id"])
+    session = db.get(IdeaAiSession, session_id)
+    assert session.prompt_version == "v2"
 
     provider = FakeProvider([_ready_result()])
     assert ai_worker.run_once(session_factory=session_factory, provider=provider, recover=True)
@@ -416,7 +418,7 @@ def test_worker_success(
     assert session.field_provenance["title"]["source"] == "LLM_SUMMARY"
     assert session.llm_provider == "fake"
     assert session.llm_model == "fake-model"
-    assert session.prompt_version == "v1"
+    assert session.prompt_version == "v2"
     job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).first()
     assert job.status == AiJobStatus.SUCCEEDED.value
 
@@ -738,7 +740,7 @@ def test_stale_worker_result_discarded_after_reclaim(
     class DelayedProvider:
         provider_name = "fake-a"
         model_name = "a-model"
-        prompt_version = "v1"
+        prompt_version = "v2"
 
         def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
             return _ready_result("FromWorkerA")

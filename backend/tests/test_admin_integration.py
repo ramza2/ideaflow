@@ -65,7 +65,7 @@ pytestmark = pytest.mark.skipif(
 class FakeLlmProvider:
     provider_name = "fake"
     model_name = "fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self) -> None:
         self.calls = 0

@@ -1,4 +1,4 @@
-"""Idea structuring prompt v1."""
+"""Idea structuring prompt v2."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from app.llm.schemas import CategoryOption, IdeaStructuringRequest
 
-IDEA_STRUCTURE_PROMPT_VERSION = "v1"
+IDEA_STRUCTURE_PROMPT_VERSION = "v2"
 
 SYSTEM_PROMPT = """당신은 IdeaFlow의 아이디어 구조화 도우미입니다.
 

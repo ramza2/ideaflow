@@ -1,4 +1,4 @@
-"""Evidence refinement prompt v1."""
+"""Evidence refinement prompt v2."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 from app.llm.research_schemas import EvidenceInput, EvidenceRefinementRequest, RESEARCH_REFINABLE_FIELDS
 
-IDEA_RESEARCH_REFINE_PROMPT_VERSION = "v1"
+IDEA_RESEARCH_REFINE_PROMPT_VERSION = "v2"
 
 RESEARCH_SYSTEM_PROMPT = """당신은 IdeaFlow의 아이디어 초안 보완 도우미입니다.
 
