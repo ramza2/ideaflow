@@ -23,6 +23,7 @@ from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
 from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
 from app.llm.research_schemas import (
     RESEARCH_REFINABLE_FIELDS,
+    filter_user_edited_refinement_fields,
     merge_refinement_provenance,
     validate_refinement_result,
 )
@@ -313,7 +314,10 @@ def _apply_web_research_failure(
     failure_phase: str,
 ) -> None:
     now = utcnow()
-    safe_msg = (error.safe_message or "웹 조사 중 오류가 발생했습니다.")[:512]
+    if isinstance(error, LlmResponseValidationError):
+        safe_msg = LlmResponseValidationError.safe_message
+    else:
+        safe_msg = (error.safe_message or "웹 조사 중 오류가 발생했습니다.")[:512]
     code = error.code
     retryable = getattr(error, "retryable", False)
 
@@ -565,10 +569,20 @@ def process_web_research_job(
 
     if refine_error is None and refine_request is not None:
         try:
-            refine_result = provider.refine_idea_with_evidence(refine_request)
+            raw_result = provider.refine_idea_with_evidence(refine_request)
+            filtered_result, ignored_count = filter_user_edited_refinement_fields(
+                raw_result,
+                user_edited,
+            )
+            if ignored_count:
+                logger.warning(
+                    "research_refine_user_edit_fields_ignored run_id=%s ignored_count=%s",
+                    run_id,
+                    ignored_count,
+                )
             valid_ids = {str(ev.evidence_id) for ev in refine_request.evidence}
             refine_result = validate_refinement_result(
-                refine_result,
+                filtered_result,
                 base_draft=base_draft,
                 user_edited_fields=user_edited,
                 valid_evidence_ids=valid_ids,

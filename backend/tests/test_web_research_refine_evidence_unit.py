@@ -5,12 +5,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from app.core.config import Settings
 from app.llm.exceptions import LlmResearchRefineInputTooLargeError, LlmResponseValidationError
 from app.llm.research_prompts import build_research_user_prompt, research_prompt_char_counts
-from app.llm.research_schemas import EvidenceInput, EvidenceRefinementRequest, EvidenceRefinementResult, validate_refinement_result
+from app.llm.research_schemas import (
+    EvidenceInput,
+    EvidenceRefinementRequest,
+    EvidenceRefinementResult,
+    filter_user_edited_refinement_fields,
+    validate_refinement_result,
+)
 from app.models.research import WebEvidence
 from app.services.web_research import (
     build_refinement_evidence_inputs,
@@ -314,7 +322,149 @@ def test_partial_draft_patch_validates_and_merges() -> None:
     assert validated.draft == {"background": "Refined only"}
 
 
-def test_repeated_user_edited_field_protection_regression() -> None:
+def test_filter_removes_user_edited_fields_from_llm_result() -> None:
+    sent_bg = str(uuid.uuid4())
+    sent_ch = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={
+            "background": "LLM tried to change background",
+            "challenges": "Evidence-based challenges",
+        },
+        evidence_links={
+            "background": [sent_bg],
+            "challenges": [sent_ch],
+        },
+        research_summary="summary",
+    )
+    filtered, ignored = filter_user_edited_refinement_fields(result, ["background"])
+    assert ignored == 1
+    assert filtered.draft == {"challenges": "Evidence-based challenges"}
+    assert filtered.evidence_links == {"challenges": [sent_ch]}
+    assert filtered.research_summary == "summary"
+
+
+def test_filter_user_edited_then_validate_succeeds() -> None:
+    sent_ch = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={
+            "background": "LLM tried",
+            "challenges": "Evidence-based challenges",
+        },
+        evidence_links={"background": [str(uuid.uuid4())], "challenges": [sent_ch]},
+        research_summary="summary",
+    )
+    filtered, _ = filter_user_edited_refinement_fields(result, ["background"])
+    validated = validate_refinement_result(
+        filtered,
+        base_draft={
+            "title": "T",
+            "background": "배경은 유지 테스트",
+            "challenges": "기존 내용",
+        },
+        user_edited_fields=["background"],
+        valid_evidence_ids={sent_ch},
+    )
+    assert validated.draft == {"challenges": "Evidence-based challenges"}
+
+
+def test_filter_only_user_edited_fields_returns_empty_patch() -> None:
+    sent_id = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={"background": "LLM tried"},
+        evidence_links={"background": [sent_id]},
+        research_summary="summary only",
+    )
+    filtered, ignored = filter_user_edited_refinement_fields(result, ["background"])
+    assert ignored == 1
+    assert filtered.draft == {}
+    assert filtered.evidence_links == {}
+    validated = validate_refinement_result(
+        filtered,
+        base_draft={"background": "배경은 유지 테스트"},
+        user_edited_fields=["background"],
+        valid_evidence_ids={sent_id},
+    )
+    assert validated.draft == {}
+
+
+def test_filter_multiple_user_edited_fields() -> None:
+    result = EvidenceRefinementResult(
+        draft={"background": "x", "title": "y", "challenges": "ok"},
+        evidence_links={
+            "background": [str(uuid.uuid4())],
+            "title": [str(uuid.uuid4())],
+            "challenges": [str(uuid.uuid4())],
+        },
+    )
+    filtered, ignored = filter_user_edited_refinement_fields(result, ["background", "title"])
+    assert ignored == 2
+    assert set(filtered.draft.keys()) == {"challenges"}
+
+
+def test_validate_still_rejects_unprotected_change_without_evidence() -> None:
+    result = EvidenceRefinementResult(
+        draft={"challenges": "Changed"},
+        evidence_links={},
+        research_summary="s",
+    )
+    with pytest.raises(LlmResponseValidationError):
+        validate_refinement_result(
+            result,
+            base_draft={"challenges": "Old"},
+            user_edited_fields=[],
+            valid_evidence_ids=set(),
+        )
+
+
+def test_validate_still_rejects_unknown_evidence_id() -> None:
+    sent_id = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={"challenges": "Changed"},
+        evidence_links={"challenges": [str(uuid.uuid4())]},
+        research_summary="s",
+    )
+    with pytest.raises(LlmResponseValidationError):
+        validate_refinement_result(
+            result,
+            base_draft={"challenges": "Old"},
+            user_edited_fields=[],
+            valid_evidence_ids={sent_id},
+        )
+
+
+def test_validation_error_safe_message_not_internal_detail() -> None:
+    from app.models.ai import AiJob
+    from app.models.research import WebResearchRun
+    from app.services.ai_worker import _apply_web_research_failure
+
+    err = LlmResponseValidationError("LLM changed user-edited field: background")
+    job = AiJob(
+        session_id=uuid.uuid4(),
+        job_type="WEB_RESEARCH",
+        status="RUNNING",
+        attempts=3,
+        max_attempts=3,
+    )
+    run = WebResearchRun(
+        session_id=uuid.uuid4(),
+        requester_id=uuid.uuid4(),
+        status="REFINING",
+        queries_to_send=["q"],
+    )
+    db = MagicMock()
+    _apply_web_research_failure(
+        db,
+        job=job,
+        run=run,
+        error=err,
+        settings=make_settings(),
+        failure_phase="REFINE",
+    )
+    assert "LLM changed user-edited field" not in (run.failure_message or "")
+    assert run.failure_message == LlmResponseValidationError.safe_message
+
+
+def test_validate_rejects_protected_field_without_filter() -> None:
     sent_id = str(uuid.uuid4())
     result = EvidenceRefinementResult(
         draft={"title": "Changed title", "background": "Changed"},
@@ -328,6 +478,28 @@ def test_repeated_user_edited_field_protection_regression() -> None:
             user_edited_fields=["title"],
             valid_evidence_ids={sent_id},
         )
+
+
+def test_merge_provenance_skips_user_edited_fields() -> None:
+    from app.llm.research_schemas import merge_refinement_provenance
+    from app.models.enums import FieldProvenanceSource
+
+    base_prov = {
+        "background": {
+            "source": FieldProvenanceSource.USER_EDIT.value,
+            "final_source": FieldProvenanceSource.USER_EDIT.value,
+            "original_source": FieldProvenanceSource.LLM_SUMMARY.value,
+        }
+    }
+    merged = merge_refinement_provenance(
+        base_provenance=base_prov,
+        base_draft={"background": "배경은 유지 테스트", "challenges": "Old"},
+        refined_draft={"background": "배경은 유지 테스트", "challenges": "New"},
+        evidence_links={"challenges": ["ev-1"]},
+        user_edited_fields=["background"],
+    )
+    assert merged["background"]["source"] == FieldProvenanceSource.USER_EDIT.value
+    assert merged["challenges"]["source"] == FieldProvenanceSource.WEB_EVIDENCE.value
 
 
 def test_refinement_uses_compact_json_without_indent() -> None:

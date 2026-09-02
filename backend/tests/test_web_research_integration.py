@@ -1365,3 +1365,134 @@ def test_refine_retry_skips_search_provider(
     db.expire_all()
     run = db.get(WebResearchRun, run.id)
     assert run.status == WebResearchRunStatus.READY.value
+
+
+def test_refine_ignores_user_edited_fields_in_llm_response(
+    client: TestClient,
+    db: Session,
+    session_factory,
+) -> None:
+    from app.llm.research_schemas import EvidenceRefinementResult
+    from app.models.enums import FieldProvenanceSource
+
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    session = db.get(IdeaAiSession, session_id)
+    session.draft_payload = {
+        "title": "AI Draft",
+        "background": "배경은 유지 테스트",
+        "challenges": "기존 내용",
+    }
+    session.field_provenance = {
+        "background": {
+            "source": FieldProvenanceSource.USER_EDIT.value,
+            "final_source": FieldProvenanceSource.USER_EDIT.value,
+            "original_source": FieldProvenanceSource.LLM_SUMMARY.value,
+        }
+    }
+    db.commit()
+
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(
+        client,
+        ws,
+        session_id,
+        draft=session.draft_payload,
+    )
+    run = db.get(WebResearchRun, run_id)
+    run.user_edited_fields = ["background"]
+    db.commit()
+
+    class MixedRefine(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            bg_id = str(uuid.uuid4())
+            ch_id = str(request.evidence[0].evidence_id)
+            return EvidenceRefinementResult(
+                draft={
+                    "background": "LLM이 바꾸려고 한 내용",
+                    "challenges": "Evidence 기반 보완",
+                },
+                evidence_links={"background": [bg_id], "challenges": [ch_id]},
+                research_summary="검색 요약",
+            )
+
+    assert _run_research_worker_once(
+        db,
+        session_factory,
+        run_id,
+        provider=MixedRefine(),
+        search_provider=FakeSearchProvider(),
+    )
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    session = db.get(IdeaAiSession, session_id)
+    assert run.status == WebResearchRunStatus.READY.value
+    assert session.draft_payload["background"] == "배경은 유지 테스트"
+    assert session.draft_payload["challenges"] == "Evidence 기반 보완"
+    assert session.field_provenance["background"]["source"] == FieldProvenanceSource.USER_EDIT.value
+    assert session.field_provenance["challenges"]["source"] == FieldProvenanceSource.WEB_EVIDENCE.value
+
+    evidence = db.scalars(
+        select(WebEvidence).where(WebEvidence.research_run_id == run_id)
+    ).all()
+    assert len(evidence) >= 1
+    for row in evidence:
+        assert "background" not in (row.related_fields or [])
+
+
+def test_refine_only_user_edited_fields_returns_ready_without_draft_change(
+    client: TestClient,
+    db: Session,
+    session_factory,
+) -> None:
+    from app.llm.research_schemas import EvidenceRefinementResult
+
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    session = db.get(IdeaAiSession, session_id)
+    original_draft = dict(session.draft_payload or {"title": "AI Draft", "background": "A"})
+    original_prov = dict(session.field_provenance or {})
+    db.commit()
+
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(
+        client,
+        ws,
+        session_id,
+        draft=original_draft,
+    )
+    run = db.get(WebResearchRun, run_id)
+    run.user_edited_fields = ["background"]
+    db.commit()
+
+    class OnlyProtected(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            ev_id = str(request.evidence[0].evidence_id)
+            return EvidenceRefinementResult(
+                draft={"background": "LLM only"},
+                evidence_links={"background": [ev_id]},
+                research_summary="요약만 있음",
+            )
+
+    assert _run_research_worker_once(
+        db,
+        session_factory,
+        run_id,
+        provider=OnlyProtected(),
+        search_provider=FakeSearchProvider(),
+    )
+
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    session = db.get(IdeaAiSession, session_id)
+    assert run.status == WebResearchRunStatus.READY.value
+    assert run.research_summary == "요약만 있음"
+    assert session.draft_payload == original_draft
+    assert session.field_provenance == original_prov
+    stored_after = db.scalar(
+        select(func.count()).select_from(WebEvidence).where(WebEvidence.research_run_id == run_id)
+    )
+    assert stored_after >= 1
