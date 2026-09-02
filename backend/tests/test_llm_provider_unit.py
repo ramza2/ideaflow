@@ -50,7 +50,7 @@ READY_JSON = {
     "decision": "READY_FOR_REVIEW",
     "draft": {
         "title": "도구",
-        "one_line_definition": None,
+        "one_line_definition": "짧은 한 줄 정의",
         "background": None,
         "problem": None,
         "core_concept": None,

@@ -119,3 +119,84 @@ def test_needs_clarification_requires_questions() -> None:
     payload = _ready_payload(decision="NEEDS_CLARIFICATION", clarifying_questions=[])
     with pytest.raises(Exception):
         IdeaStructuringResult.model_validate(payload)
+
+
+def _insufficient_ready_payload(**overrides) -> dict:
+    base = _ready_payload()
+    base["draft"] = {
+        "title": None,
+        "one_line_definition": None,
+        "background": None,
+        "problem": None,
+        "core_concept": None,
+        "major_features": None,
+        "expected_effect": None,
+        "target_users": None,
+        "scenarios": None,
+        "challenges": None,
+        "minimum_validation": None,
+        "related_project": None,
+        "category_slug": "technology_rd",
+        "priority": None,
+        "feasibility": None,
+        "tags": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ready_rejects_title_null_with_only_category_slug() -> None:
+    with pytest.raises(LlmResponseValidationError):
+        parse_structuring_result(__import__("json").dumps(_insufficient_ready_payload()))
+
+
+def test_ready_rejects_empty_title() -> None:
+    payload = _insufficient_ready_payload()
+    payload["draft"]["title"] = ""
+    with pytest.raises(LlmResponseValidationError):
+        parse_structuring_result(__import__("json").dumps(payload))
+
+
+def test_ready_rejects_whitespace_title() -> None:
+    payload = _insufficient_ready_payload()
+    payload["draft"]["title"] = "   "
+    with pytest.raises(LlmResponseValidationError):
+        parse_structuring_result(__import__("json").dumps(payload))
+
+
+def test_ready_accepts_title_and_one_line_definition() -> None:
+    payload = _insufficient_ready_payload()
+    payload["draft"]["title"] = "테스트 아이디어"
+    payload["draft"]["one_line_definition"] = "한 줄 요약"
+    result = parse_structuring_result(__import__("json").dumps(payload))
+    assert result.draft.title == "테스트 아이디어"
+    assert result.draft.one_line_definition == "한 줄 요약"
+
+
+def test_ready_accepts_title_and_problem_only() -> None:
+    payload = _insufficient_ready_payload()
+    payload["draft"]["title"] = "테스트 아이디어"
+    payload["draft"]["problem"] = "문제"
+    result = parse_structuring_result(__import__("json").dumps(payload))
+    assert result.draft.title == "테스트 아이디어"
+    assert result.draft.problem == "문제"
+
+
+def test_ready_rejects_metadata_only_draft() -> None:
+    payload = _insufficient_ready_payload()
+    payload["draft"]["title"] = "제목만 있음"
+    payload["draft"]["priority"] = "HIGH"
+    payload["draft"]["tags"] = ["AI", "SaaS"]
+    with pytest.raises(LlmResponseValidationError):
+        parse_structuring_result(__import__("json").dumps(payload))
+
+
+def test_needs_clarification_validation_unchanged() -> None:
+    payload = _ready_payload(
+        decision="NEEDS_CLARIFICATION",
+        clarifying_questions=[{"field": "target_users", "question": "누가 쓰나요?"}],
+    )
+    payload["draft"]["title"] = None
+    result = IdeaStructuringResult.model_validate(payload)
+    assert result.decision == AiLlmDecision.NEEDS_CLARIFICATION
+    assert len(result.clarifying_questions) == 1

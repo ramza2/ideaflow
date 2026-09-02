@@ -276,7 +276,10 @@ def _apply_failure(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    safe_msg = (error.safe_message or "AI 처리 중 오류가 발생했습니다.")[:512]
+    if isinstance(error, LlmResponseValidationError):
+        safe_msg = LlmResponseValidationError.safe_message
+    else:
+        safe_msg = (error.safe_message or "AI 처리 중 오류가 발생했습니다.")[:512]
     code = error.code
 
     if error.retryable and job.attempts < job.max_attempts:

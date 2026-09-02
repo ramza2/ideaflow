@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,7 +20,9 @@ from app.llm.schemas import (
     ClarifyingQuestionRaw,
     FieldProvenanceEntry,
     IdeaDraftPayload,
+    IdeaStructuringRequest,
     IdeaStructuringResult,
+    parse_structuring_result,
 )
 from app.main import app
 from app.models.ai import AiJob, IdeaAiSession
@@ -68,6 +71,85 @@ class FakeProvider:
 
     def refine_idea_with_evidence(self, request):
         raise NotImplementedError
+
+
+class ParsingFakeProvider:
+    provider_name = "parsing_fake"
+    model_name = "parsing-fake-model"
+    prompt_version = "v1"
+
+    def __init__(self, contents: list[str]) -> None:
+        self._contents = list(contents)
+        self.calls = 0
+
+    def structure_idea(self, request: IdeaStructuringRequest):
+        self.calls += 1
+        if not self._contents:
+            raise RuntimeError("ParsingFakeProvider exhausted")
+        return parse_structuring_result(self._contents.pop(0))
+
+    def refine_idea_with_evidence(self, request):
+        raise NotImplementedError
+
+
+def _insufficient_ready_json() -> str:
+    return json.dumps(
+        {
+            "decision": "READY_FOR_REVIEW",
+            "draft": {
+                "title": None,
+                "one_line_definition": None,
+                "background": None,
+                "problem": None,
+                "core_concept": None,
+                "major_features": None,
+                "expected_effect": None,
+                "target_users": None,
+                "scenarios": None,
+                "challenges": None,
+                "minimum_validation": None,
+                "related_project": None,
+                "category_slug": "technology_rd",
+                "priority": None,
+                "feasibility": None,
+                "tags": [],
+            },
+            "field_provenance": {},
+            "clarifying_questions": [],
+            "research_recommended": False,
+            "research_topics": [],
+        }
+    )
+
+
+def _valid_ready_json(title: str) -> str:
+    return json.dumps(
+        {
+            "decision": "READY_FOR_REVIEW",
+            "draft": {
+                "title": title,
+                "one_line_definition": "한 줄",
+                "background": None,
+                "problem": None,
+                "core_concept": None,
+                "major_features": None,
+                "expected_effect": None,
+                "target_users": None,
+                "scenarios": None,
+                "challenges": None,
+                "minimum_validation": None,
+                "related_project": None,
+                "category_slug": None,
+                "priority": "MEDIUM",
+                "feasibility": "UNKNOWN",
+                "tags": [],
+            },
+            "field_provenance": {},
+            "clarifying_questions": [],
+            "research_recommended": False,
+            "research_topics": [],
+        }
+    )
 
 
 def _ready_result(title: str = "AI Draft Title") -> IdeaStructuringResult:
@@ -867,3 +949,58 @@ def test_regenerate_worker_enters_ready_flow(
     new_session = db.get(IdeaAiSession, new_id)
     assert new_session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
     assert new_session.draft_payload["title"] == "Regenerated Title"
+
+
+def test_regenerate_rejects_insufficient_ready_until_retry_succeeds(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+
+    old = db.get(IdeaAiSession, session_id)
+    old_input = old.input_text
+
+    r = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{session_id}/regenerate",
+        headers=_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    new_id = uuid.UUID(r.json()["session"]["id"])
+    assert new_id != session_id
+
+    new_session = db.get(IdeaAiSession, new_id)
+    assert new_session.input_text == old_input
+    assert new_session.draft_payload is None
+
+    provider = ParsingFakeProvider(
+        [_insufficient_ready_json(), _valid_ready_json("Regenerated After Retry")]
+    )
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider)
+    db.expire_all()
+    new_session = db.get(IdeaAiSession, new_id)
+    assert new_session.status == IdeaAiSessionStatus.PROCESSING.value
+    assert new_session.draft_payload is None
+
+    job = db.scalars(
+        select(AiJob).where(
+            AiJob.session_id == new_id,
+            AiJob.job_type == AiJobType.STRUCTURE_IDEA.value,
+        )
+    ).one()
+    job.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider)
+    db.expire_all()
+    new_session = db.get(IdeaAiSession, new_id)
+    assert new_session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
+    assert new_session.draft_payload["title"] == "Regenerated After Retry"
+    assert new_session.draft_payload["one_line_definition"] == "한 줄"
+
+    old_after = db.get(IdeaAiSession, session_id)
+    assert old_after.input_text == old_input
+    assert old_after.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value

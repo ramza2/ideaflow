@@ -76,7 +76,7 @@ class FakeLlmProvider:
         self.last_request = request
         return IdeaStructuringResult(
             decision=AiLlmDecision.READY_FOR_REVIEW,
-            draft=IdeaDraftPayload(title="Probe", tags=[]),
+            draft=IdeaDraftPayload(title="Probe", one_line_definition="probe", tags=[]),
             field_provenance={
                 "title": FieldProvenanceEntry(
                     source=FieldProvenanceSource.LLM_SUMMARY,

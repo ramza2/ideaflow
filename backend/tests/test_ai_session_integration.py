@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import uuid
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,13 +18,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.session import reset_engine
-from app.llm.exceptions import LlmAuthenticationError, LlmTimeoutError
+from app.llm.exceptions import LlmAuthenticationError, LlmResponseValidationError, LlmTimeoutError
 from app.llm.schemas import (
     ClarifyingQuestionRaw,
     FieldProvenanceEntry,
     IdeaDraftPayload,
     IdeaStructuringRequest,
     IdeaStructuringResult,
+    parse_structuring_result,
 )
 from app.main import app
 from app.models.ai import AiJob, IdeaAiSession
@@ -80,6 +82,85 @@ class FakeProvider:
         if isinstance(item, Exception):
             raise item
         return item
+
+
+class ParsingFakeProvider:
+    provider_name = "parsing_fake"
+    model_name = "parsing-fake-model"
+    prompt_version = "v1"
+
+    def __init__(self, contents: list[str]) -> None:
+        self._contents = list(contents)
+        self.calls = 0
+
+    def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
+        self.calls += 1
+        if not self._contents:
+            raise RuntimeError("ParsingFakeProvider exhausted")
+        return parse_structuring_result(self._contents.pop(0))
+
+    def refine_idea_with_evidence(self, request):
+        raise NotImplementedError
+
+
+def _insufficient_ready_json() -> str:
+    return json.dumps(
+        {
+            "decision": "READY_FOR_REVIEW",
+            "draft": {
+                "title": None,
+                "one_line_definition": None,
+                "background": None,
+                "problem": None,
+                "core_concept": None,
+                "major_features": None,
+                "expected_effect": None,
+                "target_users": None,
+                "scenarios": None,
+                "challenges": None,
+                "minimum_validation": None,
+                "related_project": None,
+                "category_slug": "technology_rd",
+                "priority": None,
+                "feasibility": None,
+                "tags": [],
+            },
+            "field_provenance": {},
+            "clarifying_questions": [],
+            "research_recommended": False,
+            "research_topics": [],
+        }
+    )
+
+
+def _valid_ready_json(title: str = "Retry Success Title") -> str:
+    return json.dumps(
+        {
+            "decision": "READY_FOR_REVIEW",
+            "draft": {
+                "title": title,
+                "one_line_definition": "한 줄",
+                "background": None,
+                "problem": None,
+                "core_concept": None,
+                "major_features": None,
+                "expected_effect": None,
+                "target_users": None,
+                "scenarios": None,
+                "challenges": None,
+                "minimum_validation": None,
+                "related_project": None,
+                "category_slug": None,
+                "priority": "MEDIUM",
+                "feasibility": "UNKNOWN",
+                "tags": [],
+            },
+            "field_provenance": {},
+            "clarifying_questions": [],
+            "research_recommended": False,
+            "research_topics": [],
+        }
+    )
 
 
 def _ready_result(title: str = "AI Draft Title") -> IdeaStructuringResult:
@@ -454,6 +535,91 @@ def test_non_retryable_immediate_fail(
     session = db.get(IdeaAiSession, session_id)
     assert session.status == IdeaAiSessionStatus.FAILED.value
     assert session.failure_code == "LLM_AUTH_ERROR"
+
+
+def test_insufficient_ready_retries_then_succeeds(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    r = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions",
+        json={"input_text": "insufficient then ok"},
+        headers=_headers(client),
+    )
+    session_id = uuid.UUID(r.json()["id"])
+
+    provider = ParsingFakeProvider(
+        [_insufficient_ready_json(), _valid_ready_json("Recovered Title")]
+    )
+    settings = get_settings()
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider, settings=settings)
+    db.expire_all()
+    job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one()
+    assert job.status == AiJobStatus.QUEUED.value
+    assert job.attempts == 1
+    assert job.last_error_code == "LLM_RESPONSE_INVALID"
+    session = db.get(IdeaAiSession, session_id)
+    assert session.status == IdeaAiSessionStatus.PROCESSING.value
+    assert session.draft_payload is None
+
+    job.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider, settings=settings)
+    db.expire_all()
+    job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one()
+    assert job.status == AiJobStatus.SUCCEEDED.value
+    session = db.get(IdeaAiSession, session_id)
+    assert session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
+    assert session.draft_payload["title"] == "Recovered Title"
+    assert provider.calls == 2
+
+
+def test_insufficient_ready_max_attempts_generic_message(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    r = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions",
+        json={"input_text": "always insufficient"},
+        headers=_headers(client),
+    )
+    session_id = uuid.UUID(r.json()["id"])
+
+    job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one()
+    job.max_attempts = 2
+    db.commit()
+
+    provider = ParsingFakeProvider([_insufficient_ready_json(), _insufficient_ready_json()])
+    settings = get_settings()
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider, settings=settings)
+    db.expire_all()
+    job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one()
+    assert job.status == AiJobStatus.QUEUED.value
+    assert job.attempts == 1
+
+    job.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+
+    ai_worker.run_once(session_factory=session_factory, provider=provider, settings=settings)
+    db.expire_all()
+    job = db.scalars(select(AiJob).where(AiJob.session_id == session_id)).one()
+    assert job.status == AiJobStatus.FAILED.value
+    session = db.get(IdeaAiSession, session_id)
+    assert session.status == IdeaAiSessionStatus.FAILED.value
+    assert session.failure_code == "LLM_RESPONSE_INVALID"
+    assert session.failure_message == LlmResponseValidationError.safe_message
+    assert "title" not in (session.failure_message or "").lower()
 
 
 def test_stale_lease_recovery(db: Session, session_factory: sessionmaker, client: TestClient) -> None:
