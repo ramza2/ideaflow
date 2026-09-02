@@ -285,6 +285,8 @@ export interface AiSession {
   clarification_answers: AiClarificationAnswer[] | null;
   research_recommended: boolean;
   research_topics: string[] | null;
+  review_state: AiSessionReviewState | null;
+  review_saved_at: string | null;
   result_idea_id: string | null;
   failure: AiSessionFailure | null;
   llm: AiSessionLlm;
@@ -330,6 +332,25 @@ export interface AiSessionConfirmRequest {
 export interface AiSessionConfirmResponse {
   created: boolean;
   idea: IdeaDetail;
+}
+
+export interface AiSessionReviewState {
+  category_id: string | null;
+  stage_id: string | null;
+  visibility: IdeaVisibility;
+  assignee_id: string | null;
+  next_review_date: string | null;
+  shares: IdeaShareInput[];
+  edited_fields: string[];
+}
+
+export interface AiSessionReviewDraftSaveRequest {
+  draft: AiDraft;
+  review_state: AiSessionReviewState;
+}
+
+export interface AiSessionRegenerateResponse {
+  session: AiSession;
 }
 
 /* --- Step 9: Web Research --- */

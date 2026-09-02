@@ -17,6 +17,8 @@ from app.schemas.ai import (
     AiSessionConfirmResponse,
     AiSessionCreate,
     AiSessionPublic,
+    AiSessionRegenerateResponse,
+    AiSessionReviewDraftSaveRequest,
     ClarificationSubmit,
 )
 from app.services import ai_session as ai_session_service
@@ -139,3 +141,51 @@ def confirm_ai_session(
         db.rollback()
         raise
     return result
+
+
+@router.put("/{session_id}/review-draft", response_model=AiSessionPublic)
+def save_review_draft(
+    session_id: UUID,
+    body: AiSessionReviewDraftSaveRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> AiSessionPublic:
+    del auth
+    try:
+        session = ai_session_service.save_review_draft(
+            db,
+            workspace=ctx.workspace,
+            user_id=ctx.user.id,
+            session_id=session_id,
+            payload=body,
+        )
+        db.commit()
+        db.refresh(session)
+    except AppError:
+        db.rollback()
+        raise
+    return ai_session_service.to_public(session)
+
+
+@router.post("/{session_id}/regenerate", response_model=AiSessionRegenerateResponse)
+def regenerate_ai_session(
+    session_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> AiSessionRegenerateResponse:
+    del auth
+    try:
+        session = ai_session_service.regenerate_ai_session(
+            db,
+            workspace=ctx.workspace,
+            requester=ctx.user,
+            session_id=session_id,
+        )
+        db.commit()
+        db.refresh(session)
+    except AppError:
+        db.rollback()
+        raise
+    return AiSessionRegenerateResponse(session=ai_session_service.to_public(session))

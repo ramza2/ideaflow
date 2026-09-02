@@ -31,6 +31,7 @@ from app.schemas.ai import (
     AiSessionFailurePublic,
     AiSessionLlmPublic,
     AiSessionPublic,
+    AiSessionReviewDraftSaveRequest,
     ClarificationSubmit,
 )
 from app.schemas.idea import IdeaCreate
@@ -332,6 +333,8 @@ def to_public(session: IdeaAiSession) -> AiSessionPublic:
         clarification_answers=session.clarification_answers,
         research_recommended=bool(session.research_recommended),
         research_topics=list(topics) if topics else [],
+        review_state=session.review_state,
+        review_saved_at=session.review_saved_at,
         result_idea_id=session.result_idea_id,
         failure=failure,
         llm=AiSessionLlmPublic(
@@ -388,6 +391,152 @@ def _merge_user_edit_provenance(
             "note": prev.get("note"),
         }
     return provenance
+
+
+def _apply_edited_fields_provenance(
+    provenance: dict[str, Any] | None,
+    edited_fields: list[str],
+) -> dict[str, Any]:
+    result = dict(provenance or {})
+    for field in edited_fields:
+        if field not in _DRAFT_COMPARE_FIELDS and field != "tags":
+            continue
+        prev = result.get(field) if isinstance(result.get(field), dict) else {}
+        if prev.get("source") == FieldProvenanceSource.USER_EDIT.value:
+            original_source = prev.get("original_source") or prev.get("source")
+        else:
+            original_source = (
+                prev.get("final_source")
+                or prev.get("source")
+                or prev.get("original_source")
+            )
+        entry: dict[str, Any] = {
+            "original_source": original_source,
+            "final_source": FieldProvenanceSource.USER_EDIT.value,
+            "source": FieldProvenanceSource.USER_EDIT.value,
+            "note": prev.get("note"),
+        }
+        if prev.get("evidence_ids"):
+            entry["evidence_ids"] = prev.get("evidence_ids")
+        result[field] = entry
+    return result
+
+
+def _review_state_dict(payload: AiSessionReviewDraftSaveRequest) -> dict[str, Any]:
+    rs = payload.review_state
+    return {
+        "category_id": str(rs.category_id) if rs.category_id else None,
+        "stage_id": str(rs.stage_id) if rs.stage_id else None,
+        "visibility": rs.visibility.value,
+        "assignee_id": str(rs.assignee_id) if rs.assignee_id else None,
+        "next_review_date": rs.next_review_date.isoformat() if rs.next_review_date else None,
+        "shares": [
+            {"user_id": str(share.user_id), "permission": share.permission.value}
+            for share in rs.shares
+        ],
+        "edited_fields": list(rs.edited_fields),
+    }
+
+
+def save_review_draft(
+    db: Session,
+    *,
+    workspace: Workspace,
+    user_id: UUID,
+    session_id: UUID,
+    payload: AiSessionReviewDraftSaveRequest,
+) -> IdeaAiSession:
+    session = get_session_for_requester(
+        db,
+        workspace_id=workspace.id,
+        session_id=session_id,
+        user_id=user_id,
+        for_update=True,
+    )
+    if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        raise AppError(
+            "AI session is not ready for review draft save.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+    draft_data = payload.draft.model_dump(mode="json")
+    session.draft_payload = sanitize_draft_category(
+        db,
+        workspace_id=workspace.id,
+        draft=draft_data,
+    )
+    session.field_provenance = _apply_edited_fields_provenance(
+        session.field_provenance,
+        payload.review_state.edited_fields,
+    )
+    session.review_state = _review_state_dict(payload)
+    session.review_saved_at = utcnow()
+    db.flush()
+    return session
+
+
+def regenerate_ai_session(
+    db: Session,
+    *,
+    workspace: Workspace,
+    requester: User,
+    session_id: UUID,
+    settings: Settings | None = None,
+) -> IdeaAiSession:
+    _require_llm_enabled(db, workspace)
+    cfg = settings or get_settings()
+
+    session = get_session_for_requester(
+        db,
+        workspace_id=workspace.id,
+        session_id=session_id,
+        user_id=requester.id,
+        for_update=True,
+    )
+    if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        raise AppError(
+            "Only READY_FOR_REVIEW sessions can be regenerated.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+    from app.services import web_research as web_research_service
+
+    if web_research_service.has_blocking_research_for_regenerate(db, session.id):
+        raise AppError(
+            "Complete or cancel in-progress web research before regenerating.",
+            code="AI_REGENERATE_RESEARCH_ACTIVE",
+            status_code=409,
+        )
+
+    new_session = IdeaAiSession(
+        workspace_id=workspace.id,
+        requester_id=requester.id,
+        purpose=IdeaAiSessionPurpose.CREATE.value,
+        status=IdeaAiSessionStatus.PROCESSING.value,
+        input_text=session.input_text,
+        clarifying_questions=session.clarifying_questions,
+        clarification_answers=session.clarification_answers,
+        research_recommended=False,
+        research_topics=[],
+        prompt_version=IDEA_STRUCTURE_PROMPT_VERSION,
+    )
+    db.add(new_session)
+    db.flush()
+
+    db.add(
+        AiJob(
+            session_id=new_session.id,
+            job_type=AiJobType.STRUCTURE_IDEA.value,
+            status=AiJobStatus.QUEUED.value,
+            attempts=0,
+            max_attempts=cfg.ai_job_max_attempts,
+            available_at=utcnow(),
+        )
+    )
+    db.flush()
+    return new_session
 
 
 def confirm_ai_session(

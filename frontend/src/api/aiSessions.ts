@@ -5,6 +5,8 @@ import type {
   AiSessionConfirmRequest,
   AiSessionConfirmResponse,
   AiSessionCreateRequest,
+  AiSessionRegenerateResponse,
+  AiSessionReviewDraftSaveRequest,
 } from "../types/api";
 
 export async function createAiSession(
@@ -65,6 +67,34 @@ export async function confirmAiSession(
     {
       method: "POST",
       body: payload,
+      csrf: true,
+    },
+  );
+}
+
+export async function saveAiReviewDraft(
+  workspaceId: string,
+  sessionId: string,
+  payload: AiSessionReviewDraftSaveRequest,
+): Promise<AiSession> {
+  return apiRequest<AiSession>(
+    `/workspaces/${workspaceId}/ai-sessions/${sessionId}/review-draft`,
+    {
+      method: "PUT",
+      body: payload,
+      csrf: true,
+    },
+  );
+}
+
+export async function regenerateAiSession(
+  workspaceId: string,
+  sessionId: string,
+): Promise<AiSessionRegenerateResponse> {
+  return apiRequest<AiSessionRegenerateResponse>(
+    `/workspaces/${workspaceId}/ai-sessions/${sessionId}/regenerate`,
+    {
+      method: "POST",
       csrf: true,
     },
   );

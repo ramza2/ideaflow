@@ -17,7 +17,7 @@ import { SourceBadge } from "../../components/common/Badge";
 import { Select } from "../../components/common/Input";
 import { ProgressStepper, InlineAlert } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
-import { confirmAiSession } from "../../api/aiSessions";
+import { confirmAiSession, regenerateAiSession, saveAiReviewDraft } from "../../api/aiSessions";
 import {
   approveWebResearch,
   cancelWebResearch,
@@ -39,6 +39,7 @@ import type {
   AiDraft,
   AiFieldProvenance,
   AiSessionConfirmRequest,
+  AiSessionReviewDraftSaveRequest,
   CategoryPublic,
   IdeaFeasibility,
   IdeaPriority,
@@ -147,6 +148,13 @@ export function AIReviewPage() {
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
 
+  const [dirty, setDirty] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savedAtLabel, setSavedAtLabel] = useState<string | null>(null);
+  const [showRegenerateModal, setShowRegenerateModal] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+
   const [researchPanelOpen, setResearchPanelOpen] = useState(false);
   const [researchQueries, setResearchQueries] = useState<string[]>([]);
   const [previewRun, setPreviewRun] = useState<WebResearchRun | null>(null);
@@ -219,16 +227,25 @@ export function AIReviewPage() {
     setDraft({ ...d });
     setTagsText((d.tags ?? []).join(", "));
 
-    const slug = d.category_slug?.trim();
-    if (slug) {
-      const match = categories.find((c) => c.slug === slug);
-      setCategoryId(match?.id ?? "");
+    const rs = session.review_state;
+    if (rs?.category_id) {
+      setCategoryId(rs.category_id);
     } else {
-      setCategoryId("");
+      const slug = d.category_slug?.trim();
+      if (slug) {
+        const match = categories.find((c) => c.slug === slug);
+        setCategoryId(match?.id ?? "");
+      } else {
+        setCategoryId("");
+      }
     }
 
-    const defaultStage = stages.find((x) => x.is_default) ?? stages[0];
-    setStageId(defaultStage?.id ?? "");
+    if (rs?.stage_id) {
+      setStageId(rs.stage_id);
+    } else {
+      const defaultStage = stages.find((x) => x.is_default) ?? stages[0];
+      setStageId(defaultStage?.id ?? "");
+    }
 
     setPriority(
       d.priority === "HIGH" || d.priority === "MEDIUM" || d.priority === "LOW"
@@ -243,10 +260,22 @@ export function AIReviewPage() {
         ? d.feasibility
         : "UNKNOWN",
     );
-    setVisibility(initialVisibility);
-    setAssigneeId("");
-    setNextReviewDate("");
-    setShares([]);
+    setVisibility(rs?.visibility ?? initialVisibility);
+    setAssigneeId(rs?.assignee_id ?? "");
+    setNextReviewDate(rs?.next_review_date ?? "");
+    setShares(rs?.shares ?? []);
+    setEditedKeys(new Set(rs?.edited_fields ?? []));
+    setDirty(false);
+    if (session.review_saved_at) {
+      setSavedAtLabel(
+        new Date(session.review_saved_at).toLocaleTimeString("ko-KR", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+    } else {
+      setSavedAtLabel(null);
+    }
     setInitialized(true);
   }, [
     session,
@@ -256,6 +285,16 @@ export function AIReviewPage() {
     stages,
     initialVisibility,
   ]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
 
   // Apply refreshed session draft after research completes (preserve user edits).
   useEffect(() => {
@@ -282,6 +321,7 @@ export function AIReviewPage() {
         return merged;
       });
       lastAppliedResearchIdRef.current = researchRun.id;
+      setDirty(true);
     })();
 
     return () => {
@@ -334,6 +374,91 @@ export function AIReviewPage() {
   const selectedUsersOk =
     visibility !== "SELECTED_USERS" || shares.length > 0;
 
+  function markDirty() {
+    setDirty(true);
+  }
+
+  function buildSavePayload(): AiSessionReviewDraftSaveRequest {
+    const tags = tagsText
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const category = categories.find((c) => c.id === categoryId);
+    return {
+      draft: {
+        title: draft?.title ?? "",
+        one_line_definition: emptyToNull(draft?.one_line_definition),
+        background: emptyToNull(draft?.background),
+        problem: emptyToNull(draft?.problem),
+        core_concept: emptyToNull(draft?.core_concept),
+        major_features: emptyToNull(draft?.major_features),
+        expected_effect: emptyToNull(draft?.expected_effect),
+        target_users: emptyToNull(draft?.target_users),
+        scenarios: emptyToNull(draft?.scenarios),
+        challenges: emptyToNull(draft?.challenges),
+        minimum_validation: emptyToNull(draft?.minimum_validation),
+        related_project: emptyToNull(draft?.related_project),
+        category_slug: category?.slug ?? null,
+        priority,
+        feasibility,
+        tags,
+      },
+      review_state: {
+        category_id: categoryId || null,
+        stage_id: stageId || null,
+        visibility,
+        assignee_id: assigneeId || null,
+        next_review_date: nextReviewDate || null,
+        shares: visibility === "SELECTED_USERS" ? shares : [],
+        edited_fields: Array.from(editedKeys),
+      },
+    };
+  }
+
+  async function handleTempSave() {
+    if (!workspaceId || !sessionId || savingDraft || !dirty) return;
+    setSavingDraft(true);
+    try {
+      const saved = await saveAiReviewDraft(workspaceId, sessionId, buildSavePayload());
+      setDirty(false);
+      if (saved.review_saved_at) {
+        setSavedAtLabel(
+          new Date(saved.review_saved_at).toLocaleTimeString("ko-KR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        );
+      }
+      toast.success("초안을 임시 저장했습니다.");
+      await refresh();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "임시 저장에 실패했습니다."));
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
+  async function handleRegenerate() {
+    if (!workspaceId || !sessionId || regenerating) return;
+    setRegenerating(true);
+    try {
+      const result = await regenerateAiSession(workspaceId, sessionId);
+      setShowRegenerateModal(false);
+      const vis = searchParams.get("visibility") ?? visibility;
+      navigate(
+        `/w/${workspaceId}/ideas/new/ai/analyzing/${result.session.id}?visibility=${vis}`,
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "AI_REGENERATE_RESEARCH_ACTIVE") {
+        toast.error("진행 중인 웹 조사를 완료하거나 취소한 후 다시 생성해 주세요.");
+      } else {
+        toast.error(apiErrorMessage(err, "전체 다시 생성에 실패했습니다."));
+      }
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   function startEdit(field: EditableField) {
     setEditingKey(field.key);
     const raw =
@@ -348,17 +473,20 @@ export function AIReviewPage() {
     if (key === "tags_text") {
       setTagsText(next);
       setEditedKeys((prev) => new Set(prev).add("tags"));
+      markDirty();
     } else {
       setDraft((prev) => ({
         ...(prev ?? {}),
         [key]: next,
       }));
       setEditedKeys((prev) => new Set(prev).add(key));
+      markDirty();
     }
     if (value === undefined) setEditingKey(null);
   }
 
   function toggleShare(userId: string) {
+    markDirty();
     setShares((prev) => {
       const exists = prev.find((s) => s.user_id === userId);
       if (exists) return prev.filter((s) => s.user_id !== userId);
@@ -367,6 +495,7 @@ export function AIReviewPage() {
   }
 
   function setSharePermission(userId: string, permission: IdeaSharePermission) {
+    markDirty();
     setShares((prev) =>
       prev.map((s) => (s.user_id === userId ? { ...s, permission } : s)),
     );
@@ -715,7 +844,10 @@ export function AIReviewPage() {
               <Select
                 label="분야 (카테고리)"
                 value={categoryId}
-                onChange={(e) => setCategoryId(e.target.value)}
+                onChange={(e) => {
+                  setCategoryId(e.target.value);
+                  markDirty();
+                }}
                 options={[
                   { value: "", label: "선택 안 함" },
                   ...categories.map((c) => ({ value: c.id, label: c.name })),
@@ -724,13 +856,20 @@ export function AIReviewPage() {
               <Select
                 label="단계"
                 value={stageId}
-                onChange={(e) => setStageId(e.target.value)}
+                onChange={(e) => {
+                  setStageId(e.target.value);
+                  markDirty();
+                }}
                 options={stages.map((s) => ({ value: s.id, label: s.label }))}
               />
               <Select
                 label="우선순위"
                 value={priority}
-                onChange={(e) => setPriority(e.target.value as IdeaPriority)}
+                onChange={(e) => {
+                  setPriority(e.target.value as IdeaPriority);
+                  setEditedKeys((prev) => new Set(prev).add("priority"));
+                  markDirty();
+                }}
                 options={[
                   { value: "HIGH", label: "높음" },
                   { value: "MEDIUM", label: "중간" },
@@ -740,9 +879,11 @@ export function AIReviewPage() {
               <Select
                 label="구현 가능성"
                 value={feasibility}
-                onChange={(e) =>
-                  setFeasibility(e.target.value as IdeaFeasibility)
-                }
+                onChange={(e) => {
+                  setFeasibility(e.target.value as IdeaFeasibility);
+                  setEditedKeys((prev) => new Set(prev).add("feasibility"));
+                  markDirty();
+                }}
                 options={[
                   { value: "HIGH", label: "높음" },
                   { value: "MEDIUM", label: "중간" },
@@ -753,9 +894,10 @@ export function AIReviewPage() {
               <Select
                 label="공개 범위"
                 value={visibility}
-                onChange={(e) =>
-                  setVisibility(e.target.value as IdeaVisibility)
-                }
+                onChange={(e) => {
+                  setVisibility(e.target.value as IdeaVisibility);
+                  markDirty();
+                }}
                 options={[
                   { value: "PRIVATE", label: "비공개" },
                   { value: "WORKSPACE", label: "작업공간 공유" },
@@ -809,7 +951,10 @@ export function AIReviewPage() {
               <Select
                 label="담당자"
                 value={assigneeId}
-                onChange={(e) => setAssigneeId(e.target.value)}
+                onChange={(e) => {
+                  setAssigneeId(e.target.value);
+                  markDirty();
+                }}
                 options={[
                   { value: "", label: "담당자 없음" },
                   ...members
@@ -824,7 +969,10 @@ export function AIReviewPage() {
                 <input
                   type="date"
                   value={nextReviewDate}
-                  onChange={(e) => setNextReviewDate(e.target.value)}
+                  onChange={(e) => {
+                    setNextReviewDate(e.target.value);
+                    markDirty();
+                  }}
                   className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] px-3 text-sm"
                 />
               </label>
@@ -1004,23 +1152,43 @@ export function AIReviewPage() {
         <Button
           variant="ghost"
           icon={<ArrowLeft className="w-4 h-4" />}
-          onClick={() =>
+          onClick={() => {
+            if (dirty) {
+              setShowLeaveConfirm(true);
+              return;
+            }
             navigate(
               `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}?visibility=${visibility}`,
-            )
-          }
+            );
+          }}
         >
           이전
         </Button>
-        <Button variant="secondary" disabled title="추후 제공">
-          임시 저장
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            disabled={!dirty || savingDraft}
+            onClick={() => void handleTempSave()}
+          >
+            {savingDraft ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                저장 중…
+              </>
+            ) : (
+              "임시 저장"
+            )}
+          </Button>
+          {savedAtLabel && !dirty && (
+            <span className="text-xs text-[#9ca3af]">저장됨 {savedAtLabel}</span>
+          )}
+        </div>
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           <Button
             variant="ghost"
             icon={<RefreshCw className="w-3.5 h-3.5" />}
-            disabled
-            title="추후 제공"
+            disabled={regenerating || researchInProgress}
+            onClick={() => setShowRegenerateModal(true)}
           >
             전체 다시 생성
           </Button>
@@ -1078,6 +1246,73 @@ export function AIReviewPage() {
                 onClick={() => void confirmRegister()}
               >
                 등록
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRegenerateModal && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.08)] shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <RefreshCw className="w-5 h-5 text-[#4f46e5]" />
+              <h3 className="text-base font-bold text-[#111118]">
+                초안을 전체 다시 생성하시겠습니까?
+              </h3>
+            </div>
+            <p className="text-sm text-[#6b6b80] mb-5">
+              원문과 기존 추가 질문 답변을 기준으로 새로운 AI 초안을 생성합니다.
+              현재 초안과 임시 저장본은 기존 작업에 남아 있으며, 새 작업에는 기존
+              웹 조사 결과가 자동으로 복사되지 않습니다.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                variant="ghost"
+                className="flex-1"
+                disabled={regenerating}
+                onClick={() => setShowRegenerateModal(false)}
+              >
+                취소
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                loading={regenerating}
+                onClick={() => void handleRegenerate()}
+              >
+                다시 생성
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLeaveConfirm && (
+        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.08)] shadow-xl w-full max-w-sm p-6">
+            <h3 className="text-base font-bold text-[#111118] mb-3">
+              저장하지 않은 변경사항이 있습니다. 이동하시겠습니까?
+            </h3>
+            <div className="flex gap-2">
+              <Button
+                variant="ghost"
+                className="flex-1"
+                onClick={() => setShowLeaveConfirm(false)}
+              >
+                취소
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                onClick={() => {
+                  setShowLeaveConfirm(false);
+                  navigate(
+                    `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}?visibility=${visibility}`,
+                  );
+                }}
+              >
+                이동
               </Button>
             </div>
           </div>

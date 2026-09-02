@@ -23,6 +23,7 @@ IdeaFlow/
 - Step 13: pgvector semantic / hybrid idea search + BGE-M3-compatible embedding provider (`EMBEDDING_*`, default disabled).
 - Step 14: Idea Validation workflow (DRAFT→READY→RUNNING→COMPLETED/CANCELLED). Idea Detail **검증** 탭. ACL은 parent Idea. Start 시 `validation_candidate`→`validating`만 자동 이동.
 - Step 15: Tavily Web Search Provider (`WEB_SEARCH_PROVIDER=tavily`). Step 9 approval workflow 유지; production 외부 검색 연결. Refinement는 `WEB_RESEARCH_REFINE_*`로 LLM 입력만 제한(저장 Evidence는 전량 유지).
+- Step 16: AI Review **임시 저장** (`PUT .../review-draft`) + reload 복구 (`review_state`, `draft_payload`). **전체 다시 생성**은 새 CREATE AiSession 생성(원본 session/research/evidence 보존, Web Search 자동 실행 없음).
 
 ## Docker Compose 배포
 

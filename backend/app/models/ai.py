@@ -104,6 +104,9 @@ class IdeaAiSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    review_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    review_saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class AiJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "ai_jobs"

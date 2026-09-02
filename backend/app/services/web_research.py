@@ -183,6 +183,11 @@ def _active_run_exists(db: Session, session_id: UUID) -> bool:
     return existing is not None
 
 
+def has_blocking_research_for_regenerate(db: Session, session_id: UUID) -> bool:
+    """Block regenerate while preview/approval or search/refine is active."""
+    return _active_run_exists(db, session_id)
+
+
 def has_active_research(db: Session, session_id: UUID) -> bool:
     return db.execute(
         select(WebResearchRun.id).where(
