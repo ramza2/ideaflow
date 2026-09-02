@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.config import Settings
-from app.llm.research_schemas import EvidenceInput, validate_refinement_result
-from app.llm.exceptions import LlmResponseValidationError
-from app.llm.research_schemas import EvidenceRefinementResult
+from app.llm.exceptions import LlmResearchRefineInputTooLargeError, LlmResponseValidationError
+from app.llm.research_prompts import build_research_user_prompt, research_prompt_char_counts
+from app.llm.research_schemas import EvidenceInput, EvidenceRefinementRequest, EvidenceRefinementResult, validate_refinement_result
 from app.models.research import WebEvidence
 from app.services.web_research import (
     build_refinement_evidence_inputs,
+    prepare_refinement_request,
     refinement_evidence_serialized_chars,
 )
 
@@ -30,6 +31,8 @@ def make_settings(**overrides) -> Settings:
         web_research_refine_max_evidence_items=6,
         web_research_refine_max_snippet_chars=600,
         web_research_refine_max_evidence_chars=4000,
+        web_research_refine_max_prompt_chars=6000,
+        web_research_refine_max_tokens=1200,
     )
     base.update(overrides)
     return Settings(_env_file=None, **base)
@@ -188,3 +191,154 @@ def test_update_evidence_related_fields_flushes() -> None:
 
     assert row.related_fields == ["background"]
     db.flush.assert_called_once()
+
+
+def test_research_prompt_excludes_raw_input_text() -> None:
+    secret = "SECRET_INPUT_MARKER_" + ("x" * 5000)
+    request = EvidenceRefinementRequest(
+        input_text=secret,
+        base_draft={"title": "T", "background": "A"},
+        user_edited_fields=["title"],
+        evidence=[],
+    )
+    prompt = build_research_user_prompt(request)
+    assert secret not in prompt
+    assert "SECRET_INPUT_MARKER_" not in prompt
+
+
+def test_prepare_refinement_request_respects_total_prompt_budget() -> None:
+    rows = [_evidence_row(rank=i, title=f"T{i}", snippet="y" * 500) for i in range(20)]
+    settings = make_settings(
+        web_research_refine_max_prompt_chars=2500,
+        web_research_refine_max_evidence_chars=4000,
+    )
+    request, budget = prepare_refinement_request(
+        input_text="ignored raw input " + ("z" * 10000),
+        base_draft={"title": "T", "background": "A"},
+        base_provenance={},
+        user_edited_fields=[],
+        evidence_rows=rows,
+        settings=settings,
+    )
+    assert budget.total_prompt_chars <= settings.web_research_refine_max_prompt_chars
+    assert budget.evidence_total_count == 20
+    assert budget.evidence_used_count <= budget.evidence_candidate_count
+    assert len(request.evidence) == budget.evidence_used_count
+
+
+def test_dynamic_evidence_budget_can_be_smaller_than_candidate_count() -> None:
+    rows = [_evidence_row(rank=i, title=f"T{i}", snippet="s" * 400) for i in range(6)]
+    settings = make_settings(
+        web_research_refine_max_prompt_chars=1800,
+        web_research_refine_max_evidence_chars=4000,
+        web_research_refine_max_evidence_items=6,
+    )
+    request, budget = prepare_refinement_request(
+        input_text="long input",
+        base_draft={"title": "T", "background": "A" * 200},
+        base_provenance={},
+        user_edited_fields=[],
+        evidence_rows=rows,
+        settings=settings,
+    )
+    assert budget.evidence_candidate_count == 6
+    assert budget.evidence_used_count < 6
+    assert len(request.evidence) == budget.evidence_used_count
+
+
+def test_valid_evidence_ids_match_llm_subset() -> None:
+    rows = [_evidence_row(rank=i, title=f"T{i}", snippet="s" * 300) for i in range(8)]
+    request, _budget = prepare_refinement_request(
+        input_text="input",
+        base_draft={"title": "T"},
+        base_provenance={},
+        user_edited_fields=[],
+        evidence_rows=rows,
+        settings=make_settings(web_research_refine_max_prompt_chars=3500),
+    )
+    valid_ids = {str(ev.evidence_id) for ev in request.evidence}
+    assert len(valid_ids) == len(request.evidence)
+    sent_id = str(request.evidence[0].evidence_id)
+    result = EvidenceRefinementResult(
+        draft={"background": "Changed"},
+        evidence_links={"background": [sent_id]},
+        research_summary="s",
+    )
+    validate_refinement_result(
+        result,
+        base_draft={"title": "T", "background": "Old"},
+        user_edited_fields=[],
+        valid_evidence_ids=valid_ids,
+    )
+
+
+def test_prepare_refinement_raises_when_fixed_prompt_too_large() -> None:
+    huge = "x" * 8000
+    with pytest.raises(LlmResearchRefineInputTooLargeError):
+        prepare_refinement_request(
+            input_text="input",
+            base_draft={field: huge for field in (
+                "title",
+                "one_line_definition",
+                "background",
+                "problem",
+                "core_concept",
+                "major_features",
+                "expected_effect",
+                "target_users",
+                "scenarios",
+                "challenges",
+                "minimum_validation",
+                "related_project",
+            )},
+            base_provenance={},
+            user_edited_fields=[],
+            evidence_rows=[],
+            settings=make_settings(web_research_refine_max_prompt_chars=6000),
+        )
+
+
+def test_partial_draft_patch_validates_and_merges() -> None:
+    sent_id = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={"background": "Refined only"},
+        evidence_links={"background": [sent_id]},
+        research_summary="summary",
+    )
+    validated = validate_refinement_result(
+        result,
+        base_draft={"title": "T", "background": "Old", "problem": "P"},
+        user_edited_fields=[],
+        valid_evidence_ids={sent_id},
+    )
+    assert validated.draft == {"background": "Refined only"}
+
+
+def test_repeated_user_edited_field_protection_regression() -> None:
+    sent_id = str(uuid.uuid4())
+    result = EvidenceRefinementResult(
+        draft={"title": "Changed title", "background": "Changed"},
+        evidence_links={"background": [sent_id], "title": [sent_id]},
+        research_summary="s",
+    )
+    with pytest.raises(LlmResponseValidationError):
+        validate_refinement_result(
+            result,
+            base_draft={"title": "T", "background": "Old"},
+            user_edited_fields=["title"],
+            valid_evidence_ids={sent_id},
+        )
+
+
+def test_refinement_uses_compact_json_without_indent() -> None:
+    request = EvidenceRefinementRequest(
+        input_text="ignored",
+        base_draft={"title": "T", "background": "A"},
+        user_edited_fields=["title"],
+        evidence=[],
+    )
+    prompt = build_research_user_prompt(request)
+    assert "\n  " not in prompt.split("## Evidence")[0]
+    system_chars, user_chars, total = research_prompt_char_counts(request)
+    assert total == system_chars + user_chars
+    assert user_chars == len(build_research_user_prompt(request))

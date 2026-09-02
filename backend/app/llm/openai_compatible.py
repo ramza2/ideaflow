@@ -141,7 +141,7 @@ class OpenAICompatibleLlmProvider:
                 {"role": "user", "content": build_research_user_prompt(request)},
             ],
             "temperature": self._settings.llm_temperature,
-            "max_tokens": self._settings.llm_max_tokens,
+            "max_tokens": self._settings.web_research_refine_max_tokens,
         }
         if self._settings.llm_enable_thinking is not None:
             body["chat_template_kwargs"] = {

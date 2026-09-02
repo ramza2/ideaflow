@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -14,9 +15,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
-from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
+from app.llm.exceptions import LlmResearchRefineInputTooLargeError
+from app.llm.research_prompts import (
+    IDEA_RESEARCH_REFINE_PROMPT_VERSION,
+    build_research_user_prompt,
+    research_prompt_char_counts,
+)
 from app.llm.research_schemas import (
     EvidenceInput,
+    EvidenceRefinementRequest,
     RESEARCH_REFINABLE_FIELDS,
     merge_refinement_provenance,
     validate_refinement_result,
@@ -680,12 +687,15 @@ def _apply_refinement_evidence_char_budget(
 def build_refinement_evidence_inputs(
     evidence_rows: list[WebEvidence],
     settings: Settings | None = None,
+    *,
+    max_total_chars: int | None = None,
 ) -> list[EvidenceInput]:
     """Select and trim WebEvidence for LLM refinement only (DB rows unchanged)."""
     cfg = settings or get_settings()
     max_items = cfg.web_research_refine_max_evidence_items
     max_snippet = cfg.web_research_refine_max_snippet_chars
-    max_total_chars = cfg.web_research_refine_max_evidence_chars
+    absolute_cap = cfg.web_research_refine_max_evidence_chars
+    effective_cap = absolute_cap if max_total_chars is None else min(absolute_cap, max_total_chars)
 
     ordered = sorted(evidence_rows, key=lambda row: row.rank)
     inputs: list[EvidenceInput] = []
@@ -708,5 +718,76 @@ def build_refinement_evidence_inputs(
 
     return _apply_refinement_evidence_char_budget(
         inputs,
-        max_total_chars=max_total_chars,
+        max_total_chars=max(0, effective_cap),
     )
+
+
+@dataclass(frozen=True)
+class RefinementPromptBudget:
+    system_chars: int
+    user_prompt_chars: int
+    total_prompt_chars: int
+    evidence_total_count: int
+    evidence_candidate_count: int
+    evidence_used_count: int
+    evidence_used_chars: int
+    output_max_tokens: int
+
+
+def prepare_refinement_request(
+    *,
+    input_text: str,
+    base_draft: dict[str, Any],
+    base_provenance: dict[str, Any] | None,
+    user_edited_fields: list[str],
+    evidence_rows: list[WebEvidence],
+    settings: Settings | None = None,
+) -> tuple[EvidenceRefinementRequest, RefinementPromptBudget]:
+    """Build budgeted refinement request; evidence subset matches LLM payload."""
+    cfg = settings or get_settings()
+    max_prompt_chars = cfg.web_research_refine_max_prompt_chars
+
+    empty_request = EvidenceRefinementRequest(
+        input_text=input_text,
+        base_draft=base_draft,
+        base_provenance=base_provenance or {},
+        user_edited_fields=user_edited_fields,
+        evidence=[],
+    )
+    system_chars, fixed_user_chars, fixed_total = research_prompt_char_counts(empty_request)
+    if fixed_total > max_prompt_chars:
+        raise LlmResearchRefineInputTooLargeError()
+
+    available_evidence_chars = max_prompt_chars - system_chars - fixed_user_chars
+    evidence_budget = min(cfg.web_research_refine_max_evidence_chars, available_evidence_chars)
+
+    ordered = sorted(evidence_rows, key=lambda row: row.rank)
+    evidence_candidate_count = min(len(ordered), cfg.web_research_refine_max_evidence_items)
+    evidence_inputs = build_refinement_evidence_inputs(
+        evidence_rows,
+        cfg,
+        max_total_chars=evidence_budget,
+    )
+
+    request = EvidenceRefinementRequest(
+        input_text=input_text,
+        base_draft=base_draft,
+        base_provenance=base_provenance or {},
+        user_edited_fields=user_edited_fields,
+        evidence=evidence_inputs,
+    )
+    system_chars, user_prompt_chars, total_prompt_chars = research_prompt_char_counts(request)
+    if total_prompt_chars > max_prompt_chars:
+        raise LlmResearchRefineInputTooLargeError()
+
+    budget = RefinementPromptBudget(
+        system_chars=system_chars,
+        user_prompt_chars=user_prompt_chars,
+        total_prompt_chars=total_prompt_chars,
+        evidence_total_count=len(evidence_rows),
+        evidence_candidate_count=evidence_candidate_count,
+        evidence_used_count=len(evidence_inputs),
+        evidence_used_chars=refinement_evidence_serialized_chars(evidence_inputs),
+        output_max_tokens=cfg.web_research_refine_max_tokens,
+    )
+    return request, budget

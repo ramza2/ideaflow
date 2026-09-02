@@ -1184,19 +1184,23 @@ export function AIReviewPage() {
           )}
         </div>
         <div className="ml-auto flex items-center gap-2 flex-wrap">
-          <Button
-            variant="ghost"
-            icon={<RefreshCw className="w-3.5 h-3.5" />}
-            disabled={regenerating || researchInProgress || dirty}
+          <span
+            className="inline-flex"
             title={
               dirty
                 ? "변경사항을 임시 저장한 후 다시 생성할 수 있습니다."
                 : undefined
             }
-            onClick={() => setShowRegenerateModal(true)}
           >
-            전체 다시 생성
-          </Button>
+            <Button
+              variant="ghost"
+              icon={<RefreshCw className="w-3.5 h-3.5" />}
+              disabled={regenerating || researchInProgress || dirty}
+              onClick={() => setShowRegenerateModal(true)}
+            >
+              전체 다시 생성
+            </Button>
+          </span>
           <Button
             variant="secondary"
             icon={<Pencil className="w-3.5 h-3.5" />}
