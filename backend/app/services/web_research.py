@@ -597,4 +597,111 @@ def update_evidence_related_fields(
     rows = list(db.scalars(select(WebEvidence).where(WebEvidence.research_run_id == run_id)))
     for ev in rows:
         ev.related_fields = field_to_ids.get(str(ev.id), [])
+
+
+def _clean_refinement_text(text: str | None, *, max_len: int) -> str | None:
+    if text is None:
+        return None
+    cleaned = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\t").strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_len]
+
+
+def refinement_evidence_serialized_chars(evidence: list[EvidenceInput]) -> int:
+    import json
+
+    total = 0
+    for ev in evidence:
+        total += len(
+            json.dumps(
+                {
+                    "evidence_id": str(ev.evidence_id),
+                    "title": ev.title,
+                    "source": ev.source,
+                    "published_at": ev.published_at,
+                    "snippet": ev.snippet,
+                },
+                ensure_ascii=False,
+            )
+        )
+    return total
+
+
+def _apply_refinement_evidence_char_budget(
+    inputs: list[EvidenceInput],
+    *,
+    max_total_chars: int,
+) -> list[EvidenceInput]:
+    if not inputs:
+        return inputs
+
+    result = list(inputs)
+    while result:
+        if refinement_evidence_serialized_chars(result) <= max_total_chars:
+            return result
+
+        last = result[-1]
+        if last.snippet:
+            snippet = last.snippet
+            while snippet:
+                snippet = snippet[: max(0, len(snippet) - max(1, len(snippet) // 10 or 1))]
+                trimmed = EvidenceInput(
+                    evidence_id=last.evidence_id,
+                    title=last.title,
+                    source=last.source,
+                    published_at=last.published_at,
+                    snippet=snippet or None,
+                )
+                trial = result[:-1] + [trimmed]
+                if refinement_evidence_serialized_chars(trial) <= max_total_chars:
+                    return trial
+            trimmed = EvidenceInput(
+                evidence_id=last.evidence_id,
+                title=last.title,
+                source=last.source,
+                published_at=last.published_at,
+                snippet=None,
+            )
+            trial = result[:-1] + [trimmed]
+            if refinement_evidence_serialized_chars(trial) <= max_total_chars:
+                return trial
+        result.pop()
+
+    return []
+
+
+def build_refinement_evidence_inputs(
+    evidence_rows: list[WebEvidence],
+    settings: Settings | None = None,
+) -> list[EvidenceInput]:
+    """Select and trim WebEvidence for LLM refinement only (DB rows unchanged)."""
+    cfg = settings or get_settings()
+    max_items = cfg.web_research_refine_max_evidence_items
+    max_snippet = cfg.web_research_refine_max_snippet_chars
+    max_total_chars = cfg.web_research_refine_max_evidence_chars
+
+    ordered = sorted(evidence_rows, key=lambda row: row.rank)
+    inputs: list[EvidenceInput] = []
+    for row in ordered[:max_items]:
+        title = _clean_refinement_text(row.title, max_len=200) or ""
+        if not title:
+            fallback = row.domain or domain_from_url(row.url) or row.url
+            title = _clean_refinement_text(fallback, max_len=200) or "Untitled"
+        snippet = _clean_refinement_text(row.snippet, max_len=max_snippet)
+        published = row.published_at.isoformat() if row.published_at else None
+        inputs.append(
+            EvidenceInput(
+                evidence_id=row.id,
+                title=title,
+                source=row.source_name,
+                published_at=published,
+                snippet=snippet,
+            )
+        )
+
+    return _apply_refinement_evidence_char_budget(
+        inputs,
+        max_total_chars=max_total_chars,
+    )
     db.flush()

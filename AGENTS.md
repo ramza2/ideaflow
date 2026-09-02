@@ -34,7 +34,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Admin (Step 11): `SystemSetting` (4 known boolean keys), `/api/v1/admin/*` (SYSTEM_ADMIN + password changed), user management, integration config read + LLM/web-search diagnostic tests. Connection secrets stay in ENV only (`api_key_configured` bool in API). Global LLM/web-search policy enforced in AI/research services; workspace responses include `effective_allow_*`.
 - Semantic search (Step 13): pgvector + `IdeaEmbedding` / `IdeaEmbeddingJob`; `search_mode=keyword|semantic|hybrid` on idea list. Default `EMBEDDING_ENABLED=false`.
 - Validation (Step 14): `IdeaValidation` manual workflow under Idea Detail; ACL inherits parent Idea; start may move `validation_candidate` → `validating`; complete does **not** auto-promote to `execution_candidate`.
-- Web Search provider (Step 15): production supports Tavily Search API (`WEB_SEARCH_PROVIDER=tavily`); `http_json` remains for generic/custom endpoints.
+- Web Search provider (Step 15): production supports Tavily Search API (`WEB_SEARCH_PROVIDER=tavily`); `http_json` remains for generic/custom endpoints. Refinement uses `WEB_RESEARCH_REFINE_*` budgets so all stored evidence is kept while LLM input stays bounded.
 - Migrations (PostgreSQL required):
 
 ```text

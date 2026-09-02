@@ -22,7 +22,6 @@ from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
 from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
 from app.llm.research_schemas import (
-    EvidenceInput,
     RESEARCH_REFINABLE_FIELDS,
     merge_refinement_provenance,
     validate_refinement_result,
@@ -532,16 +531,15 @@ def process_web_research_job(
             .order_by(WebEvidence.rank.asc())
         )
     )
-    evidence_inputs = [
-        EvidenceInput(
-            evidence_id=ev.id,
-            title=ev.title,
-            source=ev.source_name,
-            published_at=ev.published_at.isoformat() if ev.published_at else None,
-            snippet=ev.snippet,
-        )
-        for ev in evidence_db
-    ]
+    evidence_inputs = web_research_service.build_refinement_evidence_inputs(evidence_db, cfg)
+    evidence_used_chars = web_research_service.refinement_evidence_serialized_chars(evidence_inputs)
+    logger.info(
+        "research_refine_evidence_budget run_id=%s evidence_total_count=%s evidence_used_count=%s evidence_used_chars=%s",
+        run_id,
+        len(evidence_db),
+        len(evidence_inputs),
+        evidence_used_chars,
+    )
 
     from app.llm.research_schemas import EvidenceRefinementRequest
 
@@ -557,7 +555,7 @@ def process_web_research_job(
     refine_result = None
     try:
         refine_result = provider.refine_idea_with_evidence(refine_request)
-        valid_ids = {str(ev.id) for ev in evidence_db}
+        valid_ids = {str(ev.evidence_id) for ev in evidence_inputs}
         refine_result = validate_refinement_result(
             refine_result,
             base_draft=base_draft,

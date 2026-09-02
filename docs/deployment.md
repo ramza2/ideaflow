@@ -584,6 +584,16 @@ Expected when configured: `provider: tavily`, `status: ok`, `HTTP: 200`, `latenc
 
 Keep `.env` permissions restrictive (e.g. `chmod 600 .env`). Do not echo API keys into shell history.
 
+### LLM refinement evidence budget
+
+Web Research stores all search evidence in the database and UI, but the LLM refinement step sends only a bounded subset to protect context limits on any OpenAI-compatible model. Tune with:
+
+- `WEB_RESEARCH_REFINE_MAX_EVIDENCE_ITEMS` (default `6`)
+- `WEB_RESEARCH_REFINE_MAX_SNIPPET_CHARS` (default `600`)
+- `WEB_RESEARCH_REFINE_MAX_EVIDENCE_CHARS` (default `4000`)
+
+These settings do not reduce stored `WebEvidence` rows or search result counts.
+
 ## Pre-merge Docker smoke checklist
 
 ### Direct mode

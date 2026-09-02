@@ -22,7 +22,7 @@ IdeaFlow/
 - Step 12: Docker Compose 배포 패키징 (`compose.yaml`, Nginx SPA + API proxy, `scripts/deploy.sh`).
 - Step 13: pgvector semantic / hybrid idea search + BGE-M3-compatible embedding provider (`EMBEDDING_*`, default disabled).
 - Step 14: Idea Validation workflow (DRAFT→READY→RUNNING→COMPLETED/CANCELLED). Idea Detail **검증** 탭. ACL은 parent Idea. Start 시 `validation_candidate`→`validating`만 자동 이동.
-- Step 15: Tavily Web Search Provider (`WEB_SEARCH_PROVIDER=tavily`). Step 9 approval workflow 유지; production 외부 검색 연결.
+- Step 15: Tavily Web Search Provider (`WEB_SEARCH_PROVIDER=tavily`). Step 9 approval workflow 유지; production 외부 검색 연결. Refinement는 `WEB_RESEARCH_REFINE_*`로 LLM 입력만 제한(저장 Evidence는 전량 유지).
 
 ## Docker Compose 배포
 

@@ -99,6 +99,15 @@ class Settings(BaseSettings):
         default=5, alias="WEB_SEARCH_MAX_RESULTS_PER_QUERY"
     )
     web_search_max_total_results: int = Field(default=20, alias="WEB_SEARCH_MAX_TOTAL_RESULTS")
+    web_research_refine_max_evidence_items: int = Field(
+        default=6, alias="WEB_RESEARCH_REFINE_MAX_EVIDENCE_ITEMS"
+    )
+    web_research_refine_max_snippet_chars: int = Field(
+        default=600, alias="WEB_RESEARCH_REFINE_MAX_SNIPPET_CHARS"
+    )
+    web_research_refine_max_evidence_chars: int = Field(
+        default=4000, alias="WEB_RESEARCH_REFINE_MAX_EVIDENCE_CHARS"
+    )
 
     # Embeddings (Step 13 — separate from LLM)
     embedding_enabled: bool = Field(default=False, alias="EMBEDDING_ENABLED")
@@ -177,6 +186,9 @@ class Settings(BaseSettings):
         "web_search_max_queries",
         "web_search_max_results_per_query",
         "web_search_max_total_results",
+        "web_research_refine_max_evidence_items",
+        "web_research_refine_max_snippet_chars",
+        "web_research_refine_max_evidence_chars",
         "embedding_job_lease_seconds",
         "embedding_job_max_attempts",
         "embedding_max_input_chars",
