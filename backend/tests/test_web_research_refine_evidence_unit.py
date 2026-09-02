@@ -152,3 +152,39 @@ def test_empty_snippet_keeps_title_metadata() -> None:
     assert len(inputs) == 1
     assert inputs[0].title == "Only Title"
     assert inputs[0].snippet is None
+
+
+def test_update_evidence_related_fields_flushes() -> None:
+    from unittest.mock import MagicMock
+
+    from app.services import web_research as web_research_service
+
+    ev_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    row = WebEvidence(
+        id=ev_id,
+        research_run_id=run_id,
+        query="q",
+        title="T",
+        url="https://example.com/1",
+        url_hash="hash",
+        domain="example.com",
+        source_name=None,
+        snippet=None,
+        published_at=None,
+        fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        rank=0,
+        provider="tavily",
+        related_fields=[],
+    )
+    db = MagicMock()
+    db.scalars.return_value = [row]
+
+    web_research_service.update_evidence_related_fields(
+        db,
+        run_id=run_id,
+        evidence_links={"background": [str(ev_id)]},
+    )
+
+    assert row.related_fields == ["background"]
+    db.flush.assert_called_once()

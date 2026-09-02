@@ -597,6 +597,7 @@ def update_evidence_related_fields(
     rows = list(db.scalars(select(WebEvidence).where(WebEvidence.research_run_id == run_id)))
     for ev in rows:
         ev.related_fields = field_to_ids.get(str(ev.id), [])
+    db.flush()
 
 
 def _clean_refinement_text(text: str | None, *, max_len: int) -> str | None:
@@ -704,4 +705,3 @@ def build_refinement_evidence_inputs(
         inputs,
         max_total_chars=max_total_chars,
     )
-    db.flush()
