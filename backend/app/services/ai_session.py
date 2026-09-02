@@ -402,14 +402,11 @@ def _apply_edited_fields_provenance(
         if field not in _DRAFT_COMPARE_FIELDS and field != "tags":
             continue
         prev = result.get(field) if isinstance(result.get(field), dict) else {}
-        if prev.get("source") == FieldProvenanceSource.USER_EDIT.value:
-            original_source = prev.get("original_source") or prev.get("source")
-        else:
-            original_source = (
-                prev.get("final_source")
-                or prev.get("source")
-                or prev.get("original_source")
-            )
+        original_source = (
+            prev.get("original_source")
+            or prev.get("source")
+            or prev.get("final_source")
+        )
         entry: dict[str, Any] = {
             "original_source": original_source,
             "final_source": FieldProvenanceSource.USER_EDIT.value,

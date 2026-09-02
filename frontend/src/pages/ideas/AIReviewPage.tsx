@@ -1187,7 +1187,12 @@ export function AIReviewPage() {
           <Button
             variant="ghost"
             icon={<RefreshCw className="w-3.5 h-3.5" />}
-            disabled={regenerating || researchInProgress}
+            disabled={regenerating || researchInProgress || dirty}
+            title={
+              dirty
+                ? "변경사항을 임시 저장한 후 다시 생성할 수 있습니다."
+                : undefined
+            }
             onClick={() => setShowRegenerateModal(true)}
           >
             전체 다시 생성

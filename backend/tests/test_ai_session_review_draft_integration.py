@@ -404,8 +404,46 @@ def test_review_draft_preserves_web_evidence_provenance(
     assert r.status_code == 200, r.text
     prov = r.json()["field_provenance"]["background"]
     assert prov["source"] == "USER_EDIT"
-    assert prov["original_source"] == "WEB_EVIDENCE"
+    assert prov["original_source"] == "LLM_SUMMARY"
     assert prov["evidence_ids"]
+
+
+def test_review_draft_repeated_user_edit_preserves_original_source(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+
+    session = db.get(IdeaAiSession, session_id)
+    session.field_provenance = {
+        "background": {
+            "source": "WEB_EVIDENCE",
+            "original_source": "LLM_SUMMARY",
+            "final_source": "WEB_EVIDENCE",
+            "evidence_ids": [str(uuid.uuid4())],
+            "note": "evidence",
+        }
+    }
+    db.commit()
+
+    payload = _draft_payload()
+    payload["review_state"]["edited_fields"] = ["background"]
+    r1 = _save_draft(client, ws, session_id, payload)
+    assert r1.status_code == 200, r1.text
+    prov1 = r1.json()["field_provenance"]["background"]
+    assert prov1["source"] == "USER_EDIT"
+    assert prov1["original_source"] == "LLM_SUMMARY"
+
+    payload["draft"]["background"] = "다시 수정한 배경"
+    r2 = _save_draft(client, ws, session_id, payload)
+    assert r2.status_code == 200, r2.text
+    prov2 = r2.json()["field_provenance"]["background"]
+    assert prov2["source"] == "USER_EDIT"
+    assert prov2["original_source"] == "LLM_SUMMARY"
+    assert prov2["evidence_ids"] == prov1["evidence_ids"]
 
 
 def test_review_draft_requester_only_acl(
