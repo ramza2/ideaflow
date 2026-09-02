@@ -1138,3 +1138,65 @@ def test_preview_draft_sanitizes_unknown_keys(
     run = db.get(WebResearchRun, run_id)
     assert run.base_draft_payload == {"title": "AI Draft", "background": "A"}
     assert run.user_edited_fields == ["title"]
+
+
+def test_refine_passes_budgeted_evidence_to_llm(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEB_SEARCH_MAX_TOTAL_RESULTS", "10")
+    monkeypatch.setenv("WEB_SEARCH_MAX_RESULTS_PER_QUERY", "10")
+    monkeypatch.setenv("WEB_RESEARCH_REFINE_MAX_EVIDENCE_ITEMS", "4")
+    monkeypatch.setenv("WEB_RESEARCH_REFINE_MAX_SNIPPET_CHARS", "200")
+    monkeypatch.setenv("WEB_RESEARCH_REFINE_MAX_EVIDENCE_CHARS", "1500")
+    get_settings.cache_clear()
+
+    class ManyResultSearchProvider:
+        provider_name = "many_fake"
+
+        def search(self, *, query: str, max_results: int) -> list[WebSearchResult]:
+            return [
+                WebSearchResult(
+                    title=f"Title {i}",
+                    url=f"https://example.com/{i}",
+                    snippet="snippet-" + ("x" * 300),
+                    source="Example",
+                )
+                for i in range(max_results)
+            ]
+
+        def close(self) -> None:
+            pass
+
+    captured: dict[str, Any] = {}
+
+    class CaptureRefine(FakeProvider):
+        def refine_idea_with_evidence(self, request):
+            captured["evidence_count"] = len(request.evidence)
+            captured["max_snippet_len"] = max(len(ev.snippet or "") for ev in request.evidence)
+            ev_id = str(request.evidence[0].evidence_id)
+            return _refine_result(ev_id)
+
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    session_id = _ready_session(client, db, session_factory, ws, owner, pw)
+    _login(client, owner.email, pw)
+    run_id = _preview_and_approve(client, ws, session_id)
+
+    search = ManyResultSearchProvider()
+    llm = CaptureRefine()
+    assert _run_research_worker_once(
+        db, session_factory, run_id, provider=llm, search_provider=search
+    )
+
+    db.expire_all()
+    stored_count = db.scalar(
+        select(func.count()).select_from(WebEvidence).where(WebEvidence.research_run_id == run_id)
+    )
+    run = db.get(WebResearchRun, run_id)
+    assert stored_count == 10
+    assert run.result_count == 10
+    assert captured["evidence_count"] <= 4
+    assert captured["max_snippet_len"] <= 200
