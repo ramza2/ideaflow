@@ -594,6 +594,11 @@ Web Research stores all search evidence in the database and UI, but the LLM refi
 - `WEB_RESEARCH_REFINE_MAX_PROMPT_CHARS` (default `6000`) — total system+user prompt text char budget for refinement
 - `WEB_RESEARCH_REFINE_MAX_TOKENS` (default `1200`) — refinement output token cap (structuring still uses `LLM_MAX_TOKENS`)
 
+Registered Idea AI refine (Step 17) uses separate budgets:
+
+- `AI_REFINE_MAX_PROMPT_CHARS` (default `5500`) — total prompt char budget for `REFINE_IDEA`
+- `AI_REFINE_MAX_TOKENS` (default `1600`) — refine output token cap
+
 These settings do not reduce stored `WebEvidence` rows or search result counts.
 
 ## Pre-merge Docker smoke checklist

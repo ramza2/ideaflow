@@ -13,11 +13,16 @@ import {
   Loader2,
 } from "lucide-react";
 import { Button } from "../../components/common/Button";
-import { SourceBadge } from "../../components/common/Badge";
+import { Badge, SourceBadge } from "../../components/common/Badge";
 import { Select } from "../../components/common/Input";
 import { ProgressStepper, InlineAlert } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
-import { confirmAiSession, regenerateAiSession, saveAiReviewDraft } from "../../api/aiSessions";
+import {
+  applyAiRefinement,
+  confirmAiSession,
+  regenerateAiSession,
+  saveAiReviewDraft,
+} from "../../api/aiSessions";
 import {
   approveWebResearch,
   cancelWebResearch,
@@ -34,12 +39,18 @@ import {
   useAiSession,
 } from "../../ai/useAiSession";
 import { WebSearchApprovalPanel } from "../../components/ai/WebSearchApprovalPanel";
+import {
+  REFINE_STEPPER_STEPS,
+  refineDirectionLabel,
+} from "../../utils/refineDirection";
 import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import type {
   AiDraft,
   AiFieldProvenance,
+  AiRefineApplyRequest,
   AiSessionConfirmRequest,
   AiSessionReviewDraftSaveRequest,
+  AiSourceIdeaSnapshot,
   CategoryPublic,
   IdeaFeasibility,
   IdeaPriority,
@@ -60,6 +71,10 @@ interface EditableField {
   value: string;
   source: SourceBadgeType | null;
   multiline?: boolean;
+  /** REFINE only: differs from the source Idea snapshot. */
+  changed?: boolean;
+  /** REFINE only: value of the same field on the source Idea. */
+  originalValue?: string;
 }
 
 const TEXT_FIELDS: { key: keyof AiDraft; label: string; section: "basic" | "content" }[] = [
@@ -85,6 +100,38 @@ function draftValue(draft: AiDraft | null, key: keyof AiDraft): string {
   return String(v);
 }
 
+/** Fields the backend compares when deciding whether a refinement changes its source Idea. */
+const REFINE_COMPARE_FIELDS: (keyof AiDraft)[] = [
+  ...TEXT_FIELDS.map((f) => f.key),
+  "category_slug",
+  "priority",
+  "feasibility",
+  "tags",
+];
+
+function normalizeForCompare(value: unknown): string {
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    const items = Array.from(
+      new Set(value.map((v) => String(v).trim()).filter(Boolean)),
+    );
+    items.sort();
+    return items.join("\u0000");
+  }
+  return String(value).trim();
+}
+
+function snapshotValue(
+  snapshot: AiSourceIdeaSnapshot | null,
+  key: keyof AiDraft,
+): string {
+  if (!snapshot) return "";
+  const v = snapshot[key];
+  if (v == null) return "";
+  if (Array.isArray(v)) return v.join(", ");
+  return String(v);
+}
+
 function provenanceFor(
   fieldProvenance: Record<string, AiFieldProvenance> | null | undefined,
   key: string,
@@ -99,7 +146,7 @@ function provenanceFor(
 
 export function AIReviewPage() {
   const navigate = useNavigate();
-  const { workspaceId = "", sessionId = "" } = useParams();
+  const { workspaceId = "", sessionId = "", ideaId } = useParams();
   const [searchParams] = useSearchParams();
   const initialVisibility = parseVisibilityParam(searchParams.get("visibility"));
   const { user } = useAuth();
@@ -108,6 +155,18 @@ export function AIReviewPage() {
   const { session, loading, error, refresh } = useAiSession(workspaceId, sessionId, {
     pollWhenProcessing: false,
   });
+
+  // ideaId is only present on the REFINE routes; fall back to it while the session loads.
+  const isRefine = session ? session.purpose === "REFINE" : Boolean(ideaId);
+  const sourceIdeaId = session?.source_idea_id ?? ideaId ?? "";
+  const sourceSnapshot = isRefine ? (session?.source_idea_snapshot ?? null) : null;
+  const directionLabel = refineDirectionLabel(session?.refine_direction);
+  const ideaPath = sourceIdeaId
+    ? `/w/${workspaceId}/ideas/${sourceIdeaId}`
+    : `/w/${workspaceId}/ideas`;
+  const analyzingPath = isRefine
+    ? `/w/${workspaceId}/ideas/${sourceIdeaId}/ai/refine/${sessionId}/analyzing`
+    : `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}`;
 
   const {
     run: researchRun,
@@ -147,6 +206,8 @@ export function AIReviewPage() {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [sourceChangedMessage, setSourceChangedMessage] = useState<string | null>(null);
+  const [expandedOriginalKeys, setExpandedOriginalKeys] = useState<Set<string>>(new Set());
 
   const [dirty, setDirty] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -177,6 +238,10 @@ export function AIReviewPage() {
       session.status === "NEEDS_CLARIFICATION" ||
       session.status === "FAILED"
     ) {
+      if (session.purpose === "REFINE") {
+        navigate(analyzingPath, { replace: true });
+        return;
+      }
       const vis = searchParams.get("visibility");
       const q = vis ? `?visibility=${vis}` : `?visibility=${initialVisibility}`;
       navigate(`/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}${q}`, {
@@ -190,6 +255,7 @@ export function AIReviewPage() {
     navigate,
     searchParams,
     initialVisibility,
+    analyzingPath,
   ]);
 
   useEffect(() => {
@@ -337,6 +403,45 @@ export function AIReviewPage() {
     [members, user?.id],
   );
 
+  const currentCategorySlug = useMemo(
+    () => categories.find((c) => c.id === categoryId)?.slug ?? null,
+    [categories, categoryId],
+  );
+
+  /** REFINE only: fields whose reviewed value differs from the source Idea snapshot. */
+  const changedKeys = useMemo(() => {
+    const out = new Set<string>();
+    if (!isRefine || !sourceSnapshot) return out;
+    const current: Record<string, unknown> = {
+      ...(draft ?? {}),
+      category_slug: currentCategorySlug,
+      priority,
+      feasibility,
+      tags: tagsText
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    };
+    for (const key of REFINE_COMPARE_FIELDS) {
+      if (
+        normalizeForCompare(current[key]) !== normalizeForCompare(sourceSnapshot[key])
+      ) {
+        out.add(key);
+      }
+    }
+    return out;
+  }, [
+    isRefine,
+    sourceSnapshot,
+    draft,
+    currentCategorySlug,
+    priority,
+    feasibility,
+    tagsText,
+  ]);
+
+  const hasRefineChanges = changedKeys.size > 0;
+
   const basicFields: EditableField[] = useMemo(() => {
     const fields: EditableField[] = TEXT_FIELDS.filter((f) => f.section === "basic").map(
       (f) => ({
@@ -345,6 +450,8 @@ export function AIReviewPage() {
         value: draftValue(draft, f.key),
         source: provenanceFor(session?.field_provenance, f.key, editedKeys),
         multiline: f.key !== "title",
+        changed: changedKeys.has(f.key),
+        originalValue: sourceSnapshot ? snapshotValue(sourceSnapshot, f.key) : undefined,
       }),
     );
     fields.push({
@@ -354,9 +461,18 @@ export function AIReviewPage() {
       source: editedKeys.has("tags")
         ? "user_edited"
         : provenanceFor(session?.field_provenance, "tags", editedKeys),
+      changed: changedKeys.has("tags"),
+      originalValue: sourceSnapshot ? snapshotValue(sourceSnapshot, "tags") : undefined,
     });
     return fields;
-  }, [draft, tagsText, session?.field_provenance, editedKeys]);
+  }, [
+    draft,
+    tagsText,
+    session?.field_provenance,
+    editedKeys,
+    changedKeys,
+    sourceSnapshot,
+  ]);
 
   const contentFields: EditableField[] = useMemo(
     () =>
@@ -366,8 +482,10 @@ export function AIReviewPage() {
         value: draftValue(draft, f.key) || "정보 없음",
         source: provenanceFor(session?.field_provenance, f.key, editedKeys),
         multiline: true,
+        changed: changedKeys.has(f.key),
+        originalValue: sourceSnapshot ? snapshotValue(sourceSnapshot, f.key) : undefined,
       })),
-    [draft, session?.field_provenance, editedKeys],
+    [draft, session?.field_provenance, editedKeys, changedKeys, sourceSnapshot],
   );
 
   const titleOk = (draft?.title ?? "").trim().length > 0;
@@ -441,15 +559,29 @@ export function AIReviewPage() {
   async function handleRegenerate() {
     if (!workspaceId || !sessionId || regenerating) return;
     setRegenerating(true);
+    setSourceChangedMessage(null);
     try {
       const result = await regenerateAiSession(workspaceId, sessionId);
       setShowRegenerateModal(false);
+      if (isRefine) {
+        const sid = result.session.source_idea_id ?? sourceIdeaId;
+        navigate(`/w/${workspaceId}/ideas/${sid}/ai/refine/${result.session.id}/analyzing`);
+        return;
+      }
       const vis = searchParams.get("visibility") ?? visibility;
       navigate(
         `/w/${workspaceId}/ideas/new/ai/analyzing/${result.session.id}?visibility=${vis}`,
       );
     } catch (err) {
-      if (err instanceof ApiError && err.code === "AI_REGENERATE_RESEARCH_ACTIVE") {
+      if (err instanceof ApiError && err.code === "AI_REFINE_SOURCE_CHANGED") {
+        setShowRegenerateModal(false);
+        setSourceChangedMessage(
+          apiErrorMessage(
+            err,
+            "아이디어가 AI 발전 작업 중 수정되었습니다. 최신 내용을 기준으로 다시 시작해 주세요.",
+          ),
+        );
+      } else if (err instanceof ApiError && err.code === "AI_REGENERATE_RESEARCH_ACTIVE") {
         toast.error("진행 중인 웹 조사를 완료하거나 취소한 후 다시 생성해 주세요.");
       } else {
         toast.error(apiErrorMessage(err, "전체 다시 생성에 실패했습니다."));
@@ -503,14 +635,22 @@ export function AIReviewPage() {
 
   function handleRegister() {
     if (researchInProgress) {
-      toast.warning("웹 조사 완료 후 등록할 수 있습니다.");
+      toast.warning(
+        isRefine
+          ? "웹 조사 완료 후 반영할 수 있습니다."
+          : "웹 조사 완료 후 등록할 수 있습니다.",
+      );
       return;
     }
     if (!titleOk) {
       toast.error("아이디어명을 입력해 주세요.");
       return;
     }
-    if (visibility === "SELECTED_USERS" && shares.length === 0) {
+    if (isRefine && !hasRefineChanges) {
+      toast.info("변경된 내용이 없습니다.");
+      return;
+    }
+    if (!isRefine && visibility === "SELECTED_USERS" && shares.length === 0) {
       toast.error(
         "지정 사용자 공유에는 최소 1명의 공유 대상이 필요합니다. 비공개 또는 작업공간 공유를 선택해 주세요.",
       );
@@ -522,13 +662,41 @@ export function AIReviewPage() {
 
   async function confirmRegister() {
     if (!workspaceId || !sessionId || isConfirming || !titleOk) return;
+    if (isRefine && !hasRefineChanges) return;
     setIsConfirming(true);
     setConfirmError(null);
+    setSourceChangedMessage(null);
     try {
       const tags = tagsText
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
+
+      if (isRefine) {
+        const payload: AiRefineApplyRequest = {
+          title: (draft?.title ?? "").trim(),
+          one_line_definition: emptyToNull(draft?.one_line_definition),
+          background: emptyToNull(draft?.background),
+          problem: emptyToNull(draft?.problem),
+          core_concept: emptyToNull(draft?.core_concept),
+          major_features: emptyToNull(draft?.major_features),
+          expected_effect: emptyToNull(draft?.expected_effect),
+          target_users: emptyToNull(draft?.target_users),
+          scenarios: emptyToNull(draft?.scenarios),
+          challenges: emptyToNull(draft?.challenges),
+          minimum_validation: emptyToNull(draft?.minimum_validation),
+          related_project: emptyToNull(draft?.related_project),
+          category_id: categoryId || null,
+          priority,
+          feasibility,
+          tags,
+        };
+        const result = await applyAiRefinement(workspaceId, sessionId, payload);
+        setShowConfirmModal(false);
+        toast.success("AI 발전안을 아이디어에 반영했습니다.", result.idea.title);
+        navigate(`/w/${workspaceId}/ideas/${result.idea.id}`);
+        return;
+      }
 
       const payload: AiSessionConfirmRequest = {
         title: (draft?.title ?? "").trim(),
@@ -562,18 +730,35 @@ export function AIReviewPage() {
       );
       navigate(`/w/${workspaceId}/ideas/${result.idea.id}`);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.code === "AI_REFINE_SOURCE_CHANGED") {
+        setShowConfirmModal(false);
+        setSourceChangedMessage(
+          apiErrorMessage(
+            err,
+            "아이디어가 AI 발전 작업 중 수정되었습니다. 최신 내용을 기준으로 다시 시작해 주세요.",
+          ),
+        );
+      } else if (err instanceof ApiError && err.code === "AI_REFINE_NO_CHANGES") {
+        setConfirmError(apiErrorMessage(err, "변경된 내용이 없습니다."));
+      } else if (err instanceof ApiError && err.status === 409) {
         setConfirmError(
           apiErrorMessage(
             err,
-            "이 AI 작업을 등록할 수 없는 상태입니다. 세션을 다시 확인해 주세요.",
+            isRefine
+              ? "이 AI 발전안을 반영할 수 없는 상태입니다. 세션을 다시 확인해 주세요."
+              : "이 AI 작업을 등록할 수 없는 상태입니다. 세션을 다시 확인해 주세요.",
           ),
         );
         await refresh();
       } else if (err instanceof ApiError && err.status === 422) {
         setConfirmError(apiErrorMessage(err, "입력값을 확인해 주세요."));
       } else {
-        setConfirmError(apiErrorMessage(err, "아이디어 등록에 실패했습니다."));
+        setConfirmError(
+          apiErrorMessage(
+            err,
+            isRefine ? "아이디어 반영에 실패했습니다." : "아이디어 등록에 실패했습니다.",
+          ),
+        );
       }
     } finally {
       setIsConfirming(false);
@@ -691,7 +876,7 @@ export function AIReviewPage() {
       <div className="min-h-full flex items-center justify-center px-4 py-12">
         <div className="flex items-center gap-2 text-sm text-[#6b6b80]">
           <Loader2 className="w-4 h-4 animate-spin" />
-          AI 초안을 불러오는 중...
+          {isRefine ? "AI 발전안을 불러오는 중..." : "AI 초안을 불러오는 중..."}
         </div>
       </div>
     );
@@ -701,19 +886,28 @@ export function AIReviewPage() {
     return (
       <div className="min-h-full flex items-center justify-center px-4 py-12">
         <div className="w-full max-w-lg space-y-4">
-          <InlineAlert type="warning" title="AI 초안을 불러올 수 없습니다">
+          <InlineAlert
+            type="warning"
+            title={isRefine ? "AI 발전안을 불러올 수 없습니다" : "AI 초안을 불러올 수 없습니다"}
+          >
             {error ?? "존재하지 않거나 접근할 수 없는 AI 작업입니다."}
           </InlineAlert>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => void refresh()}>
               다시 확인
             </Button>
-            <Button
-              variant="primary"
-              onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
-            >
-              새 AI 작업 시작
-            </Button>
+            {isRefine ? (
+              <Button variant="primary" onClick={() => navigate(ideaPath)}>
+                아이디어로 돌아가기
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+              >
+                새 AI 작업 시작
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -727,12 +921,18 @@ export function AIReviewPage() {
           <InlineAlert type="warning" title="취소된 AI 작업">
             이 AI 작업은 취소되었습니다.
           </InlineAlert>
-          <Button
-            variant="primary"
-            onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
-          >
-            새 Session 시작
-          </Button>
+          {isRefine ? (
+            <Button variant="primary" onClick={() => navigate(ideaPath)}>
+              아이디어로 돌아가기
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+            >
+              새 Session 시작
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -757,18 +957,44 @@ export function AIReviewPage() {
       <div className="px-4 sm:px-8 py-4 bg-white border-b border-[rgba(0,0,0,0.06)]">
         <div className="flex items-center justify-between mb-3">
           <ProgressStepper
-            steps={["아이디어 입력", "AI 분석", "초안 검토", "등록 완료"]}
+            steps={
+              isRefine
+                ? REFINE_STEPPER_STEPS
+                : ["아이디어 입력", "AI 분석", "초안 검토", "등록 완료"]
+            }
             current={2}
           />
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-lg font-bold text-[#111118]">AI 등록 초안 검토</h1>
+            <h1 className="text-lg font-bold text-[#111118]">
+              {isRefine ? "AI 발전안 검토" : "AI 등록 초안 검토"}
+            </h1>
             <p className="text-sm text-[#6b6b80]">
-              AI가 정리한 내용을 확인하고 필요한 경우 수정하세요.
+              {isRefine
+                ? "AI가 제안한 변경사항을 확인하고 필요한 경우 수정하세요."
+                : "AI가 정리한 내용을 확인하고 필요한 경우 수정하세요."}
             </p>
+            {isRefine && directionLabel && (
+              <p className="text-xs text-[#7c3aed] mt-1">발전 방향: {directionLabel}</p>
+            )}
           </div>
         </div>
+        {sourceChangedMessage && (
+          <div className="mt-3">
+            <InlineAlert type="warning" title="원본 아이디어가 변경되었습니다">
+              <div className="space-y-2">
+                <p>{sourceChangedMessage}</p>
+                <Button variant="secondary" size="sm" onClick={() => navigate(ideaPath)}>
+                  아이디어로 돌아가기
+                </Button>
+              </div>
+            </InlineAlert>
+          </div>
+        )}
+        {isRefine && !hasRefineChanges && (
+          <p className="text-xs text-[#b45309] mt-2">변경된 내용이 없습니다.</p>
+        )}
       </div>
 
       <div className="flex flex-1 overflow-hidden">
@@ -823,6 +1049,16 @@ export function AIReviewPage() {
             onEditChange={setEditValue}
             onCancelEdit={() => setEditingKey(null)}
             alwaysEdit={directEditMode}
+            showComparison={isRefine}
+            expandedOriginalKeys={expandedOriginalKeys}
+            onToggleOriginal={(key) => {
+              setExpandedOriginalKeys((prev) => {
+                const next = new Set(prev);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              });
+            }}
           />
           <FieldSection
             title="아이디어 내용"
@@ -834,6 +1070,16 @@ export function AIReviewPage() {
             onEditChange={setEditValue}
             onCancelEdit={() => setEditingKey(null)}
             alwaysEdit={directEditMode}
+            showComparison={isRefine}
+            expandedOriginalKeys={expandedOriginalKeys}
+            onToggleOriginal={(key) => {
+              setExpandedOriginalKeys((prev) => {
+                const next = new Set(prev);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              });
+            }}
           />
 
           <div className="mb-6">
@@ -853,15 +1099,17 @@ export function AIReviewPage() {
                   ...categories.map((c) => ({ value: c.id, label: c.name })),
                 ]}
               />
-              <Select
-                label="단계"
-                value={stageId}
-                onChange={(e) => {
-                  setStageId(e.target.value);
-                  markDirty();
-                }}
-                options={stages.map((s) => ({ value: s.id, label: s.label }))}
-              />
+              {!isRefine && (
+                <Select
+                  label="단계"
+                  value={stageId}
+                  onChange={(e) => {
+                    setStageId(e.target.value);
+                    markDirty();
+                  }}
+                  options={stages.map((s) => ({ value: s.id, label: s.label }))}
+                />
+              )}
               <Select
                 label="우선순위"
                 value={priority}
@@ -891,91 +1139,95 @@ export function AIReviewPage() {
                   { value: "UNKNOWN", label: "미평가" },
                 ]}
               />
-              <Select
-                label="공개 범위"
-                value={visibility}
-                onChange={(e) => {
-                  setVisibility(e.target.value as IdeaVisibility);
-                  markDirty();
-                }}
-                options={[
-                  { value: "PRIVATE", label: "비공개" },
-                  { value: "WORKSPACE", label: "작업공간 공유" },
-                  { value: "SELECTED_USERS", label: "지정 사용자 공유" },
-                ]}
-              />
-              {visibility === "SELECTED_USERS" && (
-                <div className="rounded-lg border border-[rgba(0,0,0,0.08)] p-3 space-y-2">
-                  <p className="text-xs font-medium text-[#6b6b80]">공유 대상</p>
-                  {activeMembers.length === 0 ? (
-                    <p className="text-xs text-[#9ca3af]">
-                      공유할 수 있는 활성 멤버가 없습니다. 비공개 또는 작업공간
-                      공유를 선택해 주세요.
-                    </p>
-                  ) : (
-                    activeMembers.map((m) => {
-                      const selected = shares.find((s) => s.user_id === m.user_id);
-                      return (
-                        <div
-                          key={m.user_id}
-                          className="flex items-center gap-2 text-sm"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={!!selected}
-                            onChange={() => toggleShare(m.user_id)}
-                            className="w-4 h-4 accent-[#4f46e5]"
-                          />
-                          <span className="flex-1 text-[#111118]">{m.name}</span>
-                          {selected && (
-                            <select
-                              value={selected.permission}
-                              onChange={(e) =>
-                                setSharePermission(
-                                  m.user_id,
-                                  e.target.value as IdeaSharePermission,
-                                )
-                              }
-                              className="text-xs border rounded px-2 py-1"
+              {!isRefine && (
+                <>
+                  <Select
+                    label="공개 범위"
+                    value={visibility}
+                    onChange={(e) => {
+                      setVisibility(e.target.value as IdeaVisibility);
+                      markDirty();
+                    }}
+                    options={[
+                      { value: "PRIVATE", label: "비공개" },
+                      { value: "WORKSPACE", label: "작업공간 공유" },
+                      { value: "SELECTED_USERS", label: "지정 사용자 공유" },
+                    ]}
+                  />
+                  {visibility === "SELECTED_USERS" && (
+                    <div className="rounded-lg border border-[rgba(0,0,0,0.08)] p-3 space-y-2">
+                      <p className="text-xs font-medium text-[#6b6b80]">공유 대상</p>
+                      {activeMembers.length === 0 ? (
+                        <p className="text-xs text-[#9ca3af]">
+                          공유할 수 있는 활성 멤버가 없습니다. 비공개 또는 작업공간
+                          공유를 선택해 주세요.
+                        </p>
+                      ) : (
+                        activeMembers.map((m) => {
+                          const selected = shares.find((s) => s.user_id === m.user_id);
+                          return (
+                            <div
+                              key={m.user_id}
+                              className="flex items-center gap-2 text-sm"
                             >
-                              <option value="READ">읽기</option>
-                              <option value="EDIT">편집</option>
-                            </select>
-                          )}
-                        </div>
-                      );
-                    })
+                              <input
+                                type="checkbox"
+                                checked={!!selected}
+                                onChange={() => toggleShare(m.user_id)}
+                                className="w-4 h-4 accent-[#4f46e5]"
+                              />
+                              <span className="flex-1 text-[#111118]">{m.name}</span>
+                              {selected && (
+                                <select
+                                  value={selected.permission}
+                                  onChange={(e) =>
+                                    setSharePermission(
+                                      m.user_id,
+                                      e.target.value as IdeaSharePermission,
+                                    )
+                                  }
+                                  className="text-xs border rounded px-2 py-1"
+                                >
+                                  <option value="READ">읽기</option>
+                                  <option value="EDIT">편집</option>
+                                </select>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
                   )}
-                </div>
+                  <Select
+                    label="담당자"
+                    value={assigneeId}
+                    onChange={(e) => {
+                      setAssigneeId(e.target.value);
+                      markDirty();
+                    }}
+                    options={[
+                      { value: "", label: "담당자 없음" },
+                      ...members
+                        .filter((m) => m.status === "ACTIVE")
+                        .map((m) => ({ value: m.user_id, label: m.name })),
+                    ]}
+                  />
+                  <label className="block">
+                    <span className="text-xs font-medium text-[#6b6b80] mb-1 block">
+                      다음 검토일
+                    </span>
+                    <input
+                      type="date"
+                      value={nextReviewDate}
+                      onChange={(e) => {
+                        setNextReviewDate(e.target.value);
+                        markDirty();
+                      }}
+                      className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] px-3 text-sm"
+                    />
+                  </label>
+                </>
               )}
-              <Select
-                label="담당자"
-                value={assigneeId}
-                onChange={(e) => {
-                  setAssigneeId(e.target.value);
-                  markDirty();
-                }}
-                options={[
-                  { value: "", label: "담당자 없음" },
-                  ...members
-                    .filter((m) => m.status === "ACTIVE")
-                    .map((m) => ({ value: m.user_id, label: m.name })),
-                ]}
-              />
-              <label className="block">
-                <span className="text-xs font-medium text-[#6b6b80] mb-1 block">
-                  다음 검토일
-                </span>
-                <input
-                  type="date"
-                  value={nextReviewDate}
-                  onChange={(e) => {
-                    setNextReviewDate(e.target.value);
-                    markDirty();
-                  }}
-                  className="w-full h-9 rounded-lg border border-[rgba(0,0,0,0.1)] px-3 text-sm"
-                />
-              </label>
             </div>
           </div>
 
@@ -1157,6 +1409,10 @@ export function AIReviewPage() {
               setShowLeaveConfirm(true);
               return;
             }
+            if (isRefine) {
+              navigate(analyzingPath);
+              return;
+            }
             navigate(
               `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}?visibility=${visibility}`,
             );
@@ -1212,10 +1468,22 @@ export function AIReviewPage() {
             variant="primary"
             icon={<Check className="w-4 h-4" />}
             onClick={handleRegister}
-            disabled={!titleOk || !selectedUsersOk || researchInProgress}
-            title={researchInProgress ? "웹 조사 완료 후 등록할 수 있습니다." : undefined}
+            disabled={
+              !titleOk ||
+              researchInProgress ||
+              (isRefine ? !hasRefineChanges : !selectedUsersOk)
+            }
+            title={
+              researchInProgress
+                ? isRefine
+                  ? "웹 조사 완료 후 반영할 수 있습니다."
+                  : "웹 조사 완료 후 등록할 수 있습니다."
+                : isRefine && !hasRefineChanges
+                  ? "변경된 내용이 없습니다."
+                  : undefined
+            }
           >
-            아이디어 등록
+            {isRefine ? "아이디어에 반영" : "아이디어 등록"}
           </Button>
         </div>
       </div>
@@ -1226,15 +1494,19 @@ export function AIReviewPage() {
             <div className="flex items-center gap-2 mb-3">
               <Sparkles className="w-5 h-5 text-[#4f46e5]" />
               <h3 className="text-base font-bold text-[#111118]">
-                아이디어를 등록하시겠습니까?
+                {isRefine
+                  ? "AI 발전안을 아이디어에 반영하시겠습니까?"
+                  : "아이디어를 등록하시겠습니까?"}
               </h3>
             </div>
             <p className="text-sm text-[#6b6b80] mb-3">
-              검토된 내용으로 아이디어가 등록됩니다. 등록 후에도 편집이 가능합니다.
+              {isRefine
+                ? "검토한 변경사항이 현재 아이디어에 반영됩니다. 원본 아이디어의 ID와 작성자는 유지됩니다."
+                : "검토된 내용으로 아이디어가 등록됩니다. 등록 후에도 편집이 가능합니다."}
             </p>
             {confirmError && (
               <div className="mb-3">
-                <InlineAlert type="error" title="등록 실패">
+                <InlineAlert type="error" title={isRefine ? "반영 실패" : "등록 실패"}>
                   {confirmError}
                 </InlineAlert>
               </div>
@@ -1254,7 +1526,7 @@ export function AIReviewPage() {
                 loading={isConfirming}
                 onClick={() => void confirmRegister()}
               >
-                등록
+                {isRefine ? "변경사항 반영" : "등록"}
               </Button>
             </div>
           </div>
@@ -1267,13 +1539,15 @@ export function AIReviewPage() {
             <div className="flex items-center gap-2 mb-3">
               <RefreshCw className="w-5 h-5 text-[#4f46e5]" />
               <h3 className="text-base font-bold text-[#111118]">
-                초안을 전체 다시 생성하시겠습니까?
+                {isRefine
+                  ? "발전안을 전체 다시 생성하시겠습니까?"
+                  : "초안을 전체 다시 생성하시겠습니까?"}
               </h3>
             </div>
             <p className="text-sm text-[#6b6b80] mb-5">
-              원문과 기존 추가 질문 답변을 기준으로 새로운 AI 초안을 생성합니다.
-              현재 초안과 임시 저장본은 기존 작업에 남아 있으며, 새 작업에는 기존
-              웹 조사 결과가 자동으로 복사되지 않습니다.
+              {isRefine
+                ? "동일한 원본 아이디어와 발전 방향으로 새로운 AI 발전안을 생성합니다. 현재 발전안은 기존 작업에 남으며, 웹 조사 결과는 자동으로 복사되지 않습니다."
+                : "원문과 기존 추가 질문 답변을 기준으로 새로운 AI 초안을 생성합니다. 현재 초안과 임시 저장본은 기존 작업에 남아 있으며, 새 작업에는 기존 웹 조사 결과가 자동으로 복사되지 않습니다."}
             </p>
             <div className="flex gap-2">
               <Button
@@ -1316,6 +1590,10 @@ export function AIReviewPage() {
                 className="flex-1"
                 onClick={() => {
                   setShowLeaveConfirm(false);
+                  if (isRefine) {
+                    navigate(analyzingPath);
+                    return;
+                  }
                   navigate(
                     `/w/${workspaceId}/ideas/new/ai/analyzing/${sessionId}?visibility=${visibility}`,
                   );
@@ -1362,6 +1640,9 @@ function FieldSection({
   onEditChange,
   onCancelEdit,
   alwaysEdit,
+  showComparison = false,
+  expandedOriginalKeys,
+  onToggleOriginal,
 }: {
   title: string;
   fields: EditableField[];
@@ -1372,6 +1653,9 @@ function FieldSection({
   onEditChange: (v: string) => void;
   onCancelEdit: () => void;
   alwaysEdit: boolean;
+  showComparison?: boolean;
+  expandedOriginalKeys?: Set<string>;
+  onToggleOriginal?: (key: string) => void;
 }) {
   return (
     <div className="mb-6">
@@ -1383,13 +1667,28 @@ function FieldSection({
           const isEditing = alwaysEdit || editingKey === field.key;
           const displayValue =
             field.value === "정보 없음" ? "" : field.value;
+          const showOriginal =
+            showComparison &&
+            field.changed &&
+            expandedOriginalKeys?.has(String(field.key));
           return (
-            <div key={field.key} className="p-4 group">
+            <div
+              key={field.key}
+              className={clsx(
+                "p-4 group",
+                showComparison && field.changed && "bg-[#faf8ff]",
+              )}
+            >
               <div className="flex items-center gap-2 mb-1.5">
                 <span className="text-xs font-semibold text-[#6b6b80]">
                   {field.label}
                 </span>
                 {field.source && <SourceBadge type={field.source} />}
+                {showComparison && field.changed && (
+                  <Badge className="bg-[#ede9fe] text-[#7c3aed] border-0 text-[10px]">
+                    AI 변경
+                  </Badge>
+                )}
                 {!alwaysEdit && (
                   <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
@@ -1438,6 +1737,24 @@ function FieldSection({
                 <p className="text-sm text-[#111118] leading-relaxed whitespace-pre-wrap">
                   {field.value || "정보 없음"}
                 </p>
+              )}
+              {showComparison && field.changed && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="text-xs text-[#7c3aed] hover:underline"
+                    onClick={() => onToggleOriginal?.(String(field.key))}
+                  >
+                    {showOriginal ? "기존 내용 숨기기" : "기존 내용 보기"}
+                  </button>
+                  {showOriginal && (
+                    <p className="mt-1 text-xs text-[#6b6b80] leading-relaxed whitespace-pre-wrap bg-[#f8f8fb] rounded-lg px-3 py-2 border border-[rgba(0,0,0,0.05)]">
+                      {field.originalValue?.trim()
+                        ? field.originalValue
+                        : "정보 없음"}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           );
