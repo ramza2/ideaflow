@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { clsx } from "clsx";
 import { FileInput, PenLine, Sparkles } from "lucide-react";
+import { toast } from "../common/Toast";
 
 type Align = "left" | "right";
 
@@ -53,6 +54,11 @@ export function IdeaCreateMenu({
     setOpen(false);
   }
 
+  function handleImportClick() {
+    setOpen(false);
+    toast.info("텍스트·파일 가져오기는 추후 제공됩니다.");
+  }
+
   return (
     <div ref={rootRef} className={clsx("relative", className)}>
       {trigger({ open, toggle })}
@@ -88,6 +94,7 @@ export function IdeaCreateMenu({
           </button>
           <button
             type="button"
+            onClick={handleImportClick}
             className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-[#f4f4f8]"
           >
             <div className="w-7 h-7 rounded-lg bg-[#f0f0f5] flex items-center justify-center">
