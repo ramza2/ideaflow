@@ -19,7 +19,36 @@ from app.models.enums import (
 MAX_CLARIFYING_QUESTIONS = 3
 MAX_RESEARCH_TOPICS = 5
 
+_READY_CONTENT_FIELDS = (
+    "one_line_definition",
+    "background",
+    "problem",
+    "core_concept",
+    "major_features",
+    "expected_effect",
+    "target_users",
+    "scenarios",
+    "challenges",
+    "minimum_validation",
+)
+
 _FENCE_RE = re.compile(r"^```(?:json)?\s*([\s\S]*?)\s*```$", re.IGNORECASE)
+
+
+def _is_nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
+def validate_ready_for_review_quality(draft: IdeaDraftPayload) -> None:
+    """Reject READY_FOR_REVIEW drafts that lack a registrable minimum structure."""
+    if not _is_nonempty_string(draft.title):
+        raise ValueError("READY_FOR_REVIEW requires non-empty title")
+    has_content = any(
+        _is_nonempty_string(getattr(draft, field_name))
+        for field_name in _READY_CONTENT_FIELDS
+    )
+    if not has_content:
+        raise ValueError("READY_FOR_REVIEW requires at least one substantive content field")
 
 
 class CategoryOption(BaseModel):
@@ -121,6 +150,7 @@ class IdeaStructuringResult(BaseModel):
         if self.decision == AiLlmDecision.READY_FOR_REVIEW:
             if self.clarifying_questions:
                 raise ValueError("READY_FOR_REVIEW must not include clarifying_questions")
+            validate_ready_for_review_quality(self.draft)
         return self
 
 

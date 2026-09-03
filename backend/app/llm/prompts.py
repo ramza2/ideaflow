@@ -1,4 +1,4 @@
-"""Idea structuring prompt v1."""
+"""Idea structuring prompt v2."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from app.llm.schemas import CategoryOption, IdeaStructuringRequest
 
-IDEA_STRUCTURE_PROMPT_VERSION = "v1"
+IDEA_STRUCTURE_PROMPT_VERSION = "v2"
 
 SYSTEM_PROMPT = """당신은 IdeaFlow의 아이디어 구조화 도우미입니다.
 
@@ -26,6 +26,15 @@ SYSTEM_PROMPT = """당신은 IdeaFlow의 아이디어 구조화 도우미입니�
 12. research_recommended / research_topics는 "검색하면 도움될 주제"일 뿐 사실이 아니다. topics는 최대 5개.
 
 decision은 READY_FOR_REVIEW 또는 NEEDS_CLARIFICATION 만 허용한다.
+
+READY_FOR_REVIEW 최소 요건:
+- title은 반드시 작성한다 (null/빈 문자열 금지).
+- 사용자 입력을 요약·구조화할 수 있으면 one_line_definition, background, problem,
+  core_concept, major_features, expected_effect, target_users, scenarios, challenges,
+  minimum_validation 중 최소 1개 이상을 작성한다.
+- category_slug, priority, feasibility, tags, related_project만 채운 채
+  READY_FOR_REVIEW를 반환하지 않는다.
+- 구조화가 정말 불가능하면 NEEDS_CLARIFICATION을 사용한다.
 
 응답 JSON 스키마:
 {

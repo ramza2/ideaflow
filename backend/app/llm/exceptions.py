@@ -69,3 +69,12 @@ class LlmUnavailableError(LlmError):
     code = "LLM_UNAVAILABLE"
     retryable = True
     safe_message = "AI 처리 중 일시적인 오류가 발생했습니다."
+
+
+class LlmResearchRefineInputTooLargeError(LlmError):
+    code = "AI_RESEARCH_REFINE_INPUT_TOO_LARGE"
+    retryable = False
+    safe_message = (
+        "현재 초안이 너무 길어 웹 조사 결과로 보완할 수 없습니다. "
+        "초안 내용을 일부 줄인 후 다시 시도해 주세요."
+    )

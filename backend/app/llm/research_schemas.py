@@ -81,6 +81,40 @@ def parse_refinement_result(content: str) -> EvidenceRefinementResult:
         raise LlmResponseValidationError("LLM response failed schema validation") from exc
 
 
+def filter_user_edited_refinement_fields(
+    result: EvidenceRefinementResult,
+    user_edited_fields: list[str],
+) -> tuple[EvidenceRefinementResult, int]:
+    """Strip user-edited fields from LLM refinement output before validation/merge."""
+    edited = {field for field in user_edited_fields if field in RESEARCH_REFINABLE_FIELDS}
+    if not edited:
+        return result, 0
+
+    ignored = 0
+    for field in edited:
+        if field in result.draft or field in result.evidence_links:
+            ignored += 1
+
+    filtered_draft = {
+        field: value
+        for field, value in result.draft.items()
+        if field in RESEARCH_REFINABLE_FIELDS and field not in edited
+    }
+    filtered_links = {
+        field: ids
+        for field, ids in result.evidence_links.items()
+        if field in RESEARCH_REFINABLE_FIELDS and field not in edited
+    }
+    return (
+        EvidenceRefinementResult(
+            draft=filtered_draft,
+            evidence_links=filtered_links,
+            research_summary=result.research_summary,
+        ),
+        ignored,
+    )
+
+
 def validate_refinement_result(
     result: EvidenceRefinementResult,
     *,

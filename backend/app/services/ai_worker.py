@@ -17,12 +17,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory
 from app.llm.base import LlmProvider
-from app.llm.exceptions import LlmError, LlmResponseValidationError, LlmUnavailableError
+from app.llm.exceptions import LlmError, LlmResearchRefineInputTooLargeError, LlmResponseValidationError, LlmUnavailableError
 from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
 from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
 from app.llm.research_schemas import (
     RESEARCH_REFINABLE_FIELDS,
+    filter_user_edited_refinement_fields,
     merge_refinement_provenance,
     validate_refinement_result,
 )
@@ -275,7 +276,10 @@ def _apply_failure(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    safe_msg = (error.safe_message or "AI 처리 중 오류가 발생했습니다.")[:512]
+    if isinstance(error, LlmResponseValidationError):
+        safe_msg = LlmResponseValidationError.safe_message
+    else:
+        safe_msg = (error.safe_message or "AI 처리 중 오류가 발생했습니다.")[:512]
     code = error.code
 
     if error.retryable and job.attempts < job.max_attempts:
@@ -313,7 +317,10 @@ def _apply_web_research_failure(
     failure_phase: str,
 ) -> None:
     now = utcnow()
-    safe_msg = (error.safe_message or "웹 조사 중 오류가 발생했습니다.")[:512]
+    if isinstance(error, LlmResponseValidationError):
+        safe_msg = LlmResponseValidationError.safe_message
+    else:
+        safe_msg = (error.safe_message or "웹 조사 중 오류가 발생했습니다.")[:512]
     code = error.code
     retryable = getattr(error, "retryable", False)
 
@@ -531,47 +538,68 @@ def process_web_research_job(
             .order_by(WebEvidence.rank.asc())
         )
     )
-    evidence_inputs = web_research_service.build_refinement_evidence_inputs(evidence_db, cfg)
-    evidence_used_chars = web_research_service.refinement_evidence_serialized_chars(evidence_inputs)
-    logger.info(
-        "research_refine_evidence_budget run_id=%s evidence_total_count=%s evidence_used_count=%s evidence_used_chars=%s",
-        run_id,
-        len(evidence_db),
-        len(evidence_inputs),
-        evidence_used_chars,
-    )
 
     from app.llm.research_schemas import EvidenceRefinementRequest
 
-    refine_request = EvidenceRefinementRequest(
-        input_text=session.input_text,
-        base_draft=base_draft,
-        base_provenance=base_provenance,
-        user_edited_fields=user_edited,
-        evidence=evidence_inputs,
-    )
-
+    refine_request: EvidenceRefinementRequest | None = None
     refine_error: LlmError | None = None
     refine_result = None
     try:
-        refine_result = provider.refine_idea_with_evidence(refine_request)
-        valid_ids = {str(ev.evidence_id) for ev in evidence_inputs}
-        refine_result = validate_refinement_result(
-            refine_result,
+        refine_request, budget = web_research_service.prepare_refinement_request(
+            input_text=session.input_text,
             base_draft=base_draft,
+            base_provenance=base_provenance,
             user_edited_fields=user_edited,
-            valid_evidence_ids=valid_ids,
+            evidence_rows=evidence_db,
+            settings=cfg,
         )
-    except LlmError as exc:
-        refine_error = exc
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "unexpected_research_refine_error job_id=%s run_id=%s category=%s",
-            job_id,
+        logger.info(
+            "research_refine_prompt_budget run_id=%s system_chars=%s user_prompt_chars=%s "
+            "total_prompt_chars=%s evidence_total_count=%s evidence_candidate_count=%s "
+            "evidence_used_count=%s evidence_used_chars=%s output_max_tokens=%s",
             run_id,
-            type(exc).__name__,
+            budget.system_chars,
+            budget.user_prompt_chars,
+            budget.total_prompt_chars,
+            budget.evidence_total_count,
+            budget.evidence_candidate_count,
+            budget.evidence_used_count,
+            budget.evidence_used_chars,
+            budget.output_max_tokens,
         )
-        refine_error = LlmUnavailableError()
+    except LlmResearchRefineInputTooLargeError as exc:
+        refine_error = exc
+
+    if refine_error is None and refine_request is not None:
+        try:
+            raw_result = provider.refine_idea_with_evidence(refine_request)
+            filtered_result, ignored_count = filter_user_edited_refinement_fields(
+                raw_result,
+                user_edited,
+            )
+            if ignored_count:
+                logger.warning(
+                    "research_refine_user_edit_fields_ignored run_id=%s ignored_count=%s",
+                    run_id,
+                    ignored_count,
+                )
+            valid_ids = {str(ev.evidence_id) for ev in refine_request.evidence}
+            refine_result = validate_refinement_result(
+                filtered_result,
+                base_draft=base_draft,
+                user_edited_fields=user_edited,
+                valid_evidence_ids=valid_ids,
+            )
+        except LlmError as exc:
+            refine_error = exc
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "unexpected_research_refine_error job_id=%s run_id=%s category=%s",
+                job_id,
+                run_id,
+                type(exc).__name__,
+            )
+            refine_error = LlmUnavailableError()
 
     now = utcnow()
     job = db.execute(select(AiJob).where(AiJob.id == job_id).with_for_update()).scalar_one_or_none()

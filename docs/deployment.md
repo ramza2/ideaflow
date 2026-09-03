@@ -591,6 +591,8 @@ Web Research stores all search evidence in the database and UI, but the LLM refi
 - `WEB_RESEARCH_REFINE_MAX_EVIDENCE_ITEMS` (default `6`)
 - `WEB_RESEARCH_REFINE_MAX_SNIPPET_CHARS` (default `600`)
 - `WEB_RESEARCH_REFINE_MAX_EVIDENCE_CHARS` (default `4000`)
+- `WEB_RESEARCH_REFINE_MAX_PROMPT_CHARS` (default `6000`) — total system+user prompt text char budget for refinement
+- `WEB_RESEARCH_REFINE_MAX_TOKENS` (default `1200`) — refinement output token cap (structuring still uses `LLM_MAX_TOKENS`)
 
 These settings do not reduce stored `WebEvidence` rows or search result counts.
 

@@ -19,6 +19,7 @@ from app.llm.exceptions import (
     LlmTimeoutError,
 )
 from app.llm.openai_compatible import OpenAICompatibleLlmProvider
+from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION
 from app.llm.schemas import IdeaStructuringRequest
 from app.models.enums import AiLlmDecision
 
@@ -50,7 +51,7 @@ READY_JSON = {
     "decision": "READY_FOR_REVIEW",
     "draft": {
         "title": "도구",
-        "one_line_definition": None,
+        "one_line_definition": "짧은 한 줄 정의",
         "background": None,
         "problem": None,
         "core_concept": None,
@@ -93,6 +94,8 @@ def test_url_model_messages_and_timeout() -> None:
     client = httpx.Client(transport=transport, base_url="")
     settings = make_settings()
     provider = OpenAICompatibleLlmProvider(settings, client=client)
+    assert provider.prompt_version == IDEA_STRUCTURE_PROMPT_VERSION
+    assert provider.prompt_version == "v2"
     result = provider.structure_idea(IdeaStructuringRequest(input_text="짧은 아이디어"))
     assert result.decision == AiLlmDecision.READY_FOR_REVIEW
     assert captured["url"] == "https://llm.example.test/v1/chat/completions"

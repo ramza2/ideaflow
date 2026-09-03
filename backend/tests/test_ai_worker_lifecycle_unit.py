@@ -16,7 +16,7 @@ from app.services.ai_worker import AiWorker, run_once
 class CountingProvider:
     provider_name = "counting"
     model_name = "counting-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
     created = 0
     closed = 0
 

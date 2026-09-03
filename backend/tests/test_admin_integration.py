@@ -65,7 +65,7 @@ pytestmark = pytest.mark.skipif(
 class FakeLlmProvider:
     provider_name = "fake"
     model_name = "fake-model"
-    prompt_version = "v1"
+    prompt_version = "v2"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -76,7 +76,7 @@ class FakeLlmProvider:
         self.last_request = request
         return IdeaStructuringResult(
             decision=AiLlmDecision.READY_FOR_REVIEW,
-            draft=IdeaDraftPayload(title="Probe", tags=[]),
+            draft=IdeaDraftPayload(title="Probe", one_line_definition="probe", tags=[]),
             field_provenance={
                 "title": FieldProvenanceEntry(
                     source=FieldProvenanceSource.LLM_SUMMARY,
