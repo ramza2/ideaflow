@@ -24,6 +24,7 @@ import { Button } from "../../components/common/Button";
 import { ApiPriorityBadge, StageLabelBadge } from "../../components/common/Badge";
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
+import { IdeaCreateMenu } from "../../components/ideas/IdeaCreateMenu";
 import { toast } from "../../components/common/Toast";
 import { toDisplayUser } from "../../utils/avatar";
 import type { CategoryPublic, IdeaListItem, IdeaPriority, StagePublic } from "../../types/api";
@@ -270,6 +271,27 @@ export function IdeaListPage() {
   const stageLabel = (id: string) => stages.find((s) => s.id === id)?.label ?? id;
   const categoryName = (id: string) => categories.find((c) => c.id === id)?.name ?? id;
 
+  const hasSearchOrFilter = Boolean(urlQuery) || activeFilterCount > 0;
+  const emptyCopy = hasSearchOrFilter
+    ? {
+        title: "검색/필터 결과가 없습니다",
+        description: "검색어나 필터 조건을 변경해 보세요.",
+      }
+    : tab === "mine"
+      ? {
+          title: "내가 작성한 아이디어가 없습니다",
+          description: "새 아이디어를 등록해 보세요.",
+        }
+      : tab === "assigned"
+        ? {
+            title: "담당 중인 아이디어가 없습니다",
+            description: "담당자로 지정된 아이디어가 없습니다.",
+          }
+        : {
+            title: "등록된 아이디어가 없습니다",
+            description: "첫 번째 아이디어를 등록해 보세요.",
+          };
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-[rgba(0,0,0,0.06)] bg-white">
@@ -289,14 +311,20 @@ export function IdeaListPage() {
             >
               내보내기
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Plus className="w-3.5 h-3.5" />}
-              onClick={() => navigate(`/w/${workspaceId}/ideas/new`)}
-            >
-              <span className="hidden sm:inline">새 아이디어</span>
-            </Button>
+            <IdeaCreateMenu
+              workspaceId={workspaceId}
+              align="right"
+              trigger={({ toggle }) => (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Plus className="w-3.5 h-3.5" />}
+                  onClick={toggle}
+                >
+                  <span className="hidden sm:inline">새 아이디어</span>
+                </Button>
+              )}
+            />
           </div>
         </div>
 
@@ -422,15 +450,26 @@ export function IdeaListPage() {
         ) : items.length === 0 ? (
           <EmptyState
             icon={<Sparkles className="w-6 h-6" />}
-            title={urlQuery || activeFilterCount > 0 ? "검색/필터 결과가 없습니다" : "등록된 아이디어가 없습니다"}
-            description={urlQuery || activeFilterCount > 0 ? "검색어나 필터 조건을 변경해 보세요." : "첫 번째 아이디어를 등록해 보세요."}
+            title={emptyCopy.title}
+            description={emptyCopy.description}
             action={
               activeFilterCount > 0 ? (
                 <Button variant="secondary" size="sm" onClick={handleClearFilters}>필터 초기화</Button>
               ) : !urlQuery ? (
-                <Button variant="primary" size="sm" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate(`/w/${workspaceId}/ideas/new`)}>
-                  새 아이디어
-                </Button>
+                <IdeaCreateMenu
+                  workspaceId={workspaceId}
+                  align="left"
+                  trigger={({ toggle }) => (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<Plus className="w-3.5 h-3.5" />}
+                      onClick={toggle}
+                    >
+                      새 아이디어
+                    </Button>
+                  )}
+                />
               ) : null
             }
           />
