@@ -8,7 +8,7 @@ import socket
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -20,6 +20,15 @@ from app.llm.base import LlmProvider
 from app.llm.exceptions import LlmError, LlmResearchRefineInputTooLargeError, LlmResponseValidationError, LlmUnavailableError
 from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
+from app.llm.refine_prompts import IDEA_REFINE_PROMPT_VERSION
+from app.llm.refine_schemas import (
+    IdeaRefinementRequest,
+    IdeaRefinementResult,
+    LlmRefineInputTooLargeError,
+    merge_refinement_patch,
+    prepare_refine_source_context,
+    validate_refinement_against_source,
+)
 from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
 from app.llm.research_schemas import (
     RESEARCH_REFINABLE_FIELDS,
@@ -29,7 +38,15 @@ from app.llm.research_schemas import (
 )
 from app.llm.schemas import IdeaStructuringRequest
 from app.models.ai import AiJob, IdeaAiSession
-from app.models.enums import AiJobStatus, AiJobType, AiLlmDecision, IdeaAiSessionStatus, WebResearchRunStatus
+from app.models.enums import (
+    AiJobStatus,
+    AiJobType,
+    AiLlmDecision,
+    FieldProvenanceSource,
+    IdeaAiSessionPurpose,
+    IdeaAiSessionStatus,
+    WebResearchRunStatus,
+)
 from app.models.research import WebEvidence, WebResearchRun
 from app.models.workspace import Workspace, WorkspaceCategory
 from app.services import ai_session as ai_session_service
@@ -248,6 +265,63 @@ def _apply_success(
     session.llm_provider = getattr(provider, "provider_name", "openai_compatible")
     session.llm_model = getattr(provider, "model_name", None)
     session.prompt_version = getattr(provider, "prompt_version", IDEA_STRUCTURE_PROMPT_VERSION)
+    session.failure_code = None
+    session.failure_message = None
+
+    if result.decision == AiLlmDecision.NEEDS_CLARIFICATION:
+        session.status = IdeaAiSessionStatus.NEEDS_CLARIFICATION.value
+        session.clarifying_questions = ai_session_service.assign_question_ids(questions_raw)
+    else:
+        session.status = IdeaAiSessionStatus.READY_FOR_REVIEW.value
+        session.clarifying_questions = []
+        session.ready_at = utcnow()
+
+    job.status = AiJobStatus.SUCCEEDED.value
+    job.finished_at = utcnow()
+    job.locked_at = None
+    job.lease_until = None
+    job.last_error_code = None
+    job.last_error_message = None
+
+
+def _apply_refine_success(
+    db: Session,
+    *,
+    job: AiJob,
+    session: IdeaAiSession,
+    result: IdeaRefinementResult,
+    provider: LlmProvider,
+    source_snapshot: dict[str, Any],
+) -> None:
+    draft = merge_refinement_patch(source_snapshot, result.draft_patch)
+    if "category_slug" in result.draft_patch:
+        # An unknown slug proposed by the LLM must not clear the source category.
+        checked = ai_session_service.sanitize_draft_category(
+            db, workspace_id=session.workspace_id, draft=draft
+        )
+        if checked.get("category_slug") is None:
+            checked["category_slug"] = source_snapshot.get("category_slug")
+        draft = checked
+
+    provenance = dict(session.field_provenance or {})
+    for key in result.draft_patch:
+        entry = result.field_provenance.get(key)
+        provenance[key] = (
+            entry.model_dump(mode="json")
+            if entry is not None
+            else {"source": FieldProvenanceSource.LLM_INFERENCE.value, "note": None}
+        )
+    questions_raw = [q.model_dump(mode="json") for q in result.clarifying_questions]
+
+    session.draft_payload = draft
+    session.field_provenance = provenance
+    session.research_recommended = bool(result.research_recommended)
+    session.research_topics = list(result.research_topics)
+    session.llm_provider = getattr(provider, "provider_name", "openai_compatible")
+    session.llm_model = getattr(provider, "model_name", None)
+    session.prompt_version = (
+        getattr(provider, "refine_prompt_version", None) or IDEA_REFINE_PROMPT_VERSION
+    )
     session.failure_code = None
     session.failure_message = None
 
@@ -682,6 +756,162 @@ def process_web_research_job(
     )
 
 
+def process_refine_idea_job(
+    db: Session,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    provider: LlmProvider,
+    settings: Settings | None = None,
+) -> None:
+    """Refine a registered Idea (Step 17). Source snapshot is the only LLM input."""
+    cfg = settings or get_settings()
+    job = db.get(AiJob, job_id)
+    if job is None or job.status != AiJobStatus.RUNNING.value or job.worker_id != worker_id:
+        return
+
+    session = db.get(IdeaAiSession, job.session_id)
+    if session is None:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "AI_SESSION_NOT_FOUND"
+        job.last_error_message = "Session missing for job."
+        db.commit()
+        return
+
+    if (
+        session.status != IdeaAiSessionStatus.PROCESSING.value
+        or session.purpose != IdeaAiSessionPurpose.REFINE.value
+    ):
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.last_error_code = "AI_SESSION_INVALID_STATE"
+        job.last_error_message = "Session is not a PROCESSING REFINE session."
+        db.commit()
+        return
+
+    session_id = session.id
+    source_snapshot = dict(session.source_idea_snapshot or {})
+    direction = session.refine_direction
+
+    if not source_snapshot or not direction or session.source_idea_id is None:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.locked_at = None
+        job.lease_until = None
+        job.last_error_code = "AI_SESSION_INVALID_STATE"
+        job.last_error_message = "REFINE session is missing source idea data."
+        session.status = IdeaAiSessionStatus.FAILED.value
+        session.failure_code = "AI_SESSION_INVALID_STATE"
+        session.failure_message = "AI 처리 중 오류가 발생했습니다."
+        db.commit()
+        return
+
+    request: IdeaRefinementRequest | None = None
+    llm_error: LlmError | None = None
+    try:
+        source_context, budget = prepare_refine_source_context(
+            source_snapshot,
+            direction=direction,
+            max_prompt_chars=cfg.ai_refine_max_prompt_chars,
+        )
+        # Metadata only — never log source content.
+        logger.info(
+            "ai_refine_prompt_budget session_id=%s direction=%s context_fields=%s "
+            "truncated_field_count=%s prompt_chars_estimate=%s output_max_tokens=%s",
+            session_id,
+            direction,
+            budget["context_fields"],
+            len(budget["truncated_fields"]),
+            budget["prompt_chars_estimate"],
+            cfg.ai_refine_max_tokens,
+        )
+        request = IdeaRefinementRequest(
+            direction=direction,
+            source_context=source_context,
+            clarifying_questions=session.clarifying_questions,
+            clarification_answers=session.clarification_answers,
+        )
+    except LlmRefineInputTooLargeError as exc:
+        llm_error = exc
+
+    # Detach before LLM call — do not hold DB transaction open.
+    db.commit()
+
+    result: IdeaRefinementResult | None = None
+    if llm_error is None and request is not None:
+        try:
+            candidate = provider.refine_idea(request)
+            validate_refinement_against_source(candidate, source_snapshot=source_snapshot)
+            result = candidate
+        except LlmError as exc:
+            llm_error = exc
+        except ValueError:
+            llm_error = LlmResponseValidationError("Refinement patch failed source validation")
+        except Exception as exc:  # noqa: BLE001
+            # Do not log exception message / traceback locals (may contain prompts).
+            logger.error(
+                "unexpected_llm_error job_id=%s session_id=%s category=%s",
+                job_id,
+                session_id,
+                type(exc).__name__,
+            )
+            llm_error = LlmUnavailableError()
+
+    now = utcnow()
+    job = db.execute(
+        select(AiJob).where(AiJob.id == job_id).with_for_update()
+    ).scalar_one_or_none()
+    if job is None:
+        return
+    if not _job_owned_by_worker(job, worker_id=worker_id, now=now):
+        logger.info("ai_job_lease_lost job_id=%s", job_id)
+        db.rollback()
+        return
+
+    session = db.execute(
+        select(IdeaAiSession).where(IdeaAiSession.id == session_id).with_for_update()
+    ).scalar_one_or_none()
+    if session is None or session.status != IdeaAiSessionStatus.PROCESSING.value:
+        job.status = AiJobStatus.FAILED.value
+        job.finished_at = utcnow()
+        job.locked_at = None
+        job.lease_until = None
+        job.last_error_code = "AI_SESSION_INVALID_STATE"
+        job.last_error_message = "Session state changed during LLM call."
+        db.commit()
+        return
+
+    if llm_error is not None:
+        _apply_failure(db, job=job, session=session, error=llm_error, settings=cfg)
+        db.commit()
+        logger.info(
+            "ai_refine_job_failed job_id=%s session_id=%s code=%s attempts=%s",
+            job.id,
+            session.id,
+            llm_error.code,
+            job.attempts,
+        )
+        return
+
+    assert result is not None
+    _apply_refine_success(
+        db,
+        job=job,
+        session=session,
+        result=result,
+        provider=provider,
+        source_snapshot=source_snapshot,
+    )
+    db.commit()
+    logger.info(
+        "ai_refine_job_succeeded job_id=%s session_id=%s decision=%s",
+        job.id,
+        session.id,
+        result.decision.value,
+    )
+
+
 def process_claimed_job(
     db: Session,
     *,
@@ -707,6 +937,16 @@ def process_claimed_job(
             worker_id=worker_id,
             provider=provider,
             search_provider=search,
+            settings=cfg,
+        )
+        return
+
+    if job.job_type == AiJobType.REFINE_IDEA.value:
+        process_refine_idea_job(
+            db,
+            job_id=job_id,
+            worker_id=worker_id,
+            provider=provider,
             settings=cfg,
         )
         return

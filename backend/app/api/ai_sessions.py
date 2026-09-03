@@ -13,6 +13,8 @@ from app.api.workspace_deps import WorkspaceContext, get_workspace_context
 from app.core.errors import AppError
 from app.db.session import get_db
 from app.schemas.ai import (
+    AiRefineApplyRequest,
+    AiRefineApplyResponse,
     AiSessionConfirmRequest,
     AiSessionConfirmResponse,
     AiSessionCreate,
@@ -130,6 +132,31 @@ def confirm_ai_session(
     # Confirm does not call LLM; allow_llm is not required.
     try:
         result = ai_session_service.confirm_ai_session(
+            db,
+            workspace=ctx.workspace,
+            user=ctx.user,
+            session_id=session_id,
+            payload=body,
+        )
+        db.commit()
+    except AppError:
+        db.rollback()
+        raise
+    return result
+
+
+@router.post("/{session_id}/apply-refinement", response_model=AiRefineApplyResponse)
+def apply_refinement(
+    session_id: UUID,
+    body: AiRefineApplyRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> AiRefineApplyResponse:
+    del auth
+    # Apply does not call the LLM; allow_llm is not required.
+    try:
+        result = ai_session_service.apply_refinement(
             db,
             workspace=ctx.workspace,
             user=ctx.user,

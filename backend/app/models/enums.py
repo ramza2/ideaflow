@@ -71,11 +71,24 @@ class IdeaSharePermission(StrEnum):
 
 
 class IdeaAiSessionPurpose(StrEnum):
-    """Future-ready purposes. Step 7 APIs only execute CREATE."""
+    """AI session purposes. CREATE and REFINE are executed; RESEARCH reserved."""
 
     CREATE = "CREATE"
     REFINE = "REFINE"
     RESEARCH = "RESEARCH"
+
+
+class IdeaRefineDirection(StrEnum):
+    """Canonical refine directions for registered Idea AI evolution (Step 17)."""
+
+    EXPAND_DETAIL = "EXPAND_DETAIL"
+    TECHNICAL_IMPLEMENTATION = "TECHNICAL_IMPLEMENTATION"
+    BUSINESS_PERSPECTIVE = "BUSINESS_PERSPECTIVE"
+    USER_PERSPECTIVE = "USER_PERSPECTIVE"
+    COUNTER_PERSPECTIVE = "COUNTER_PERSPECTIVE"
+    RISK_ANALYSIS = "RISK_ANALYSIS"
+    MINIMUM_VALIDATION = "MINIMUM_VALIDATION"
+    NEXT_ACTIONS = "NEXT_ACTIONS"
 
 
 class IdeaAiSessionStatus(StrEnum):
@@ -89,6 +102,7 @@ class IdeaAiSessionStatus(StrEnum):
 
 class AiJobType(StrEnum):
     STRUCTURE_IDEA = "STRUCTURE_IDEA"
+    REFINE_IDEA = "REFINE_IDEA"
     WEB_RESEARCH = "WEB_RESEARCH"
 
 
