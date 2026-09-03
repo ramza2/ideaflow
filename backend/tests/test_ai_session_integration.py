@@ -83,6 +83,9 @@ class FakeProvider:
             raise item
         return item
 
+    def refine_idea(self, request):
+        raise NotImplementedError
+
 
 class ParsingFakeProvider:
     provider_name = "parsing_fake"
@@ -100,6 +103,9 @@ class ParsingFakeProvider:
         return parse_structuring_result(self._contents.pop(0))
 
     def refine_idea_with_evidence(self, request):
+        raise NotImplementedError
+
+    def refine_idea(self, request):
         raise NotImplementedError
 
 
@@ -744,6 +750,9 @@ def test_stale_worker_result_discarded_after_reclaim(
 
         def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
             return _ready_result("FromWorkerA")
+
+        def refine_idea(self, request):
+            raise NotImplementedError
 
     db_persist = session_factory()
     try:

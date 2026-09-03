@@ -88,6 +88,9 @@ class FakeLlmProvider:
             research_topics=[],
         )
 
+    def refine_idea(self, request):
+        raise NotImplementedError
+
     def close(self) -> None:
         pass
 

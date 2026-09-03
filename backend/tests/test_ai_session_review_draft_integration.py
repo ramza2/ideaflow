@@ -72,6 +72,9 @@ class FakeProvider:
     def refine_idea_with_evidence(self, request):
         raise NotImplementedError
 
+    def refine_idea(self, request):
+        raise NotImplementedError
+
 
 class ParsingFakeProvider:
     provider_name = "parsing_fake"
@@ -89,6 +92,9 @@ class ParsingFakeProvider:
         return parse_structuring_result(self._contents.pop(0))
 
     def refine_idea_with_evidence(self, request):
+        raise NotImplementedError
+
+    def refine_idea(self, request):
         raise NotImplementedError
 
 

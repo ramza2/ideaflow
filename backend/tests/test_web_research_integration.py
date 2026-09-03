@@ -102,6 +102,9 @@ class FakeProvider:
             raise item
         return item
 
+    def refine_idea(self, request):
+        raise NotImplementedError
+
     def close(self) -> None:
         pass
 
