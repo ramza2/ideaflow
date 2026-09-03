@@ -210,6 +210,16 @@ export interface IdeaListParams {
 
 export type AiSessionPurpose = "CREATE" | "REFINE" | "RESEARCH";
 
+export type IdeaRefineDirection =
+  | "EXPAND_DETAIL"
+  | "TECHNICAL_IMPLEMENTATION"
+  | "BUSINESS_PERSPECTIVE"
+  | "USER_PERSPECTIVE"
+  | "COUNTER_PERSPECTIVE"
+  | "RISK_ANALYSIS"
+  | "MINIMUM_VALIDATION"
+  | "NEXT_ACTIONS";
+
 export type AiSessionStatus =
   | "PROCESSING"
   | "NEEDS_CLARIFICATION"
@@ -290,11 +300,19 @@ export interface AiSession {
   result_idea_id: string | null;
   failure: AiSessionFailure | null;
   llm: AiSessionLlm;
+  /* REFINE sessions (Step 17) only */
+  source_idea_id?: string | null;
+  source_idea_updated_at?: string | null;
+  source_idea_snapshot?: AiSourceIdeaSnapshot | null;
+  refine_direction?: IdeaRefineDirection | null;
   created_at: string;
   updated_at: string;
   ready_at: string | null;
   confirmed_at: string | null;
 }
+
+/** Registered Idea snapshot taken when a REFINE session starts. Same field shape as AiDraft. */
+export type AiSourceIdeaSnapshot = AiDraft & Record<string, unknown>;
 
 export interface AiSessionCreateRequest {
   purpose?: AiSessionPurpose;
@@ -351,6 +369,40 @@ export interface AiSessionReviewDraftSaveRequest {
 
 export interface AiSessionRegenerateResponse {
   session: AiSession;
+}
+
+/* --- Step 17: Registered Idea AI refinement --- */
+
+export interface AiRefineSessionCreateRequest {
+  direction: IdeaRefineDirection;
+}
+
+/**
+ * Refinement never changes workflow/ACL fields, so stage, visibility, assignee,
+ * next_review_date and shares are intentionally absent.
+ */
+export interface AiRefineApplyRequest {
+  title: string;
+  one_line_definition?: string | null;
+  background?: string | null;
+  problem?: string | null;
+  core_concept?: string | null;
+  major_features?: string | null;
+  expected_effect?: string | null;
+  target_users?: string | null;
+  scenarios?: string | null;
+  challenges?: string | null;
+  minimum_validation?: string | null;
+  related_project?: string | null;
+  category_id?: string | null;
+  priority?: IdeaPriority;
+  feasibility?: IdeaFeasibility;
+  tags?: string[];
+}
+
+export interface AiRefineApplyResponse {
+  updated: boolean;
+  idea: IdeaDetail;
 }
 
 /* --- Step 9: Web Research --- */

@@ -75,6 +75,14 @@ const router = createBrowserRouter([
                 path: "ideas/new/ai/review",
                 element: <Navigate to=".." relative="path" replace />,
               },
+              {
+                path: "ideas/:ideaId/ai/refine/:sessionId/analyzing",
+                element: <AIAnalyzingPage />,
+              },
+              {
+                path: "ideas/:ideaId/ai/refine/:sessionId/review",
+                element: <AIReviewPage />,
+              },
               { path: "ideas/:ideaId", element: <IdeaDetailPage /> },
               { path: "ideas/:ideaId/edit", element: <IdeaEditPage /> },
               { path: "reviews", element: <ReviewsPage /> },

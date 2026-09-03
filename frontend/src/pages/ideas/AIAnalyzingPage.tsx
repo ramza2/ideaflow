@@ -22,6 +22,11 @@ import {
   parseVisibilityParam,
   useAiSession,
 } from "../../ai/useAiSession";
+import {
+  REFINE_STEPPER_STEPS,
+  refineDirectionLabel,
+  refineStepperIndex,
+} from "../../utils/refineDirection";
 import type { AiSessionStatus } from "../../types/api";
 
 type StepStatus = "waiting" | "running" | "done" | "failed" | "paused";
@@ -32,6 +37,9 @@ interface Step {
   status: StepStatus;
 }
 
+const CREATE_STEP_LABELS = ["AI 요청 접수", "AI 구조화 처리", "등록 초안 준비"];
+const REFINE_STEP_LABELS = ["AI 발전 요청 접수", "AI 발전안 생성", "발전안 준비"];
+
 const STEP_ICONS: Record<StepStatus, React.ReactNode> = {
   waiting: <span className="w-2 h-2 rounded-full bg-[#e8e8f0] block" />,
   running: <Loader2 className="w-3.5 h-3.5 text-[#4f46e5] animate-spin" />,
@@ -40,11 +48,12 @@ const STEP_ICONS: Record<StepStatus, React.ReactNode> = {
   paused: <span className="w-2 h-2 rounded-full bg-[#f59e0b] block" />,
 };
 
-function buildSteps(status: AiSessionStatus | undefined): Step[] {
+function buildSteps(status: AiSessionStatus | undefined, isRefine: boolean): Step[] {
+  const labels = isRefine ? REFINE_STEP_LABELS : CREATE_STEP_LABELS;
   const base: Step[] = [
-    { id: "accepted", label: "AI 요청 접수", status: "waiting" },
-    { id: "structure", label: "AI 구조화 처리", status: "waiting" },
-    { id: "draft", label: "등록 초안 준비", status: "waiting" },
+    { id: "accepted", label: labels[0], status: "waiting" },
+    { id: "structure", label: labels[1], status: "waiting" },
+    { id: "draft", label: labels[2], status: "waiting" },
   ];
 
   if (!status || status === "PROCESSING") {
@@ -83,12 +92,18 @@ function buildSteps(status: AiSessionStatus | undefined): Step[] {
 
 export function AIAnalyzingPage() {
   const navigate = useNavigate();
-  const { workspaceId = "", sessionId = "" } = useParams();
+  const { workspaceId = "", sessionId = "", ideaId } = useParams();
   const [searchParams] = useSearchParams();
   const visibility = parseVisibilityParam(searchParams.get("visibility"));
 
   const { session, setSession, loading, error, pollError, refresh, clearPollError } =
     useAiSession(workspaceId, sessionId);
+
+  // ideaId is only present on the REFINE routes; fall back to it while the session loads.
+  const isRefine = session ? session.purpose === "REFINE" : Boolean(ideaId);
+  const sourceIdeaId = session?.source_idea_id ?? ideaId ?? "";
+  const directionLabel = refineDirectionLabel(session?.refine_direction);
+  const ideaPath = sourceIdeaId ? `/w/${workspaceId}/ideas/${sourceIdeaId}` : `/w/${workspaceId}/ideas`;
 
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [isSubmittingClarification, setIsSubmittingClarification] = useState(false);
@@ -127,7 +142,10 @@ export function AIAnalyzingPage() {
     });
   }, [session?.status, session?.clarifying_questions]);
 
-  const steps = useMemo(() => buildSteps(session?.status), [session?.status]);
+  const steps = useMemo(
+    () => buildSteps(session?.status, isRefine),
+    [session?.status, isRefine],
+  );
 
   const statusLabel: Record<StepStatus, string> = {
     waiting: "대기",
@@ -203,6 +221,10 @@ export function AIAnalyzingPage() {
   }
 
   function goToReview() {
+    if (isRefine) {
+      navigate(`/w/${workspaceId}/ideas/${sourceIdeaId}/ai/refine/${sessionId}/review`);
+      return;
+    }
     navigate(
       `/w/${workspaceId}/ideas/new/ai/review/${sessionId}?visibility=${visibility}`,
     );
@@ -230,12 +252,18 @@ export function AIAnalyzingPage() {
             <Button variant="secondary" onClick={() => void refresh()}>
               다시 확인
             </Button>
-            <Button
-              variant="primary"
-              onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
-            >
-              새 AI 작업 시작
-            </Button>
+            {isRefine ? (
+              <Button variant="primary" onClick={() => navigate(ideaPath)}>
+                아이디어로 돌아가기
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+              >
+                새 AI 작업 시작
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -249,12 +277,18 @@ export function AIAnalyzingPage() {
           <InlineAlert type="warning" title="취소된 AI 작업">
             이 AI 작업은 취소되었습니다.
           </InlineAlert>
-          <Button
-            variant="primary"
-            onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
-          >
-            새 Session 시작
-          </Button>
+          {isRefine ? (
+            <Button variant="primary" onClick={() => navigate(ideaPath)}>
+              아이디어로 돌아가기
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              onClick={() => navigate(`/w/${workspaceId}/ideas/new/ai`)}
+            >
+              새 Session 시작
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -269,10 +303,17 @@ export function AIAnalyzingPage() {
     <div className="min-h-full flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-lg">
         <div className="mb-8 flex justify-center">
-          <ProgressStepper
-            steps={["아이디어 입력", "AI 분석", "초안 검토", "등록 완료"]}
-            current={1}
-          />
+          {isRefine ? (
+            <ProgressStepper
+              steps={REFINE_STEPPER_STEPS}
+              current={refineStepperIndex(session.status)}
+            />
+          ) : (
+            <ProgressStepper
+              steps={["아이디어 입력", "AI 분석", "초안 검토", "등록 완료"]}
+              current={1}
+            />
+          )}
         </div>
 
         <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.07)] shadow-sm overflow-hidden">
@@ -286,7 +327,9 @@ export function AIAnalyzingPage() {
                     ? "분석에 실패했습니다"
                     : showClarification
                       ? "추가 정보가 필요합니다"
-                      : "아이디어를 정리하고 있습니다"}
+                      : isRefine
+                        ? "아이디어를 발전시키고 있습니다"
+                        : "아이디어를 정리하고 있습니다"}
               </h2>
             </div>
             <p className="text-sm text-white/70">
@@ -296,6 +339,7 @@ export function AIAnalyzingPage() {
           </div>
 
           <div className="flex items-center gap-6 px-6 py-3 bg-[#f8f8fb] border-b border-[rgba(0,0,0,0.05)] text-xs text-[#6b6b80] flex-wrap">
+            {isRefine && directionLabel && <span>발전 방향: {directionLabel}</span>}
             <span>시작 {startedAt}</span>
             <span>
               경과 {elapsed}
@@ -441,6 +485,15 @@ export function AIAnalyzingPage() {
               >
                 다시 시도
               </Button>
+              {isRefine && (
+                <Button
+                  variant="secondary"
+                  className="w-full mt-2"
+                  onClick={() => navigate(ideaPath)}
+                >
+                  아이디어로 돌아가기
+                </Button>
+              )}
             </div>
           )}
 
@@ -450,7 +503,9 @@ export function AIAnalyzingPage() {
                 <div className="flex items-center gap-2">
                   <Check className="w-4 h-4 text-[#16a34a]" />
                   <p className="text-sm font-semibold text-[#15803d]">
-                    분석 완료! 등록 초안이 준비되었습니다.
+                    {isRefine
+                      ? "분석 완료! 발전안이 준비되었습니다."
+                      : "분석 완료! 등록 초안이 준비되었습니다."}
                   </p>
                 </div>
               </div>
@@ -460,7 +515,7 @@ export function AIAnalyzingPage() {
                 icon={<ChevronRight className="w-4 h-4" />}
                 onClick={goToReview}
               >
-                초안 검토하기
+                {isRefine ? "발전안 검토하기" : "초안 검토하기"}
               </Button>
             </div>
           )}

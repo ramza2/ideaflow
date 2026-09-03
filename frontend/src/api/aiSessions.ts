@@ -1,6 +1,9 @@
 import { apiRequest } from "./client";
 import type {
   AiClarificationSubmitRequest,
+  AiRefineApplyRequest,
+  AiRefineApplyResponse,
+  AiRefineSessionCreateRequest,
   AiSession,
   AiSessionConfirmRequest,
   AiSessionConfirmResponse,
@@ -18,6 +21,21 @@ export async function createAiSession(
     body: payload,
     csrf: true,
   });
+}
+
+export async function createIdeaRefineSession(
+  workspaceId: string,
+  ideaId: string,
+  payload: AiRefineSessionCreateRequest,
+): Promise<AiSession> {
+  return apiRequest<AiSession>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/ai-refine-sessions`,
+    {
+      method: "POST",
+      body: payload,
+      csrf: true,
+    },
+  );
 }
 
 export async function getAiSession(
@@ -64,6 +82,21 @@ export async function confirmAiSession(
 ): Promise<AiSessionConfirmResponse> {
   return apiRequest<AiSessionConfirmResponse>(
     `/workspaces/${workspaceId}/ai-sessions/${sessionId}/confirm`,
+    {
+      method: "POST",
+      body: payload,
+      csrf: true,
+    },
+  );
+}
+
+export async function applyAiRefinement(
+  workspaceId: string,
+  sessionId: string,
+  payload: AiRefineApplyRequest,
+): Promise<AiRefineApplyResponse> {
+  return apiRequest<AiRefineApplyResponse>(
+    `/workspaces/${workspaceId}/ai-sessions/${sessionId}/apply-refinement`,
     {
       method: "POST",
       body: payload,
