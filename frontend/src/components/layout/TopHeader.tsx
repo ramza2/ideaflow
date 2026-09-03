@@ -5,9 +5,6 @@ import {
   Search,
   Bell,
   Plus,
-  Sparkles,
-  PenLine,
-  FileInput,
   ChevronDown,
   Check,
   Menu,
@@ -17,6 +14,7 @@ import {
 } from "lucide-react";
 import { Avatar } from "../common/Avatar";
 import { Button } from "../common/Button";
+import { IdeaCreateMenu } from "../ideas/IdeaCreateMenu";
 import { toast } from "../common/Toast";
 import { useAuth } from "../../auth/AuthProvider";
 import { useWorkspace } from "../../workspace/WorkspaceProvider";
@@ -44,7 +42,6 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   const { user, logout } = useAuth();
   const { workspaces, refreshWorkspaces } = useWorkspace();
   const [wsOpen, setWsOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const [createWsOpen, setCreateWsOpen] = useState(false);
   const [newWsName, setNewWsName] = useState("");
   const [creatingWs, setCreatingWs] = useState(false);
@@ -171,14 +168,12 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
   }
 
   const wsRef = useRef<HTMLDivElement>(null);
-  const createRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (wsRef.current && !wsRef.current.contains(e.target as Node)) setWsOpen(false);
-      if (createRef.current && !createRef.current.contains(e.target as Node)) setCreateOpen(false);
       if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false);
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) setProfileOpen(false);
     }
@@ -306,48 +301,20 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
       </form>
 
       <div className="flex items-center gap-1.5 ml-auto">
-        {/* Create button */}
-        <div ref={createRef} className="relative">
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Plus className="w-3.5 h-3.5" />}
-            onClick={() => setCreateOpen(!createOpen)}
-          >
-            <span className="hidden sm:inline">새 아이디어</span>
-          </Button>
-          {createOpen && (
-            <div className="absolute top-full right-0 mt-1 w-52 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1 z-50">
-              <button
-                onClick={() => { navigate(`/w/${workspaceId}/ideas/new/ai`); setCreateOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-[#f5f3ff] group"
-              >
-                <div className="w-7 h-7 rounded-lg bg-[#ede9fe] flex items-center justify-center">
-                  <Sparkles className="w-4 h-4 text-[#7c3aed]" />
-                </div>
-                <div className="text-left">
-                  <p className="text-sm font-semibold text-[#7c3aed]">AI로 빠르게 등록</p>
-                  <p className="text-xs text-[#6b6b80]">자연어로 입력</p>
-                </div>
-              </button>
-              <button
-                onClick={() => { navigate(`/w/${workspaceId}/ideas/new`); setCreateOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-[#f4f4f8]"
-              >
-                <div className="w-7 h-7 rounded-lg bg-[#f0f0f5] flex items-center justify-center">
-                  <PenLine className="w-4 h-4 text-[#6b6b80]" />
-                </div>
-                <p className="text-sm text-[#111118]">직접 등록</p>
-              </button>
-              <button className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-[#f4f4f8]">
-                <div className="w-7 h-7 rounded-lg bg-[#f0f0f5] flex items-center justify-center">
-                  <FileInput className="w-4 h-4 text-[#6b6b80]" />
-                </div>
-                <p className="text-sm text-[#111118]">텍스트·파일 가져오기</p>
-              </button>
-            </div>
+        <IdeaCreateMenu
+          workspaceId={workspaceId}
+          align="right"
+          trigger={({ toggle }) => (
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Plus className="w-3.5 h-3.5" />}
+              onClick={toggle}
+            >
+              <span className="hidden sm:inline">새 아이디어</span>
+            </Button>
           )}
-        </div>
+        />
 
         {/* Notifications */}
         <div ref={notifRef} className="relative">
