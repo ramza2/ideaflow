@@ -244,8 +244,13 @@ def _load_refine_source_idea(
             status_code=409,
         )
     if for_update:
-        stmt = select(Idea).where(Idea.id == session.source_idea_id).with_for_update()
-        locked = db.execute(stmt).scalar_one_or_none()
+        # populate_existing keeps the locked row authoritative for the freshness check.
+        locked = db.execute(
+            select(Idea)
+            .where(Idea.id == session.source_idea_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
         if locked is None or locked.deleted_at is not None or locked.workspace_id != workspace.id:
             raise AppError("Idea not found.", code="IDEA_NOT_FOUND", status_code=404)
 
