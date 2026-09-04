@@ -124,6 +124,66 @@ def test_clearing_nonempty_field_rejected() -> None:
         )
 
 
+def test_blank_string_vs_null_is_semantic_noop() -> None:
+    result = parse_refinement_result(
+        '{"decision":"READY_FOR_REVIEW","draft_patch":{"background":""}}'
+    )
+    with pytest.raises(ValueError, match="actual change"):
+        validate_refinement_against_source(
+            result,
+            source_snapshot={"background": None, "title": "T"},
+        )
+    merged = merge_refinement_patch({"background": None, "title": "T"}, result.draft_patch)
+    assert merged_draft_differs_from_source({"background": None, "title": "T"}, merged) is False
+
+
+def test_tag_order_only_change_is_semantic_noop() -> None:
+    result = parse_refinement_result(
+        '{"decision":"READY_FOR_REVIEW","draft_patch":{"tags":["B","A"]}}'
+    )
+    with pytest.raises(ValueError, match="actual change"):
+        validate_refinement_against_source(
+            result,
+            source_snapshot={"tags": ["A", "B"], "title": "T"},
+        )
+
+
+def test_tag_duplicate_only_change_is_semantic_noop() -> None:
+    result = parse_refinement_result(
+        '{"decision":"READY_FOR_REVIEW","draft_patch":{"tags":["A","A"]}}'
+    )
+    with pytest.raises(ValueError, match="actual change"):
+        validate_refinement_against_source(
+            result,
+            source_snapshot={"tags": ["A"], "title": "T"},
+        )
+
+
+def test_tags_object_element_rejected() -> None:
+    with pytest.raises(LlmResponseValidationError):
+        parse_refinement_result(
+            '{"decision":"READY_FOR_REVIEW","draft_patch":{"tags":[{"bad":1}]}}'
+        )
+
+
+def test_tags_number_elements_rejected() -> None:
+    with pytest.raises(LlmResponseValidationError):
+        parse_refinement_result(
+            '{"decision":"READY_FOR_REVIEW","draft_patch":{"tags":[1,2]}}'
+        )
+
+
+def test_tags_string_normalization() -> None:
+    result = parse_refinement_result(
+        '{"decision":"READY_FOR_REVIEW","draft_patch":{"tags":[" A ","B",""]}}'
+    )
+    assert result.draft_patch["tags"] == ["A", "B"]
+    validate_refinement_against_source(
+        result,
+        source_snapshot={"tags": ["X"], "title": "T"},
+    )
+
+
 def test_merged_draft_no_effective_change_after_category_sanitize() -> None:
     source = {
         "title": "T",

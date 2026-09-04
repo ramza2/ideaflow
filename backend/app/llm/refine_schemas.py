@@ -125,7 +125,25 @@ class IdeaRefinementPatch(BaseModel):
             return None
         if not isinstance(value, list):
             raise ValueError("tags must be a list")
-        return [str(t).strip() for t in value if str(t).strip()]
+        # Match Idea tag rules: string elements only, trim, drop blanks, dedupe.
+        # Do not stringify objects/numbers into tag names.
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("tags elements must be strings")
+            name = item.strip()
+            if not name:
+                continue
+            if len(name) > 64:
+                raise ValueError("tag name must be at most 64 characters")
+            if name in seen:
+                continue
+            seen.add(name)
+            normalized.append(name)
+        if len(normalized) > 20:
+            raise ValueError("at most 20 tags are allowed")
+        return normalized
 
 
 def _typed_sparse_patch(raw: dict[str, Any]) -> dict[str, Any]:
@@ -196,13 +214,26 @@ def _is_nonempty_string(value: Any) -> bool:
 
 
 def _normalize_comparable(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+    """Canonical semantic equality used by Worker and aligned with apply/FE.
+
+    - blank/whitespace strings ≡ None
+    - lists ≡ trim + drop blanks + dedupe + sort
+    """
     if hasattr(value, "value"):
-        return value.value
+        value = value.value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    if isinstance(value, list):
+        return sorted({str(v).strip() for v in value if str(v).strip()})
     return value
+
+
+def _field_comparable(key: str, value: Any) -> Any:
+    """Per-field comparable form (tags: None ≡ [])."""
+    if key == "tags" and value is None:
+        value = []
+    return _normalize_comparable(value)
 
 
 def validate_refinement_against_source(
@@ -227,7 +258,7 @@ def validate_refinement_against_source(
         if key != "tags" and _is_nonempty_string(old_val):
             if new_val is None or (isinstance(new_val, str) and not new_val.strip()):
                 raise ValueError(f"cannot clear non-empty field: {key}")
-        if _normalize_comparable(old_val) != _normalize_comparable(new_val):
+        if _field_comparable(key, old_val) != _field_comparable(key, new_val):
             changed = True
     if not changed:
         raise ValueError("READY_FOR_REVIEW requires at least one actual change vs source")
@@ -239,8 +270,8 @@ def merged_draft_differs_from_source(
 ) -> bool:
     """True when sanitized/merged draft still differs from the source snapshot."""
     for key in REFINE_PATCH_FIELDS:
-        if _normalize_comparable(source_snapshot.get(key)) != _normalize_comparable(
-            merged_draft.get(key)
+        if _field_comparable(key, source_snapshot.get(key)) != _field_comparable(
+            key, merged_draft.get(key)
         ):
             return True
     return False
