@@ -283,16 +283,60 @@ def resolve_settings_non_secret_only(
         return Settings.model_construct(**payload)
 
 
-def resolve_llm_settings(db: Session, base_settings: Settings | None = None) -> Settings:
-    return resolve_settings_for_integrations(
-        db, integrations=[IntegrationKey.LLM], base_settings=base_settings
+def _overlay_own_runtime_full(
+    db: Session,
+    payload: dict[str, Any],
+    *,
+    key: IntegrationKey,
+    base: Settings,
+) -> None:
+    """Overlay one integration's runtime config_json + secret onto payload."""
+    row = get_runtime_row(db, key)
+    if row is None:
+        return
+    config = _whitelist_config(
+        key, row.config_json if isinstance(row.config_json, dict) else {}
     )
+    _overlay_config_into_payload(payload, key, config)
+    _overlay_secret_into_payload(
+        payload,
+        key,
+        row.secret_mode,
+        row.secret_ciphertext,
+        base,
+    )
+
+
+def resolve_llm_settings(db: Session, base_settings: Settings | None = None) -> Settings:
+    """Effective LLM settings with Web Search NON-SECRET runtime for invariants.
+
+    Does not decrypt Web Search secrets. Validates Settings exactly once.
+    """
+    base = base_settings or get_settings()
+    payload = base.model_dump()
+    _overlay_config_into_payload(
+        payload,
+        IntegrationKey.WEB_SEARCH,
+        _current_non_secret_overlay(db, IntegrationKey.WEB_SEARCH),
+    )
+    _overlay_own_runtime_full(db, payload, key=IntegrationKey.LLM, base=base)
+    return _validate_settings_payload(payload)
 
 
 def resolve_web_search_settings(db: Session, base_settings: Settings | None = None) -> Settings:
-    return resolve_settings_for_integrations(
-        db, integrations=[IntegrationKey.WEB_SEARCH], base_settings=base_settings
+    """Effective Web Search settings with LLM NON-SECRET runtime for invariants.
+
+    Does not decrypt LLM secrets. Validates Settings exactly once.
+    """
+    base = base_settings or get_settings()
+    payload = base.model_dump()
+    _overlay_config_into_payload(
+        payload,
+        IntegrationKey.LLM,
+        _current_non_secret_overlay(db, IntegrationKey.LLM),
     )
+    _overlay_own_runtime_full(db, payload, key=IntegrationKey.WEB_SEARCH, base=base)
+    return _validate_settings_payload(payload)
 
 
 def resolve_embedding_settings(db: Session, base_settings: Settings | None = None) -> Settings:
@@ -304,11 +348,41 @@ def resolve_embedding_settings(db: Session, base_settings: Settings | None = Non
 def resolve_llm_and_web_search_settings(
     db: Session, base_settings: Settings | None = None
 ) -> Settings:
+    """Full LLM + Web Search effective config (both secrets applied)."""
     return resolve_settings_for_integrations(
         db,
         integrations=[IntegrationKey.LLM, IntegrationKey.WEB_SEARCH],
         base_settings=base_settings,
     )
+
+
+def _validate_reset_candidate(
+    db: Session,
+    *,
+    key: IntegrationKey,
+    base: Settings,
+) -> None:
+    """Ensure deleting this runtime row leaves a valid ENV+counterpart combination.
+
+    Counterpart secrets are never decrypted. The row being reset is not overlaid
+    (ENV fallback for that integration), so broken ciphertext need not be read.
+    """
+    if key not in (IntegrationKey.LLM, IntegrationKey.WEB_SEARCH):
+        return
+    payload = base.model_dump()
+    if key == IntegrationKey.LLM:
+        _overlay_config_into_payload(
+            payload,
+            IntegrationKey.WEB_SEARCH,
+            _current_non_secret_overlay(db, IntegrationKey.WEB_SEARCH),
+        )
+    else:
+        _overlay_config_into_payload(
+            payload,
+            IntegrationKey.LLM,
+            _current_non_secret_overlay(db, IntegrationKey.LLM),
+        )
+    _validate_settings_payload(payload)
 
 
 def _api_key_source(
@@ -758,6 +832,10 @@ def reset_runtime_config(
         )
     if row is None:
         return
+
+    # LLM/Web reset must leave a valid ENV + counterpart non-secret combination.
+    # Do not decrypt the row being deleted (or counterpart secrets).
+    _validate_reset_candidate(db, key=key, base=base)
 
     before_state: dict[str, Any] | None = None
     if key == IntegrationKey.EMBEDDING:

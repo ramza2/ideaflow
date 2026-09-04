@@ -1466,8 +1466,10 @@ def test_resolver_failure_on_idea_edit_invalidates_stale_vector(
 def test_combined_llm_web_one_shot_valid_resolve(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.core.errors import AppError
-    from app.services.integration_runtime_config import resolve_llm_and_web_search_settings
+    from app.services.integration_runtime_config import (
+        resolve_llm_and_web_search_settings,
+        resolve_web_search_settings,
+    )
 
     monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
@@ -1481,8 +1483,8 @@ def test_combined_llm_web_one_shot_valid_resolve(
     admin, _ = _admin_user(db)
     base = get_settings()
 
-    # LLM alone with timeout=220 would fail vs ENV web budget (20*5+220=320 > 300)
-    # Combined with WEB max_queries=1 is valid (20*1+220=240 < 300)
+    # LLM timeout=220 alone vs ENV web (max_queries=5) would be invalid,
+    # but individual resolvers must overlay counterpart NON-SECRET runtime.
     row_llm = IntegrationRuntimeConfig(
         integration_key=IntegrationKey.LLM.value,
         config_json={"timeout_seconds": 220.0},
@@ -1503,8 +1505,13 @@ def test_combined_llm_web_one_shot_valid_resolve(
     db.add(row_web)
     db.commit()
 
-    with pytest.raises(AppError):
-        resolve_llm_settings(db, base_settings=base)
+    llm_eff = resolve_llm_settings(db, base_settings=base)
+    assert llm_eff.llm_timeout_seconds == 220.0
+    assert llm_eff.web_search_max_queries == 1
+
+    web_eff = resolve_web_search_settings(db, base_settings=base)
+    assert web_eff.llm_timeout_seconds == 220.0
+    assert web_eff.web_search_max_queries == 1
 
     combined = resolve_llm_and_web_search_settings(db, base_settings=base)
     assert combined.llm_timeout_seconds == 220.0
@@ -1933,3 +1940,293 @@ def test_web_research_worker_hot_reload_a_to_b(
     assert seen_ws_urls[-1] == "https://search.runtime-b.example/q"
     assert "https://search.runtime-a.example/q" in seen_ws_urls
     assert "https://search.runtime-b.example/q" in seen_ws_urls
+
+
+def _install_valid_cross_runtime_pair(db: Session, admin: User) -> None:
+    """LLM timeout=220 + Web max_queries=1 under lease=300 (valid pair)."""
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.LLM.value,
+            config_json={"timeout_seconds": 220.0, "model_name": "runtime-cross-llm"},
+            secret_mode=IntegrationSecretMode.INHERIT_ENV.value,
+            secret_ciphertext=None,
+            revision=1,
+            updated_by=admin.id,
+        )
+    )
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.WEB_SEARCH.value,
+            config_json={"max_queries": 1},
+            secret_mode=IntegrationSecretMode.INHERIT_ENV.value,
+            secret_ciphertext=None,
+            revision=1,
+            updated_by=admin.id,
+        )
+    )
+    db.commit()
+
+
+def test_llm_and_web_resolvers_see_counterpart_non_secret(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.integration_runtime_config import resolve_web_search_settings
+
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    _install_valid_cross_runtime_pair(db, admin)
+    base = get_settings()
+
+    llm_eff = resolve_llm_settings(db, base_settings=base)
+    assert llm_eff.llm_timeout_seconds == 220.0
+    assert llm_eff.web_search_max_queries == 1
+
+    web_eff = resolve_web_search_settings(db, base_settings=base)
+    assert web_eff.llm_timeout_seconds == 220.0
+    assert web_eff.web_search_max_queries == 1
+
+
+def test_resolvers_do_not_decrypt_counterpart_secrets(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.integration_secrets import encrypt_integration_secret
+    from app.services.integration_runtime_config import resolve_web_search_settings
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("LLM_API_KEY", "ENV_LLM_SECRET")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("WEB_SEARCH_API_KEY", "ENV_WEB_SECRET")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    base = get_settings()
+    llm_cipher = encrypt_integration_secret("RUNTIME_LLM_SECRET", base)
+    web_cipher = encrypt_integration_secret("RUNTIME_WEB_SECRET", base)
+
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.LLM.value,
+            config_json={"timeout_seconds": 220.0},
+            secret_mode=IntegrationSecretMode.ENCRYPTED.value,
+            secret_ciphertext=llm_cipher,
+            revision=1,
+            updated_by=admin.id,
+        )
+    )
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.WEB_SEARCH.value,
+            config_json={"max_queries": 1},
+            secret_mode=IntegrationSecretMode.ENCRYPTED.value,
+            secret_ciphertext=web_cipher,
+            revision=1,
+            updated_by=admin.id,
+        )
+    )
+    db.commit()
+
+    decrypt_calls: list[str] = []
+    real_decrypt = __import__(
+        "app.core.integration_secrets", fromlist=["decrypt_integration_secret"]
+    ).decrypt_integration_secret
+
+    def spy_decrypt(ciphertext: str, settings):
+        decrypt_calls.append(ciphertext)
+        return real_decrypt(ciphertext, settings)
+
+    monkeypatch.setattr(
+        "app.services.integration_runtime_config.decrypt_integration_secret",
+        spy_decrypt,
+    )
+
+    llm_eff = resolve_llm_settings(db, base_settings=base)
+    assert llm_eff.llm_api_key == "RUNTIME_LLM_SECRET"
+    assert llm_eff.web_search_api_key == "ENV_WEB_SECRET"  # ENV inherit for counterpart
+    assert decrypt_calls == [llm_cipher]
+
+    decrypt_calls.clear()
+    web_eff = resolve_web_search_settings(db, base_settings=base)
+    assert web_eff.web_search_api_key == "RUNTIME_WEB_SECRET"
+    assert web_eff.llm_api_key == "ENV_LLM_SECRET"
+    assert decrypt_calls == [web_cipher]
+
+
+def test_valid_cross_runtime_pair_create_worker_and_connection_tests(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "http_json")
+    monkeypatch.setenv("AI_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    _install_valid_cross_runtime_pair(db, admin)
+
+    db.execute(
+        text(
+            "UPDATE ai_jobs SET status = 'FAILED' "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.commit()
+
+    seen_llm: list[float] = []
+    seen_web: list[int] = []
+
+    def llm_factory(settings=None):
+        assert settings is not None
+        seen_llm.append(settings.llm_timeout_seconds)
+        assert settings.web_search_max_queries == 1
+        return FakeLlmProvider(settings)
+
+    def ws_factory(settings=None):
+        assert settings is not None
+        seen_web.append(settings.web_search_max_queries)
+        assert settings.llm_timeout_seconds == 220.0
+        return FakeWebSearchProvider(settings)
+
+    monkeypatch.setattr("app.services.ai_worker.get_llm_provider", llm_factory)
+    monkeypatch.setattr("app.services.ai_worker.get_web_search_provider", ws_factory)
+    monkeypatch.setattr("app.services.admin_integration.get_llm_provider", llm_factory)
+    monkeypatch.setattr(
+        "app.services.admin_integration.get_web_search_provider", ws_factory
+    )
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions",
+        json={"input_text": "cross runtime create job"},
+        headers=headers,
+    )
+    assert r.status_code == 202, r.text
+    session_id = r.json()["id"]
+
+    operational = get_settings()
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=None,
+        search_provider=None,
+        settings=operational,
+        worker_id="cross-create-worker",
+        recover=False,
+    )
+    from app.models.ai import IdeaAiSession
+    from app.models.enums import IdeaAiSessionStatus
+
+    db.expire_all()
+    session = db.get(IdeaAiSession, uuid.UUID(session_id))
+    assert session is not None
+    assert session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value
+    assert seen_llm and seen_llm[-1] == 220.0
+
+    r = client.post("/api/v1/admin/integrations/llm/test", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "OK"
+    assert r.json().get("error_code") in (None, "")
+
+    r = client.post(
+        "/api/v1/admin/integrations/web-search/test",
+        json={"query": "cross runtime probe"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "OK"
+    assert seen_web and seen_web[-1] == 1
+
+
+def test_invalid_web_reset_rejected_then_valid_reset_order(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.models.enums import IntegrationConfigAuditAction
+
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _install_valid_cross_runtime_pair(db, admin)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    # Web reset with LLM timeout 220 + ENV web queries 5 → invalid
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/web-search/runtime-config",
+        json={"expected_revision": 1},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+    db.expire_all()
+    web_row = db.execute(
+        select(IntegrationRuntimeConfig).where(
+            IntegrationRuntimeConfig.integration_key == IntegrationKey.WEB_SEARCH.value
+        )
+    ).scalar_one()
+    assert int(web_row.revision) == 1
+    assert web_row.config_json.get("max_queries") == 1
+    audits = db.execute(
+        select(IntegrationConfigAudit).where(
+            IntegrationConfigAudit.integration_key == IntegrationKey.WEB_SEARCH.value,
+            IntegrationConfigAudit.action
+            == IntegrationConfigAuditAction.RESET_TO_ENV.value,
+        )
+    ).scalars().all()
+    assert audits == []
+
+    # Reset LLM first → ENV LLM 120 + Web queries 1 → valid
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": 1},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["llm"]["runtime_override_exists"] is False
+
+    # Then Web reset → full ENV → valid
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/web-search/runtime-config",
+        json={"expected_revision": 1},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["web_search"]["runtime_override_exists"] is False
+    db.expire_all()
+    remaining = db.execute(select(IntegrationRuntimeConfig)).scalars().all()
+    assert remaining == []
