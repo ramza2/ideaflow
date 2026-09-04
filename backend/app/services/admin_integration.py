@@ -201,25 +201,48 @@ def get_integration_config(
 ) -> AdminIntegrationConfigResponse:
     base = settings or get_settings()
 
+    # Prefer combined LLM+Web resolve so cross-field lease invariants that are
+    # valid only together do not spuriously fail Admin GET. On failure, isolate
+    # per integration (broken secret / invalid config on one side).
+    combined: Settings | None = None
     try:
-        llm_effective = resolve_llm_settings(db, base_settings=base)
+        from app.services.integration_runtime_config import (
+            resolve_llm_and_web_search_settings,
+        )
+
+        combined = resolve_llm_and_web_search_settings(db, base_settings=base)
+    except AppError:
+        combined = None
+
+    if combined is not None:
+        llm_effective = combined
+        web_search_effective = combined
         llm_meta = build_runtime_meta(
             db, IntegrationKey.LLM, base=base, effective=llm_effective
         )
-    except AppError as exc:
-        llm_effective, llm_meta = build_runtime_meta_from_row_safe(
-            db, IntegrationKey.LLM, base=base, error=exc
-        )
-
-    try:
-        web_search_effective = resolve_web_search_settings(db, base_settings=base)
         web_search_meta = build_runtime_meta(
             db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
         )
-    except AppError as exc:
-        web_search_effective, web_search_meta = build_runtime_meta_from_row_safe(
-            db, IntegrationKey.WEB_SEARCH, base=base, error=exc
-        )
+    else:
+        try:
+            llm_effective = resolve_llm_settings(db, base_settings=base)
+            llm_meta = build_runtime_meta(
+                db, IntegrationKey.LLM, base=base, effective=llm_effective
+            )
+        except AppError as exc:
+            llm_effective, llm_meta = build_runtime_meta_from_row_safe(
+                db, IntegrationKey.LLM, base=base, error=exc
+            )
+
+        try:
+            web_search_effective = resolve_web_search_settings(db, base_settings=base)
+            web_search_meta = build_runtime_meta(
+                db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
+            )
+        except AppError as exc:
+            web_search_effective, web_search_meta = build_runtime_meta_from_row_safe(
+                db, IntegrationKey.WEB_SEARCH, base=base, error=exc
+            )
 
     try:
         embedding_effective = resolve_embedding_settings(db, base_settings=base)

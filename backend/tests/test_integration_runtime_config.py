@@ -1438,16 +1438,16 @@ def test_resolver_failure_on_idea_edit_invalidates_stale_vector(
     _store_embedding(db, idea, text="stale vector content", model_name="stale-model")
     assert db.get(IdeaEmbedding, idea.id) is not None
 
-    # Invalid runtime: timeout exceeds lease → resolve fails
-    upsert_runtime_config(
-        db,
-        key=IntegrationKey.EMBEDDING,
-        actor_id=admin.id,
-        expected_revision=0,
-        patch_fields={"timeout_seconds": 200.0},
-        api_key_action="KEEP",
-        api_key=None,
-        base_settings=get_settings(),
+    # Bypass upsert validation: persist invalid runtime so resolve fails at read time.
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.EMBEDDING.value,
+            config_json={"timeout_seconds": 200.0},
+            secret_mode=IntegrationSecretMode.INHERIT_ENV.value,
+            secret_ciphertext=None,
+            revision=1,
+            updated_by=admin.id,
+        )
     )
     db.commit()
 
@@ -1826,8 +1826,9 @@ def test_web_research_worker_hot_reload_a_to_b(
             raise NotImplementedError
 
         def refine_idea_with_evidence(self, request):
+            # Keep base draft unchanged so evidence_links are not required.
             return EvidenceRefinementResult(
-                draft={"title": "AI Draft", "background": "from evidence"},
+                draft=dict(request.base_draft or {}),
                 evidence_links={},
                 research_summary="ok",
             )

@@ -276,7 +276,11 @@ def resolve_settings_non_secret_only(
     row = get_runtime_row(db, key)
     if row is not None and row.secret_mode == IntegrationSecretMode.CLEARED.value:
         payload[_SECRET_ATTR[key]] = ""
-    return _validate_settings_payload(payload)
+    try:
+        return _validate_settings_payload(payload)
+    except AppError:
+        # Display-only fallback when partial overlay fails global invariants (e.g. lease).
+        return Settings.model_construct(**payload)
 
 
 def resolve_llm_settings(db: Session, base_settings: Settings | None = None) -> Settings:
