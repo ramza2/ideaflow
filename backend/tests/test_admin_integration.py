@@ -302,6 +302,10 @@ def test_non_admin_forbidden_on_admin_endpoints(client: TestClient, db: Session)
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "FORBIDDEN"
 
+    r = client.post("/api/v1/admin/integrations/embedding/test", headers=headers)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
 
 def test_system_admin_must_change_password_blocked(client: TestClient, db: Session) -> None:
     admin, pw = _admin_user(db, must_change_password=True)
@@ -327,6 +331,7 @@ def test_system_admin_must_change_password_blocked(client: TestClient, db: Sessi
             "/api/v1/admin/integrations/web-search/test",
             {"query": "idea management"},
         ),
+        ("POST", "/api/v1/admin/integrations/embedding/test", None),
     ):
         if body is None:
             r = client.request(method, path, headers=headers)
@@ -975,3 +980,176 @@ def test_web_search_connection_test_provider_errors(
         assert body["status"] == "ERROR"
         assert body["error_code"] == code
         assert body["retryable"] is retryable
+
+
+def test_integrations_get_includes_embedding_without_secrets(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://user:password@embed.example.com/v1?token=EMB_SECRET")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "SUPER_SECRET_EMBEDDING_KEY")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "bge-m3")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.get("/api/v1/admin/integrations", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    dumped = json.dumps(body)
+    assert "SUPER_SECRET_EMBEDDING_KEY" not in dumped
+    assert "EMB_SECRET" not in dumped
+    assert "password" not in dumped
+    emb = body["embedding"]
+    assert emb["api_key_configured"] is True
+    assert emb["api_url"] == "https://embed.example.com/v1"
+    assert emb["enabled"] is True
+    assert emb["model_name"] == "bge-m3"
+    assert "stored_embedding_count" in emb
+    assert set(emb["job_counts"].keys()) >= {"queued", "running", "succeeded", "failed"}
+
+
+def test_embedding_connection_test_requires_csrf(client: TestClient, db: Session) -> None:
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post("/api/v1/admin/integrations/embedding/test")
+    assert r.status_code in (401, 403)
+
+
+def test_embedding_connection_test_not_configured(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("EMBEDDING_API_URL", "")
+    get_settings.cache_clear()
+    reset_engine()
+
+    called = {"n": 0}
+
+    def _should_not_call(_settings=None):
+        called["n"] += 1
+        raise AssertionError("provider must not be called when disabled")
+
+    monkeypatch.setattr(admin_integration_service, "get_embedding_provider", _should_not_call)
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/embedding/test",
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "NOT_CONFIGURED"
+    assert called["n"] == 0
+    assert body["safe_message"]
+
+
+def test_embedding_connection_test_ok_with_fake_provider(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.embeddings.fake import FakeEmbeddingProvider
+
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embed.example.com")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+    get_settings.cache_clear()
+    reset_engine()
+
+    settings = get_settings()
+    fake = FakeEmbeddingProvider(settings)
+    monkeypatch.setattr(
+        admin_integration_service, "get_embedding_provider", lambda _settings=None: fake
+    )
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/embedding/test",
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "OK"
+    assert body["provider"] == "fake"
+    assert body["dimension"] == settings.embedding_dimension
+    assert body["latency_ms"] is not None
+    dumped = json.dumps(body)
+    assert "test-key" not in dumped
+    assert "IdeaFlow embedding" not in dumped
+
+
+def test_embedding_connection_test_dimension_mismatch(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embed.example.com")
+    get_settings.cache_clear()
+    reset_engine()
+
+    class BadDimProvider:
+        provider_name = "bad"
+        model_name = "bad-model"
+
+        def embed_text(self, text: str) -> list[float]:
+            return [0.1, 0.2]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        admin_integration_service, "get_embedding_provider", lambda _settings=None: BadDimProvider()
+    )
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/embedding/test",
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ERROR"
+    assert body["error_code"] == "EMBEDDING_DIMENSION_MISMATCH"
+    assert body["safe_message"]
+    assert "0.1" not in json.dumps(body)
+
+
+def test_embedding_connection_test_provider_failure_safe(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.embeddings.exceptions import EmbeddingServerError
+
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embed.example.com")
+    get_settings.cache_clear()
+    reset_engine()
+
+    class FailingProvider:
+        provider_name = "fail"
+        model_name = "fail-model"
+
+        def embed_text(self, text: str) -> list[float]:
+            raise EmbeddingServerError("raw secret body KEY=abc")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        admin_integration_service, "get_embedding_provider", lambda _settings=None: FailingProvider()
+    )
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.post(
+        "/api/v1/admin/integrations/embedding/test",
+        headers=_auth_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ERROR"
+    dumped = json.dumps(body)
+    assert "KEY=abc" not in dumped
+    assert "raw secret" not in dumped
+    assert body["safe_message"]

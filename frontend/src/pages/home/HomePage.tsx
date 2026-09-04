@@ -3,8 +3,6 @@ import { useNavigate, useParams } from "react-router";
 import {
   Sparkles,
   PenLine,
-  Paperclip,
-  BookOpen,
   Lightbulb,
   Clock,
   AlertCircle,
@@ -17,7 +15,6 @@ import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import { Button } from "../../components/common/Button";
 import { StageLabelBadge } from "../../components/common/Badge";
 import { Avatar } from "../../components/common/Avatar";
-import { Checkbox } from "../../components/common/Input";
 import { HomePageSkeleton } from "../../components/common/Skeleton";
 import { toDisplayUser } from "../../utils/avatar";
 import type { IdeaListItem } from "../../types/api";
@@ -32,8 +29,6 @@ export function HomePage() {
   const [totalCount, setTotalCount] = useState(0);
   const [assignedCount, setAssignedCount] = useState<number | null>(null);
   const [inputText, setInputText] = useState("");
-  const [useWebSearch, setUseWebSearch] = useState(false);
-  const [checkSimilar, setCheckSimilar] = useState(true);
 
   useEffect(() => {
     if (!workspaceId || !user) return;
@@ -107,17 +102,9 @@ export function HomePage() {
           maxLength={2000}
         />
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-3">
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4">
-            <Checkbox label="웹 검색 포함" checked={useWebSearch} onChange={(e) => setUseWebSearch(e.target.checked)} />
-            <Checkbox label="유사 아이디어 확인" checked={checkSimilar} onChange={(e) => setCheckSimilar(e.target.checked)} />
-            <button type="button" className="flex items-center gap-1 text-sm text-[#6b6b80] hover:text-[#4f46e5]">
-              <Paperclip className="w-3.5 h-3.5" />
-            </button>
-            <button type="button" className="hidden sm:flex items-center gap-1 text-xs text-[#6b6b80] hover:text-[#4f46e5]">
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>예시 보기</span>
-            </button>
-          </div>
+          <p className="text-xs text-[#6b6b80]">
+            웹 조사는 AI 초안 검토 단계에서 추가할 수 있습니다.
+          </p>
           <div className="flex items-center gap-2 justify-end">
             <span className="text-xs text-[#9ca3af] font-mono">{inputText.length}/2000</span>
             <Button variant="secondary" size="sm" icon={<PenLine className="w-3.5 h-3.5" />} onClick={() => navigate(`/w/${workspaceId}/ideas/new`)}>
@@ -208,15 +195,6 @@ export function HomePage() {
                   </span>
                 </button>
               ))}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.07)] shadow-sm">
-            <div className="px-5 py-4 border-b border-[rgba(0,0,0,0.06)]">
-              <h3 className="text-sm font-semibold text-[#111118]">추천 검토</h3>
-            </div>
-            <div className="px-5 py-8 text-center text-sm text-[#6b6b80]">
-              Review API 연동 전까지 추천 검토가 제공되지 않습니다.
             </div>
           </div>
         </div>

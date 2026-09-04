@@ -413,3 +413,84 @@ def test_deleted_user_login_rejected(client: TestClient, db: Session) -> None:
     user, password = _create_user(db, deleted=True)
     r = _login(client, user.email, password)
     assert r.status_code == 401
+
+
+def test_profile_update_requires_auth(client: TestClient) -> None:
+    r = client.patch("/api/v1/auth/me", json={"name": "Nope"})
+    assert r.status_code == 401
+
+
+def test_profile_update_requires_csrf(client: TestClient, db: Session) -> None:
+    user, password = _create_user(db)
+    _login(client, user.email, password)
+    r = client.patch("/api/v1/auth/me", json={"name": "New Name"})
+    assert r.status_code in (401, 403)
+
+
+def test_profile_update_success_and_reflected_on_me(client: TestClient, db: Session) -> None:
+    user, password = _create_user(db)
+    _login(client, user.email, password)
+    csrf = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    r = client.patch(
+        "/api/v1/auth/me",
+        json={"name": "Updated Display"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Updated Display"
+    assert body["email"] == user.email
+    assert body["system_role"] == user.system_role
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["name"] == "Updated Display"
+
+
+def test_profile_update_rejects_blank_and_overlong(client: TestClient, db: Session) -> None:
+    user, password = _create_user(db)
+    _login(client, user.email, password)
+    csrf = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    headers = {"X-CSRF-Token": csrf}
+    blank = client.patch("/api/v1/auth/me", json={"name": "   "}, headers=headers)
+    assert blank.status_code == 422
+    overlong = client.patch("/api/v1/auth/me", json={"name": "x" * 101}, headers=headers)
+    assert overlong.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"name": "Ok", "email": "evil@example.com"},
+        {"name": "Ok", "system_role": "SYSTEM_ADMIN"},
+        {"name": "Ok", "status": "LOCKED"},
+        {"name": "Ok", "must_change_password": False},
+    ],
+)
+def test_profile_update_forbids_extra_fields(
+    client: TestClient, db: Session, payload: dict
+) -> None:
+    user, password = _create_user(db)
+    _login(client, user.email, password)
+    csrf = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    r = client.patch("/api/v1/auth/me", json=payload, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 422
+    me = client.get("/api/v1/auth/me")
+    assert me.json()["email"] == user.email
+    assert me.json()["system_role"] == user.system_role
+    assert me.json()["status"] == user.status
+
+
+def test_profile_update_cannot_escalate_regular_user(client: TestClient, db: Session) -> None:
+    user, password = _create_user(db)
+    assert user.system_role != "SYSTEM_ADMIN"
+    _login(client, user.email, password)
+    csrf = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    r = client.patch(
+        "/api/v1/auth/me",
+        json={"name": "Still User", "system_role": "SYSTEM_ADMIN"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert r.status_code == 422
+    db.refresh(user)
+    assert user.system_role != "SYSTEM_ADMIN"
+    assert user.name != "Still User"

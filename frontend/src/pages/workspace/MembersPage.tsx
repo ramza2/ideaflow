@@ -14,6 +14,7 @@ import { Avatar } from "../../components/common/Avatar";
 import { ApiMemberRoleBadge, ApiMemberStatusBadge } from "../../components/common/Badge";
 import { EmptyState } from "../../components/common/EmptyState";
 import { toast } from "../../components/common/Toast";
+import { WorkspaceSettingsNav } from "../../components/workspace/WorkspaceSettingsNav";
 import { toDisplayUser } from "../../utils/avatar";
 import type { MemberPublic, WorkspaceRole } from "../../types/api";
 
@@ -101,29 +102,9 @@ export function MembersPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 sm:px-8 pt-6 pb-4 bg-white border-b border-[rgba(0,0,0,0.06)]">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold text-[#111118]">구성원</h1>
-            <p className="text-sm text-[#6b6b80]">
-              {currentWorkspace?.name ?? "작업공간"} · {members.length}명
-            </p>
-          </div>
-          {canManage && (
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<UserPlus className="w-3.5 h-3.5" />}
-              onClick={() => setShowInviteModal(true)}
-            >
-              구성원 추가
-            </Button>
-          )}
-        </div>
-      </div>
-
-      <div className="px-4 sm:px-8 py-3 bg-white border-b border-[rgba(0,0,0,0.05)]">
-        <div className="relative max-w-xs">
+      <WorkspaceSettingsNav />
+      <div className="px-4 sm:px-8 py-3 bg-white border-b border-[rgba(0,0,0,0.05)] flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+        <div className="relative max-w-xs w-full">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#9ca3af]" />
           <input
             type="text"
@@ -133,6 +114,16 @@ export function MembersPage() {
             className="w-full h-8 pl-8 pr-3 rounded-lg border border-[rgba(0,0,0,0.1)] bg-[#f4f4f8] text-sm placeholder:text-[#9ca3af] focus:outline-none focus:bg-white focus:border-[rgba(0,0,0,0.15)]"
           />
         </div>
+        {canManage && (
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<UserPlus className="w-3.5 h-3.5" />}
+            onClick={() => setShowInviteModal(true)}
+          >
+            구성원 추가
+          </Button>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-5">

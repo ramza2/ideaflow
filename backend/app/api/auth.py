@@ -18,9 +18,11 @@ from app.schemas.auth import (
     LoginResponse,
     PasswordChangeRequest,
     SessionInfo,
+    UserProfileUpdateRequest,
     UserPublic,
 )
 from app.services import auth as auth_service
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -94,6 +96,27 @@ def login(
 @router.get("/me", response_model=UserPublic)
 def me(ctx: Annotated[AuthContext, Depends(get_current_session)]) -> UserPublic:
     return UserPublic.model_validate(ctx.user)
+
+
+@router.patch("/me", response_model=UserPublic)
+def update_me(
+    body: UserProfileUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[AuthContext, Depends(require_csrf)],
+) -> UserPublic:
+    """Update the current user's display name only."""
+    try:
+        user = ctx.user
+        user.name = body.name
+        db.commit()
+        db.refresh(user)
+        return UserPublic.model_validate(user)
+    except AppError:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.patch("/password", status_code=status.HTTP_204_NO_CONTENT)

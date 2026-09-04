@@ -7,6 +7,7 @@ import type {
   StagePublic,
   TeamWorkspaceCreate,
   WorkspacePublic,
+  WorkspaceUpdateRequest,
 } from "../types/api";
 
 export async function listWorkspaces(): Promise<WorkspacePublic[]> {
@@ -22,6 +23,17 @@ export async function createTeamWorkspace(
 ): Promise<WorkspacePublic> {
   return apiRequest<WorkspacePublic>("/workspaces", {
     method: "POST",
+    body: payload,
+    csrf: true,
+  });
+}
+
+export async function updateWorkspace(
+  workspaceId: string,
+  payload: WorkspaceUpdateRequest,
+): Promise<WorkspacePublic> {
+  return apiRequest<WorkspacePublic>(`/workspaces/${workspaceId}`, {
+    method: "PATCH",
     body: payload,
     csrf: true,
   });

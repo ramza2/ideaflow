@@ -41,6 +41,77 @@ function roleLabel(role: SystemRole): string {
   return role === "SYSTEM_ADMIN" ? "시스템 관리자" : "일반 사용자";
 }
 
+type UserMenuAction = {
+  key: string;
+  label: string;
+  danger?: boolean;
+  icon?: "unlock" | "key";
+  run: () => void;
+};
+
+function buildUserMenuActions(
+  u: AdminUserPublic,
+  handlers: {
+    onStatus: (u: AdminUserPublic, status: UserStatus) => void;
+    onRole: (u: AdminUserPublic, role: SystemRole) => void;
+    onUnlock: (u: AdminUserPublic) => void;
+    onReset: (u: AdminUserPublic) => void;
+  },
+): UserMenuAction[] {
+  if (u.status === "WITHDRAWN") return [];
+  const actions: UserMenuAction[] = [];
+  if (u.status !== "ACTIVE" && !u.is_current_user) {
+    actions.push({
+      key: "activate",
+      label: "활성화",
+      run: () => handlers.onStatus(u, "ACTIVE"),
+    });
+  }
+  if (u.status === "ACTIVE" && !u.is_current_user) {
+    actions.push({
+      key: "deactivate",
+      label: "비활성화",
+      run: () => handlers.onStatus(u, "INACTIVE"),
+    });
+    actions.push({
+      key: "lock",
+      label: "계정 잠금",
+      run: () => handlers.onStatus(u, "LOCKED"),
+    });
+  }
+  if (u.system_role === "USER" && !u.is_current_user) {
+    actions.push({
+      key: "promote",
+      label: "시스템 관리자 지정",
+      run: () => handlers.onRole(u, "SYSTEM_ADMIN"),
+    });
+  }
+  if (u.system_role === "SYSTEM_ADMIN" && !u.is_current_user) {
+    actions.push({
+      key: "demote",
+      label: "일반 사용자로 변경",
+      run: () => handlers.onRole(u, "USER"),
+    });
+  }
+  if (u.temporary_login_locked) {
+    actions.push({
+      key: "unlock",
+      label: "로그인 잠금 해제",
+      icon: "unlock",
+      run: () => handlers.onUnlock(u),
+    });
+  }
+  if (!u.is_current_user) {
+    actions.push({
+      key: "reset",
+      label: "임시 비밀번호 재설정",
+      icon: "key",
+      run: () => handlers.onReset(u),
+    });
+  }
+  return actions;
+}
+
 export function AdminUsersPage() {
   const [items, setItems] = useState<AdminUserPublic[]>([]);
   const [total, setTotal] = useState(0);
@@ -233,7 +304,18 @@ export function AdminUsersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((u) => (
+                  {items.map((u) => {
+                    const menuActions = buildUserMenuActions(u, {
+                      onStatus: (user, status) => void handleStatusChange(user, status),
+                      onRole: (user, role) => void handleRoleChange(user, role),
+                      onUnlock: (user) => void handleUnlock(user),
+                      onReset: (user) => {
+                        setResetUserId(user.id);
+                        setResetPassword("");
+                        setMenuUserId(null);
+                      },
+                    });
+                    return (
                     <tr key={u.id} className="border-t border-[rgba(0,0,0,0.06)]">
                       <td className="px-4 py-3">
                         <p className="font-medium text-[#111118]">{u.name}</p>
@@ -255,7 +337,7 @@ export function AdminUsersPage() {
                       <td className="px-4 py-3 text-xs text-[#6b6b80]">{formatDate(u.last_seen_at)}</td>
                       <td className="px-4 py-3 text-xs text-[#6b6b80]">{formatDate(u.created_at)}</td>
                       <td className="px-4 py-3 relative">
-                        {u.status !== "WITHDRAWN" && (
+                        {menuActions.length > 0 && (
                           <>
                             <button
                               type="button"
@@ -266,73 +348,29 @@ export function AdminUsersPage() {
                             </button>
                             {menuUserId === u.id && (
                               <div className="absolute right-4 top-10 z-20 w-48 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] shadow-lg py-1">
-                                {u.status !== "ACTIVE" && !u.is_current_user && (
+                                {menuActions.map((action) => (
                                   <button
-                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                    onClick={() => void handleStatusChange(u, "ACTIVE")}
-                                  >
-                                    활성화
-                                  </button>
-                                )}
-                                {u.status === "ACTIVE" && !u.is_current_user && (
-                                  <>
-                                    <button
-                                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                      onClick={() => void handleStatusChange(u, "INACTIVE")}
-                                    >
-                                      비활성화
-                                    </button>
-                                    <button
-                                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                      onClick={() => void handleStatusChange(u, "LOCKED")}
-                                    >
-                                      계정 잠금
-                                    </button>
-                                  </>
-                                )}
-                                {u.system_role === "USER" && !u.is_current_user && (
-                                  <button
-                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                    onClick={() => void handleRoleChange(u, "SYSTEM_ADMIN")}
-                                  >
-                                    시스템 관리자 지정
-                                  </button>
-                                )}
-                                {u.system_role === "SYSTEM_ADMIN" && !u.is_current_user && (
-                                  <button
-                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8]"
-                                    onClick={() => void handleRoleChange(u, "USER")}
-                                  >
-                                    일반 사용자로 변경
-                                  </button>
-                                )}
-                                {u.temporary_login_locked && (
-                                  <button
-                                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
-                                    onClick={() => void handleUnlock(u)}
-                                  >
-                                    <Unlock className="w-3.5 h-3.5" /> 로그인 잠금 해제
-                                  </button>
-                                )}
-                                {!u.is_current_user && (
-                                  <button
+                                    key={action.key}
+                                    type="button"
                                     className="w-full text-left px-3 py-2 text-sm hover:bg-[#f4f4f8] flex items-center gap-2"
                                     onClick={() => {
-                                      setResetUserId(u.id);
-                                      setResetPassword("");
-                                      setMenuUserId(null);
+                                      action.run();
+                                      if (action.key !== "reset") setMenuUserId(null);
                                     }}
                                   >
-                                    <KeyRound className="w-3.5 h-3.5" /> 임시 비밀번호 재설정
+                                    {action.icon === "unlock" && <Unlock className="w-3.5 h-3.5" />}
+                                    {action.icon === "key" && <KeyRound className="w-3.5 h-3.5" />}
+                                    {action.label}
                                   </button>
-                                )}
+                                ))}
                               </div>
                             )}
                           </>
                         )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
