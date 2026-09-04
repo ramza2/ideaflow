@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import time
 
 import pytest
@@ -89,7 +88,6 @@ def test_worker_does_not_cache_provider_across_loop(
 
 
 def test_unexpected_exception_logging_omits_sensitive_text(
-    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Worker loop errors log category only — not exception message payloads."""
@@ -101,13 +99,29 @@ def test_unexpected_exception_logging_omits_sensitive_text(
         raise Boom("SECRET_API_KEY=sk-leak-should-not-appear")
 
     monkeypatch.setattr("app.services.ai_worker.run_once", boom_run_once)
-    worker = AiWorker(settings=make_settings(), provider_factory=CountingProvider)
-    with caplog.at_level(logging.ERROR):
-        worker.start()
-        time.sleep(0.2)
-        worker.stop(timeout=2.0)
 
-    joined = " ".join(r.getMessage() for r in caplog.records)
+    logged: list[str] = []
+
+    def capture_error(msg, *args, **kwargs):
+        try:
+            rendered = msg % args if args else str(msg)
+        except Exception:
+            rendered = str(msg)
+        logged.append(rendered)
+
+    monkeypatch.setattr("app.services.ai_worker.logger.error", capture_error)
+    worker = AiWorker(settings=make_settings(), provider_factory=CountingProvider)
+
+    # Run one loop iteration on the main thread.
+    def stop_after_wait(*_args, **_kwargs):
+        worker._stop.set()
+        return True
+
+    monkeypatch.setattr(worker._stop, "wait", stop_after_wait)
+    worker._loop()
+
+    joined = " ".join(logged)
+    assert logged
     assert "SECRET_API_KEY" not in joined
     assert "sk-leak" not in joined
     assert "Boom" in joined or "ai_worker_loop_error" in joined
