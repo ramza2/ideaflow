@@ -1,16 +1,14 @@
-"""Unit tests for AiWorker provider lifecycle and safe logging."""
+"""Unit tests for AiWorker provider lifecycle (Step 17.6: no process-lifetime cache)."""
 
 from __future__ import annotations
 
-import logging
-import threading
 import time
 
 import pytest
 
 from app.core.config import Settings
 from app.llm.schemas import IdeaStructuringRequest
-from app.services.ai_worker import AiWorker, run_once
+from app.services.ai_worker import AiWorker
 
 
 class CountingProvider:
@@ -62,7 +60,10 @@ def make_settings(**overrides) -> Settings:
     return Settings(_env_file=None, **base)
 
 
-def test_worker_reuses_provider_and_closes_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_does_not_cache_provider_across_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AiWorker must not create a process-lifetime provider; run_once gets none injected."""
     CountingProvider.created = 0
     CountingProvider.closed = 0
     settings = make_settings()
@@ -70,29 +71,23 @@ def test_worker_reuses_provider_and_closes_once(monkeypatch: pytest.MonkeyPatch)
 
     def fake_run_once(**kwargs):
         calls["n"] += 1
-        assert kwargs["provider"] is shared["provider"]
+        assert kwargs.get("provider") is None
+        assert kwargs.get("search_provider") is None
+        assert kwargs.get("settings") is settings
         return False
 
-    shared: dict = {}
-
-    def factory():
-        p = CountingProvider()
-        shared["provider"] = p
-        return p
-
     monkeypatch.setattr("app.services.ai_worker.run_once", fake_run_once)
-    worker = AiWorker(settings=settings, provider_factory=factory)
+    worker = AiWorker(settings=settings, provider_factory=CountingProvider)
     worker.start()
     time.sleep(0.25)
     worker.stop(timeout=2.0)
 
-    assert CountingProvider.created == 1
-    assert CountingProvider.closed == 1
+    assert CountingProvider.created == 0
+    assert CountingProvider.closed == 0
     assert calls["n"] >= 2
 
 
 def test_unexpected_exception_logging_omits_sensitive_text(
-    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Worker loop errors log category only — not exception message payloads."""
@@ -100,19 +95,33 @@ def test_unexpected_exception_logging_omits_sensitive_text(
     class Boom(Exception):
         pass
 
-    settings = make_settings(ai_job_poll_interval_seconds=0.05)
-    secret = "SECRET_USER_IDEA_TEXT_SHOULD_NOT_APPEAR"
-
     def boom_run_once(**kwargs):
-        raise Boom(f"failed while processing {secret}")
+        raise Boom("SECRET_API_KEY=sk-leak-should-not-appear")
 
     monkeypatch.setattr("app.services.ai_worker.run_once", boom_run_once)
-    worker = AiWorker(settings=settings, provider_factory=CountingProvider)
-    with caplog.at_level(logging.ERROR):
-        worker.start()
-        time.sleep(0.2)
-        worker.stop(timeout=2.0)
 
-    joined = " ".join(r.getMessage() for r in caplog.records)
-    assert "Boom" in joined or "category=Boom" in joined
-    assert secret not in joined
+    logged: list[str] = []
+
+    def capture_error(msg, *args, **kwargs):
+        try:
+            rendered = msg % args if args else str(msg)
+        except Exception:
+            rendered = str(msg)
+        logged.append(rendered)
+
+    monkeypatch.setattr("app.services.ai_worker.logger.error", capture_error)
+    worker = AiWorker(settings=make_settings(), provider_factory=CountingProvider)
+
+    # Run one loop iteration on the main thread.
+    def stop_after_wait(*_args, **_kwargs):
+        worker._stop.set()
+        return True
+
+    monkeypatch.setattr(worker._stop, "wait", stop_after_wait)
+    worker._loop()
+
+    joined = " ".join(logged)
+    assert logged
+    assert "SECRET_API_KEY" not in joined
+    assert "sk-leak" not in joined
+    assert "Boom" in joined or "ai_worker_loop_error" in joined

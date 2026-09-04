@@ -205,3 +205,34 @@ class SystemSettingKey(StrEnum):
     GLOBAL_WEB_SEARCH_ENABLED = "GLOBAL_WEB_SEARCH_ENABLED"
     DEFAULT_TEAM_ALLOW_LLM = "DEFAULT_TEAM_ALLOW_LLM"
     DEFAULT_TEAM_ALLOW_WEB_SEARCH = "DEFAULT_TEAM_ALLOW_WEB_SEARCH"
+
+
+# --- Step 17.6: Runtime Integration Config ---
+
+
+class IntegrationKey(StrEnum):
+    LLM = "LLM"
+    WEB_SEARCH = "WEB_SEARCH"
+    EMBEDDING = "EMBEDDING"
+
+
+class IntegrationSecretMode(StrEnum):
+    INHERIT_ENV = "INHERIT_ENV"
+    ENCRYPTED = "ENCRYPTED"
+    CLEARED = "CLEARED"
+
+
+class IntegrationApiKeyAction(StrEnum):
+    KEEP = "KEEP"
+    REPLACE = "REPLACE"
+    CLEAR = "CLEAR"
+    INHERIT_ENV = "INHERIT_ENV"
+
+
+class IntegrationConfigAuditAction(StrEnum):
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+    SECRET_REPLACED = "SECRET_REPLACED"
+    SECRET_CLEARED = "SECRET_CLEARED"
+    SECRET_INHERIT_ENV = "SECRET_INHERIT_ENV"
+    RESET_TO_ENV = "RESET_TO_ENV"

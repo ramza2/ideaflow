@@ -156,8 +156,44 @@ def sync_embedding_desired_state(
     return had_embedding
 
 
+def invalidate_stale_on_config_failure(db: Session, idea: Idea) -> None:
+    """Invalidate vector + refresh job hash without calling external APIs.
+
+    Used when Runtime embedding resolve fails so Idea CRUD still succeeds and
+    stale vectors are not left behind.
+    """
+    if not embedding_storage_ready(db):
+        return
+    invalidate_embedding(db, idea.id)
+    content_hash = compute_idea_content_hash(db, idea)
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        from app.core.config import get_settings
+
+        cfg = get_settings()
+        _reset_job_for_hash(
+            job,
+            content_hash=content_hash,
+            max_attempts=cfg.embedding_job_max_attempts,
+        )
+        db.add(job)
+        db.flush()
+
+
 def on_idea_embedding_content_changed(db: Session, idea: Idea) -> None:
-    sync_embedding_desired_state(db, idea)
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    try:
+        cfg = resolve_embedding_settings(db)
+    except Exception as exc:  # noqa: BLE001 — never block Idea CRUD on config errors
+        logger.info(
+            "embedding_sync_config_failed idea_id=%s category=%s",
+            idea.id,
+            type(exc).__name__,
+        )
+        invalidate_stale_on_config_failure(db, idea)
+        return
+    sync_embedding_desired_state(db, idea, settings=cfg)
 
 
 def enqueue_embedding_if_needed(
@@ -168,7 +204,15 @@ def enqueue_embedding_if_needed(
     force: bool = False,
 ) -> bool:
     """Enqueue or refresh an embedding job (requires embeddings enabled)."""
-    cfg = settings or get_settings()
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    if settings is None:
+        try:
+            cfg = resolve_embedding_settings(db)
+        except Exception:  # noqa: BLE001
+            return False
+    else:
+        cfg = settings
     if not cfg.embedding_enabled:
         return False
     return sync_embedding_desired_state(db, idea, settings=cfg, force=force)
@@ -182,7 +226,15 @@ def scan_ideas_for_enqueue(
     settings: Settings | None = None,
 ) -> tuple[int, int, int]:
     """Return (scanned, already_current, queued)."""
-    cfg = settings or get_settings()
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    if settings is None:
+        try:
+            cfg = resolve_embedding_settings(db)
+        except Exception:  # noqa: BLE001
+            return 0, 0, 0
+    else:
+        cfg = settings
     if not cfg.embedding_enabled:
         return 0, 0, 0
 

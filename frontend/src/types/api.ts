@@ -714,32 +714,54 @@ export interface SystemSettingsUpdateRequest {
   default_team_allow_web_search?: boolean;
 }
 
-export interface LlmIntegrationConfig {
+/** Shared admin actor ref (integration updated_by / audit actor). */
+export interface AdminUserRef {
+  id: string;
+  name: string;
+}
+
+export type IntegrationConfigurationSource = "RUNTIME" | "ENVIRONMENT";
+export type IntegrationApiKeySource = "RUNTIME" | "ENVIRONMENT" | "NONE";
+export type IntegrationApiKeyAction = "KEEP" | "REPLACE" | "CLEAR" | "INHERIT_ENV";
+export type IntegrationSecretMode = "INHERIT_ENV" | "ENCRYPTED" | "CLEARED";
+export type IntegrationAuditKey = "LLM" | "WEB_SEARCH" | "EMBEDDING";
+
+export interface IntegrationRuntimeMeta {
+  configuration_source: IntegrationConfigurationSource | string;
+  runtime_override_exists: boolean;
+  runtime_revision: number;
+  updated_at: string | null;
+  updated_by: AdminUserRef | null;
+  api_key_source: IntegrationApiKeySource | string;
+  secret_mode: IntegrationSecretMode | string;
+  secret_storage_ready: boolean;
+  api_key_configured: boolean;
+  runtime_error_code?: string | null;
+  runtime_safe_message?: string | null;
+}
+
+export interface LlmIntegrationConfig extends IntegrationRuntimeMeta {
   provider: string;
   api_url: string;
   chat_completions_path: string;
   model_name: string;
-  api_key_configured: boolean;
   timeout_seconds: number;
   connect_timeout_seconds: number;
   max_tokens: number;
   temperature: number;
   enable_thinking: boolean | null;
   configured: boolean;
-  configuration_source: string;
 }
 
-export interface WebSearchIntegrationConfig {
+export interface WebSearchIntegrationConfig extends IntegrationRuntimeMeta {
   provider: string;
   api_url: string | null;
-  api_key_configured: boolean;
   timeout_seconds: number;
   connect_timeout_seconds: number;
   max_queries: number;
   max_results_per_query: number;
   max_total_results: number;
   configured: boolean;
-  configuration_source: string;
 }
 
 export interface EmbeddingJobCounts {
@@ -749,12 +771,11 @@ export interface EmbeddingJobCounts {
   failed: number;
 }
 
-export interface EmbeddingIntegrationConfig {
+export interface EmbeddingIntegrationConfig extends IntegrationRuntimeMeta {
   enabled: boolean;
   provider: string;
   api_url: string | null;
   embedding_path: string;
-  api_key_configured: boolean;
   model_name: string;
   dimension: number;
   timeout_seconds: number;
@@ -762,7 +783,6 @@ export interface EmbeddingIntegrationConfig {
   max_input_chars: number;
   worker_enabled: boolean;
   configured: boolean;
-  configuration_source: string;
   stored_embedding_count: number;
   job_counts: EmbeddingJobCounts;
 }
@@ -773,6 +793,66 @@ export interface AdminIntegrationConfigResponse {
   embedding: EmbeddingIntegrationConfig;
   global_llm_enabled: boolean;
   global_web_search_enabled: boolean;
+}
+
+export interface LlmIntegrationUpdateRequest {
+  expected_revision: number;
+  api_url?: string;
+  model_name?: string;
+  chat_completions_path?: string;
+  timeout_seconds?: number;
+  connect_timeout_seconds?: number;
+  temperature?: number;
+  max_tokens?: number;
+  /** Omit when unchanged; send null to clear to provider default. */
+  enable_thinking?: boolean | null;
+  api_key_action?: IntegrationApiKeyAction;
+  api_key?: string;
+}
+
+export interface WebSearchIntegrationUpdateRequest {
+  expected_revision: number;
+  provider?: string;
+  api_url?: string;
+  timeout_seconds?: number;
+  connect_timeout_seconds?: number;
+  max_queries?: number;
+  max_results_per_query?: number;
+  max_total_results?: number;
+  api_key_action?: IntegrationApiKeyAction;
+  api_key?: string;
+}
+
+export interface EmbeddingIntegrationUpdateRequest {
+  expected_revision: number;
+  enabled?: boolean;
+  provider?: string;
+  api_url?: string;
+  model_name?: string;
+  embedding_path?: string;
+  timeout_seconds?: number;
+  connect_timeout_seconds?: number;
+  max_input_chars?: number;
+  api_key_action?: IntegrationApiKeyAction;
+  api_key?: string;
+}
+
+export interface RuntimeResetRequest {
+  expected_revision: number;
+}
+
+export interface IntegrationConfigAuditItem {
+  id: string;
+  integration_key: IntegrationAuditKey | string;
+  action: string;
+  changed_fields: string[];
+  revision: number;
+  actor: AdminUserRef | null;
+  created_at: string;
+}
+
+export interface IntegrationConfigAuditListResponse {
+  items: IntegrationConfigAuditItem[];
 }
 
 export interface EmbeddingConnectionTestResult {
