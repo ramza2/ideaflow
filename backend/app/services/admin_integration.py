@@ -36,9 +36,11 @@ from app.schemas.admin import (
     WebSearchTestResultItem,
 )
 from app.services import system_setting as system_setting_service
+from app.core.errors import AppError
 from app.services.integration_runtime_config import (
     RuntimeMeta,
     build_runtime_meta,
+    build_runtime_meta_from_row_safe,
     list_config_audits,
     resolve_embedding_settings,
     resolve_llm_settings,
@@ -112,6 +114,8 @@ def runtime_meta_response_fields(meta: RuntimeMeta) -> dict[str, Any]:
         "secret_mode": meta.secret_mode,
         "secret_storage_ready": meta.secret_storage_ready,
         "api_key_configured": meta.api_key_configured,
+        "runtime_error_code": meta.runtime_error_code,
+        "runtime_safe_message": meta.runtime_safe_message,
     }
 
 
@@ -196,19 +200,36 @@ def get_integration_config(
     db: Session, settings: Settings | None = None
 ) -> AdminIntegrationConfigResponse:
     base = settings or get_settings()
-    llm_effective = resolve_llm_settings(db, base_settings=base)
-    web_search_effective = resolve_web_search_settings(db, base_settings=base)
-    embedding_effective = resolve_embedding_settings(db, base_settings=base)
 
-    llm_meta = build_runtime_meta(
-        db, IntegrationKey.LLM, base=base, effective=llm_effective
-    )
-    web_search_meta = build_runtime_meta(
-        db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
-    )
-    embedding_meta = build_runtime_meta(
-        db, IntegrationKey.EMBEDDING, base=base, effective=embedding_effective
-    )
+    try:
+        llm_effective = resolve_llm_settings(db, base_settings=base)
+        llm_meta = build_runtime_meta(
+            db, IntegrationKey.LLM, base=base, effective=llm_effective
+        )
+    except AppError as exc:
+        llm_effective, llm_meta = build_runtime_meta_from_row_safe(
+            db, IntegrationKey.LLM, base=base, error=exc
+        )
+
+    try:
+        web_search_effective = resolve_web_search_settings(db, base_settings=base)
+        web_search_meta = build_runtime_meta(
+            db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
+        )
+    except AppError as exc:
+        web_search_effective, web_search_meta = build_runtime_meta_from_row_safe(
+            db, IntegrationKey.WEB_SEARCH, base=base, error=exc
+        )
+
+    try:
+        embedding_effective = resolve_embedding_settings(db, base_settings=base)
+        embedding_meta = build_runtime_meta(
+            db, IntegrationKey.EMBEDDING, base=base, effective=embedding_effective
+        )
+    except AppError as exc:
+        embedding_effective, embedding_meta = build_runtime_meta_from_row_safe(
+            db, IntegrationKey.EMBEDDING, base=base, error=exc
+        )
 
     return AdminIntegrationConfigResponse(
         llm=_llm_config(llm_effective, llm_meta),

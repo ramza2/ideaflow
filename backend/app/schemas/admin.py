@@ -117,6 +117,8 @@ class LlmIntegrationConfig(BaseModel):
     api_key_source: str = "NONE"
     secret_mode: str = "INHERIT_ENV"
     secret_storage_ready: bool = False
+    runtime_error_code: str | None = None
+    runtime_safe_message: str | None = None
 
 
 class WebSearchIntegrationConfig(BaseModel):
@@ -137,6 +139,8 @@ class WebSearchIntegrationConfig(BaseModel):
     api_key_source: str = "NONE"
     secret_mode: str = "INHERIT_ENV"
     secret_storage_ready: bool = False
+    runtime_error_code: str | None = None
+    runtime_safe_message: str | None = None
 
 
 class EmbeddingJobCounts(BaseModel):
@@ -169,6 +173,8 @@ class EmbeddingIntegrationConfig(BaseModel):
     secret_storage_ready: bool = False
     stored_embedding_count: int = 0
     job_counts: EmbeddingJobCounts = Field(default_factory=EmbeddingJobCounts)
+    runtime_error_code: str | None = None
+    runtime_safe_message: str | None = None
 
 
 class AdminIntegrationConfigResponse(BaseModel):

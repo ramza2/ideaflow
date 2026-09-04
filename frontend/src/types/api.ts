@@ -736,6 +736,8 @@ export interface IntegrationRuntimeMeta {
   secret_mode: IntegrationSecretMode | string;
   secret_storage_ready: boolean;
   api_key_configured: boolean;
+  runtime_error_code?: string | null;
+  runtime_safe_message?: string | null;
 }
 
 export interface LlmIntegrationConfig extends IntegrationRuntimeMeta {

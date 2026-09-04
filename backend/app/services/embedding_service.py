@@ -156,6 +156,30 @@ def sync_embedding_desired_state(
     return had_embedding
 
 
+def invalidate_stale_on_config_failure(db: Session, idea: Idea) -> None:
+    """Invalidate vector + refresh job hash without calling external APIs.
+
+    Used when Runtime embedding resolve fails so Idea CRUD still succeeds and
+    stale vectors are not left behind.
+    """
+    if not embedding_storage_ready(db):
+        return
+    invalidate_embedding(db, idea.id)
+    content_hash = compute_idea_content_hash(db, idea)
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        from app.core.config import get_settings
+
+        cfg = get_settings()
+        _reset_job_for_hash(
+            job,
+            content_hash=content_hash,
+            max_attempts=cfg.embedding_job_max_attempts,
+        )
+        db.add(job)
+        db.flush()
+
+
 def on_idea_embedding_content_changed(db: Session, idea: Idea) -> None:
     from app.services.integration_runtime_config import resolve_embedding_settings
 
@@ -163,10 +187,11 @@ def on_idea_embedding_content_changed(db: Session, idea: Idea) -> None:
         cfg = resolve_embedding_settings(db)
     except Exception as exc:  # noqa: BLE001 — never block Idea CRUD on config errors
         logger.info(
-            "embedding_sync_skipped idea_id=%s category=%s",
+            "embedding_sync_config_failed idea_id=%s category=%s",
             idea.id,
             type(exc).__name__,
         )
+        invalidate_stale_on_config_failure(db, idea)
         return
     sync_embedding_desired_state(db, idea, settings=cfg)
 

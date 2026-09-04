@@ -47,6 +47,7 @@ _UPDATE_META_KEYS = frozenset({"expected_revision", "api_key_action", "api_key"}
 
 
 def _patch_fields_from_update(body: Any) -> tuple[dict[str, Any], str, str | None, int]:
+    # exclude_unset keeps explicit nulls (e.g. enable_thinking: null) in the patch.
     data = body.model_dump(exclude_unset=True)
     expected_revision = int(data.pop("expected_revision"))
     api_key_action = str(data.pop("api_key_action", "KEEP"))

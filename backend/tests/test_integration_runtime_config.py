@@ -35,6 +35,7 @@ from app.models.enums import (
     IntegrationSecretMode,
     SystemRole,
     UserStatus,
+    WebResearchRunStatus,
     WorkspaceMemberStatus,
     WorkspaceRole,
     WorkspaceType,
@@ -1269,3 +1270,665 @@ def test_ai_and_embedding_worker_hot_reload_without_restart(
         emb_db.close()
     db.expire_all()
     assert db.get(IdeaEmbeddingJob, idea3.id).status == before_status
+
+
+# --- Step 17.6 static review corrections ---
+
+
+@requires_pgvector
+def test_embedding_reset_model_to_env_schedules_reindex(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "env-model")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    idea = _create_idea(db, ws, admin, title="Reset reindex")
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        db.delete(job)
+        db.commit()
+    _store_embedding(db, idea, text="reset reindex text", model_name="runtime-model")
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": 0,
+            "model_name": "runtime-model",
+            "api_url": "http://embed.env.example",
+            "enabled": True,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    rev = r.json()["embedding"]["runtime_revision"]
+    # Clear reindex jobs from identity change so reset is the only enqueue
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        db.delete(job)
+    emb = db.get(IdeaEmbedding, idea.id)
+    if emb is None:
+        _store_embedding(db, idea, text="reset reindex text", model_name="runtime-model")
+    else:
+        db.commit()
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/embedding/runtime-config",
+        json={"expected_revision": rev},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    assert db.get(IdeaEmbedding, idea.id) is None
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    assert job is not None
+    assert job.status == IdeaEmbeddingJobStatus.QUEUED.value
+
+
+@requires_pgvector
+def test_embedding_disabled_to_enabled_backfill(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "backfill-model")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    idea = _create_idea(db, ws, admin, title="Created while disabled")
+    assert db.get(IdeaEmbeddingJob, idea.id) is None
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": 0,
+            "enabled": True,
+            "api_url": "http://embed.env.example",
+            "model_name": "backfill-model",
+            "provider": "fake",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    assert job is not None
+    assert job.status == IdeaEmbeddingJobStatus.QUEUED.value
+
+
+@requires_pgvector
+def test_embedding_reset_disabled_to_env_enabled_backfill(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "env-enabled")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": 0,
+            "enabled": False,
+            "api_url": "http://embed.env.example",
+            "model_name": "env-enabled",
+            "provider": "fake",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    rev = r.json()["embedding"]["runtime_revision"]
+
+    idea = _create_idea(db, ws, admin, title="While runtime disabled")
+    assert db.get(IdeaEmbeddingJob, idea.id) is None
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/embedding/runtime-config",
+        json={"expected_revision": rev},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    assert job is not None
+    assert job.status == IdeaEmbeddingJobStatus.QUEUED.value
+
+
+@requires_pgvector
+def test_resolver_failure_on_idea_edit_invalidates_stale_vector(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "stale-model")
+    monkeypatch.setenv("EMBEDDING_JOB_LEASE_SECONDS", "120")
+    monkeypatch.setenv("EMBEDDING_TIMEOUT_SECONDS", "30")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    idea = _create_idea(db, ws, admin, title="Stale vector idea")
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        db.delete(job)
+        db.commit()
+    _store_embedding(db, idea, text="stale vector content", model_name="stale-model")
+    assert db.get(IdeaEmbedding, idea.id) is not None
+
+    # Invalid runtime: timeout exceeds lease → resolve fails
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"timeout_seconds": 200.0},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=get_settings(),
+    )
+    db.commit()
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.patch(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea.id}",
+        json={"title": "Updated while config broken"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    assert db.get(IdeaEmbedding, idea.id) is None
+
+
+def test_combined_llm_web_one_shot_valid_resolve(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import resolve_llm_and_web_search_settings
+
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    base = get_settings()
+
+    # LLM alone with timeout=220 would fail vs ENV web budget (20*5+220=320 > 300)
+    # Combined with WEB max_queries=1 is valid (20*1+220=240 < 300)
+    row_llm = IntegrationRuntimeConfig(
+        integration_key=IntegrationKey.LLM.value,
+        config_json={"timeout_seconds": 220.0},
+        secret_mode=IntegrationSecretMode.INHERIT_ENV.value,
+        secret_ciphertext=None,
+        revision=1,
+        updated_by=admin.id,
+    )
+    row_web = IntegrationRuntimeConfig(
+        integration_key=IntegrationKey.WEB_SEARCH.value,
+        config_json={"max_queries": 1},
+        secret_mode=IntegrationSecretMode.INHERIT_ENV.value,
+        secret_ciphertext=None,
+        revision=1,
+        updated_by=admin.id,
+    )
+    db.add(row_llm)
+    db.add(row_web)
+    db.commit()
+
+    with pytest.raises(AppError):
+        resolve_llm_settings(db, base_settings=base)
+
+    combined = resolve_llm_and_web_search_settings(db, base_settings=base)
+    assert combined.llm_timeout_seconds == 220.0
+    assert combined.web_search_max_queries == 1
+
+
+def test_combined_llm_web_invalid_final_rejects_patch(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "5")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "timeout_seconds": 220.0},
+        headers=headers,
+    )
+    # Cross-validation with ENV web (max_queries=5) → invalid
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+
+    # Valid LLM+WEB pair first
+    r = client.patch(
+        "/api/v1/admin/integrations/web-search",
+        json={"expected_revision": 0, "max_queries": 1},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    web_rev = r.json()["web_search"]["runtime_revision"]
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "timeout_seconds": 220.0},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    llm_rev = r.json()["llm"]["runtime_revision"]
+
+    # Bumping web max_queries makes combined invalid
+    r = client.patch(
+        "/api/v1/admin/integrations/web-search",
+        json={"expected_revision": web_rev, "max_queries": 5},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+    db.expire_all()
+    row = db.execute(
+        select(IntegrationRuntimeConfig).where(
+            IntegrationRuntimeConfig.integration_key == IntegrationKey.WEB_SEARCH.value
+        )
+    ).scalar_one()
+    assert int(row.revision) == web_rev
+    assert row.config_json.get("max_queries") == 1
+    del llm_rev
+
+
+def test_concurrent_revision_zero_create_one_success_one_conflict(
+    db: Session, session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from app.core.errors import AppError
+
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    base = get_settings()
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(model_name: str) -> None:
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            upsert_runtime_config(
+                session,
+                key=IntegrationKey.LLM,
+                actor_id=admin.id,
+                expected_revision=0,
+                patch_fields={"model_name": model_name},
+                api_key_action="KEEP",
+                api_key=None,
+                base_settings=base,
+            )
+            session.commit()
+            results.append("ok")
+        except AppError as exc:
+            session.rollback()
+            results.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(type(exc).__name__)
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=worker, args=("model-a",))
+    t2 = threading.Thread(target=worker, args=("model-b",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=30)
+    t2.join(timeout=30)
+    assert sorted(results) == ["INTEGRATION_CONFIG_CHANGED", "ok"]
+    db.expire_all()
+    rows = list(
+        db.execute(select(IntegrationRuntimeConfig)).scalars().all()
+    )
+    assert len(rows) == 1
+    assert int(rows[0].revision) == 1
+
+
+def test_enable_thinking_explicit_null_survives_reload(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "enable_thinking": None},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["llm"]["enable_thinking"] is None
+
+    db.expire_all()
+    row = db.execute(
+        select(IntegrationRuntimeConfig).where(
+            IntegrationRuntimeConfig.integration_key == IntegrationKey.LLM.value
+        )
+    ).scalar_one()
+    assert "enable_thinking" in row.config_json
+    assert row.config_json["enable_thinking"] is None
+
+    effective = resolve_llm_settings(db, base_settings=get_settings())
+    assert effective.llm_enable_thinking is None
+
+
+def test_broken_encrypted_llm_secret_get_isolates_other_integrations(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.LLM.value,
+            config_json={"model_name": "runtime-llm"},
+            secret_mode=IntegrationSecretMode.ENCRYPTED.value,
+            secret_ciphertext="gAAAAABnot-a-valid-fernet-token-xxxx",
+            revision=1,
+            updated_by=admin.id,
+        )
+    )
+    db.commit()
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.get("/api/v1/admin/integrations", headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["runtime_error_code"] == "INTEGRATION_SECRET_DECRYPTION_FAILED"
+    assert body["llm"]["runtime_safe_message"]
+    assert body["llm"]["model_name"] == "runtime-llm"
+    assert body["llm"]["api_key_configured"] is True
+    assert body["web_search"].get("runtime_error_code") in (None, "")
+    assert body["embedding"].get("runtime_error_code") in (None, "")
+    assert body["web_search"]["api_url"]
+    _assert_no_secret_leak(body)
+
+
+def test_broken_secret_reset_to_env_clears_error(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    db.add(
+        IntegrationRuntimeConfig(
+            integration_key=IntegrationKey.LLM.value,
+            config_json={"model_name": "broken-llm"},
+            secret_mode=IntegrationSecretMode.ENCRYPTED.value,
+            secret_ciphertext="gAAAAABbroken-ciphertext-payload",
+            revision=3,
+            updated_by=admin.id,
+        )
+    )
+    db.commit()
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": 3},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"].get("runtime_error_code") in (None, "")
+    assert body["llm"]["model_name"] == "env-llm"
+    assert body["llm"]["configuration_source"] == "ENVIRONMENT"
+
+
+def test_production_rejects_fake_embedding_provider(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "prod-model")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": 0,
+            "provider": "fake",
+            "api_url": "http://embed.env.example",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+    db.expire_all()
+    assert (
+        db.execute(
+            select(IntegrationRuntimeConfig).where(
+                IntegrationRuntimeConfig.integration_key == IntegrationKey.EMBEDDING.value
+            )
+        ).scalar_one_or_none()
+        is None
+    )
+
+
+def test_web_research_worker_hot_reload_a_to_b(
+    db: Session, session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.llm.research_schemas import EvidenceRefinementResult
+    from app.models.ai import AiJob, IdeaAiSession
+    from app.models.enums import (
+        AiJobStatus,
+        AiJobType,
+        IdeaAiSessionStatus,
+    )
+    from app.models.research import WebResearchRun
+
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "http_json")
+    monkeypatch.setenv("AI_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    ws = _team(db, admin)
+
+    db.execute(
+        text(
+            "UPDATE ai_jobs SET status = 'FAILED' "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.commit()
+
+    seen_ws_urls: list[str] = []
+
+    class ResearchLlm:
+        provider_name = "fake"
+        model_name = "fake-model"
+        prompt_version = "v2"
+
+        def __init__(self, settings=None) -> None:
+            self.settings = settings
+
+        def structure_idea(self, request):
+            raise NotImplementedError
+
+        def refine_idea(self, request):
+            raise NotImplementedError
+
+        def refine_idea_with_evidence(self, request):
+            return EvidenceRefinementResult(
+                draft={"title": "AI Draft", "background": "from evidence"},
+                evidence_links={},
+                research_summary="ok",
+            )
+
+        def close(self) -> None:
+            return None
+
+    def llm_factory(settings=None):
+        return ResearchLlm(settings)
+
+    def ws_factory(settings=None):
+        assert settings is not None
+        seen_ws_urls.append(settings.web_search_api_url)
+        return FakeWebSearchProvider(settings)
+
+    monkeypatch.setattr("app.services.ai_worker.get_llm_provider", llm_factory)
+    monkeypatch.setattr("app.services.ai_worker.get_web_search_provider", ws_factory)
+
+    def _enqueue_research(label: str) -> uuid.UUID:
+        session = IdeaAiSession(
+            workspace_id=ws.id,
+            requester_id=admin.id,
+            purpose="CREATE",
+            status=IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+            input_text=f"research {label}",
+            draft_payload={"title": "AI Draft", "background": "A"},
+            research_recommended=False,
+        )
+        db.add(session)
+        db.flush()
+        run = WebResearchRun(
+            session_id=session.id,
+            requester_id=admin.id,
+            status=WebResearchRunStatus.QUEUED.value,
+            queries_to_send=[f"query-{label}"],
+            base_draft_payload={"title": "AI Draft", "background": "A"},
+        )
+        db.add(run)
+        db.flush()
+        job = AiJob(
+            session_id=session.id,
+            research_run_id=run.id,
+            job_type=AiJobType.WEB_RESEARCH.value,
+            status=AiJobStatus.QUEUED.value,
+            attempts=0,
+            max_attempts=3,
+            available_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        return run.id
+
+    operational = get_settings()
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"api_url": "https://search.runtime-a.example/q"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    run_a = _enqueue_research("A")
+
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=None,
+        search_provider=None,
+        settings=operational,
+        worker_id="wr-hot-a",
+        recover=False,
+    )
+    db.expire_all()
+    assert db.get(WebResearchRun, run_a).status == WebResearchRunStatus.READY.value
+    assert seen_ws_urls[-1] == "https://search.runtime-a.example/q"
+
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=1,
+        patch_fields={"api_url": "https://search.runtime-b.example/q"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    run_b = _enqueue_research("B")
+
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=None,
+        search_provider=None,
+        settings=operational,
+        worker_id="wr-hot-b",
+        recover=False,
+    )
+    db.expire_all()
+    assert db.get(WebResearchRun, run_b).status == WebResearchRunStatus.READY.value
+    assert seen_ws_urls[-1] == "https://search.runtime-b.example/q"
+    assert "https://search.runtime-a.example/q" in seen_ws_urls
+    assert "https://search.runtime-b.example/q" in seen_ws_urls

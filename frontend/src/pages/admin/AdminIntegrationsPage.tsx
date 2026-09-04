@@ -390,7 +390,7 @@ function webSearchDraftFromConfig(c: WebSearchIntegrationConfig): WebSearchDraft
 function embeddingDraftFromConfig(c: EmbeddingIntegrationConfig): EmbeddingDraft {
   return {
     enabled: c.enabled,
-    provider: c.provider ?? "",
+    provider: "openai_compatible",
     api_url: c.api_url ?? "",
     model_name: c.model_name ?? "",
     embedding_path: c.embedding_path ?? "",
@@ -965,6 +965,14 @@ export function AdminIntegrationsPage() {
                     <p className="text-sm text-[#6b6b80] mb-4">
                       {sourceHelpText(config.llm.configuration_source)}
                     </p>
+                    {config.llm.runtime_error_code && (
+                      <div className="mb-4">
+                        <InlineAlert type="error" title="Runtime 설정 오류">
+                          {config.llm.runtime_safe_message ||
+                            config.llm.runtime_error_code}
+                        </InlineAlert>
+                      </div>
+                    )}
                     {renderActionBar()}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <ReadOnlyField label="Provider" value="openai_compatible" />
@@ -1096,6 +1104,14 @@ export function AdminIntegrationsPage() {
                     <p className="text-sm text-[#6b6b80] mb-4">
                       {sourceHelpText(config.web_search.configuration_source)}
                     </p>
+                    {config.web_search.runtime_error_code && (
+                      <div className="mb-4">
+                        <InlineAlert type="error" title="Runtime 설정 오류">
+                          {config.web_search.runtime_safe_message ||
+                            config.web_search.runtime_error_code}
+                        </InlineAlert>
+                      </div>
+                    )}
                     {renderActionBar()}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="flex flex-col gap-1.5">
@@ -1242,6 +1258,14 @@ export function AdminIntegrationsPage() {
                     <p className="text-sm text-[#6b6b80] mb-4">
                       {sourceHelpText(config.embedding.configuration_source)}
                     </p>
+                    {config.embedding.runtime_error_code && (
+                      <div className="mb-4">
+                        <InlineAlert type="error" title="Runtime 설정 오류">
+                          {config.embedding.runtime_safe_message ||
+                            config.embedding.runtime_error_code}
+                        </InlineAlert>
+                      </div>
+                    )}
                     {renderActionBar()}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="flex flex-col gap-1.5 sm:col-span-2">
@@ -1266,12 +1290,29 @@ export function AdminIntegrationsPage() {
                           />
                         )}
                       </div>
-                      <EditableField
-                        label="Provider"
-                        value={embDraft.provider}
-                        onChange={(v) => setEmbDraft({ ...embDraft, provider: v })}
-                        editing={editing}
-                      />
+                      <div className="flex flex-col gap-1.5">
+                        <FieldLabel>Provider</FieldLabel>
+                        {editing ? (
+                          <select
+                            value="openai_compatible"
+                            onChange={() =>
+                              setEmbDraft({
+                                ...embDraft,
+                                provider: "openai_compatible",
+                              })
+                            }
+                            className={selectClass}
+                          >
+                            <option value="openai_compatible">openai_compatible</option>
+                          </select>
+                        ) : (
+                          <input
+                            value={config.embedding.provider || "openai_compatible"}
+                            readOnly
+                            className={readOnlyClass}
+                          />
+                        )}
+                      </div>
                       <EditableField
                         label="Model"
                         value={embDraft.model_name}

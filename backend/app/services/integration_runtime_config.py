@@ -8,7 +8,7 @@ from typing import Any, Iterable, Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -81,6 +81,13 @@ _SECRET_ATTR: dict[IntegrationKey, str] = {
 _SUPPORTED_WEB_PROVIDERS = {"http_json", "tavily"}
 _SUPPORTED_EMBEDDING_PROVIDERS = {"openai_compatible", "fake"}
 
+# Stable pg_advisory_xact_lock ids (NOT Python hash()).
+_ADVISORY_LOCK_IDS: dict[IntegrationKey, int] = {
+    IntegrationKey.LLM: 1_760_001,
+    IntegrationKey.WEB_SEARCH: 1_760_002,
+    IntegrationKey.EMBEDDING: 1_760_003,
+}
+
 
 @dataclass(frozen=True)
 class RuntimeMeta:
@@ -94,6 +101,8 @@ class RuntimeMeta:
     api_key_source: str  # RUNTIME | ENVIRONMENT | NONE
     api_key_configured: bool
     secret_storage_ready: bool
+    runtime_error_code: str | None = None
+    runtime_safe_message: str | None = None
 
 
 def get_runtime_row(
@@ -110,6 +119,13 @@ def get_runtime_row(
 def get_runtime_revision(db: Session, key: IntegrationKey) -> int:
     row = get_runtime_row(db, key)
     return int(row.revision) if row is not None else 0
+
+
+def _acquire_integration_lock(db: Session, key: IntegrationKey) -> None:
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": _ADVISORY_LOCK_IDS[key]},
+    )
 
 
 def _validate_http_url(url: str, *, field: str) -> str:
@@ -151,39 +167,58 @@ def _validate_http_url(url: str, *, field: str) -> str:
 
 
 def _whitelist_config(key: IntegrationKey, raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Whitelist runtime config_json fields; preserve explicit null for enable_thinking."""
     allowed = _FIELD_MAPS[key]
     out: dict[str, Any] = {}
     if not raw:
         return out
     for field in allowed:
-        if field in raw and raw[field] is not None:
+        if field not in raw:
+            continue
+        if field == "enable_thinking":
+            out[field] = raw[field]  # may be None
+        elif raw[field] is not None:
             out[field] = raw[field]
     return out
 
 
-def _apply_overrides_to_settings(
-    base: Settings,
-    *,
+def _overlay_config_into_payload(
+    payload: dict[str, Any],
     key: IntegrationKey,
     config_json: dict[str, Any],
-    secret_mode: str,
-    secret_ciphertext: str | None,
-) -> Settings:
-    payload = base.model_dump()
+) -> None:
+    """Apply whitelisted config fields onto a Settings.model_dump() payload in-place."""
     field_map = _FIELD_MAPS[key]
     for json_key, attr in field_map.items():
-        if json_key in config_json:
+        if json_key not in config_json:
+            continue
+        if json_key == "enable_thinking":
+            payload[attr] = config_json[json_key]  # may be None
+        elif config_json[json_key] is not None:
             payload[attr] = config_json[json_key]
 
+
+def _overlay_secret_into_payload(
+    payload: dict[str, Any],
+    key: IntegrationKey,
+    secret_mode: str,
+    ciphertext: str | None,
+    base: Settings,
+) -> None:
+    """Apply secret mode onto payload; decrypt ENCRYPTED ciphertext when needed."""
     secret_attr = _SECRET_ATTR[key]
     if secret_mode == IntegrationSecretMode.CLEARED.value:
         payload[secret_attr] = ""
     elif secret_mode == IntegrationSecretMode.ENCRYPTED.value:
-        payload[secret_attr] = decrypt_integration_secret(secret_ciphertext or "", base)
-    # INHERIT_ENV: keep ENV secret from base
+        payload[secret_attr] = decrypt_integration_secret(ciphertext or "", base)
+    # INHERIT_ENV: keep ENV secret already present in payload from base
 
+
+def _validate_settings_payload(payload: dict[str, Any]) -> Settings:
     try:
         return Settings.model_validate(payload)
+    except AppError:
+        raise
     except Exception as exc:
         raise AppError(
             "Runtime 설정이 유효하지 않습니다.",
@@ -192,28 +227,56 @@ def _apply_overrides_to_settings(
         ) from exc
 
 
+def _current_non_secret_overlay(db: Session, key: IntegrationKey) -> dict[str, Any]:
+    row = get_runtime_row(db, key)
+    if row is None:
+        return {}
+    raw = row.config_json if isinstance(row.config_json, dict) else {}
+    return _whitelist_config(key, raw)
+
+
 def resolve_settings_for_integrations(
     db: Session,
     *,
     integrations: Iterable[IntegrationKey],
     base_settings: Settings | None = None,
 ) -> Settings:
-    """Merge selected Runtime overrides onto ENV Settings (validated snapshot)."""
+    """Merge selected Runtime overrides onto ENV Settings (single validation)."""
     base = base_settings or get_settings()
-    effective = base
+    payload = base.model_dump()
     for key in integrations:
         row = get_runtime_row(db, key)
         if row is None:
             continue
-        config = _whitelist_config(key, row.config_json if isinstance(row.config_json, dict) else {})
-        effective = _apply_overrides_to_settings(
-            effective,
-            key=key,
-            config_json=config,
-            secret_mode=row.secret_mode,
-            secret_ciphertext=row.secret_ciphertext,
+        config = _whitelist_config(
+            key, row.config_json if isinstance(row.config_json, dict) else {}
         )
-    return effective
+        _overlay_config_into_payload(payload, key, config)
+        _overlay_secret_into_payload(
+            payload,
+            key,
+            row.secret_mode,
+            row.secret_ciphertext,
+            base,
+        )
+    return _validate_settings_payload(payload)
+
+
+def resolve_settings_non_secret_only(
+    db: Session,
+    *,
+    key: IntegrationKey,
+    base_settings: Settings | None = None,
+) -> Settings:
+    """Overlay runtime config_json only (no secret decrypt) for degraded admin views."""
+    base = base_settings or get_settings()
+    payload = base.model_dump()
+    config = _current_non_secret_overlay(db, key)
+    _overlay_config_into_payload(payload, key, config)
+    row = get_runtime_row(db, key)
+    if row is not None and row.secret_mode == IntegrationSecretMode.CLEARED.value:
+        payload[_SECRET_ATTR[key]] = ""
+    return _validate_settings_payload(payload)
 
 
 def resolve_llm_settings(db: Session, base_settings: Settings | None = None) -> Settings:
@@ -250,6 +313,7 @@ def _api_key_source(
     env_key: str,
 ) -> tuple[str, bool]:
     if secret_mode == IntegrationSecretMode.ENCRYPTED.value:
+        # Key is stored even if currently unreadable.
         return "RUNTIME", True
     if secret_mode == IntegrationSecretMode.CLEARED.value:
         return "NONE", False
@@ -264,7 +328,10 @@ def build_runtime_meta(
     key: IntegrationKey,
     *,
     base: Settings,
-    effective: Settings,
+    effective: Settings | None = None,
+    runtime_error_code: str | None = None,
+    runtime_safe_message: str | None = None,
+    secret_unreadable: bool = False,
 ) -> RuntimeMeta:
     row = get_runtime_row(db, key)
     storage_ready = secret_storage_ready(base)
@@ -285,18 +352,25 @@ def build_runtime_meta(
             api_key_source=source,
             api_key_configured=configured,
             secret_storage_ready=storage_ready,
+            runtime_error_code=runtime_error_code,
+            runtime_safe_message=runtime_safe_message,
         )
 
     actor_name = None
     if row.updated_by is not None:
         actor = db.get(User, row.updated_by)
         actor_name = actor.name if actor is not None else None
-    source, configured = _api_key_source(secret_mode=row.secret_mode, env_key=env_secret)
-    # Prefer effective secret presence for configured bool when ENCRYPTED decrypted ok
-    eff_secret = getattr(effective, _SECRET_ATTR[key], "") or ""
+    source, configured = _api_key_source(
+        secret_mode=row.secret_mode,
+        env_key=env_secret,
+    )
     if row.secret_mode == IntegrationSecretMode.ENCRYPTED.value:
-        configured = bool(eff_secret.strip())
         source = "RUNTIME"
+        if secret_unreadable or effective is None:
+            configured = True
+        else:
+            eff_secret = getattr(effective, _SECRET_ATTR[key], "") or ""
+            configured = bool(eff_secret.strip())
     return RuntimeMeta(
         configuration_source="RUNTIME",
         runtime_override_exists=True,
@@ -308,7 +382,30 @@ def build_runtime_meta(
         api_key_source=source,
         api_key_configured=configured,
         secret_storage_ready=storage_ready,
+        runtime_error_code=runtime_error_code,
+        runtime_safe_message=runtime_safe_message,
     )
+
+
+def build_runtime_meta_from_row_safe(
+    db: Session,
+    key: IntegrationKey,
+    *,
+    base: Settings,
+    error: AppError,
+) -> tuple[Settings, RuntimeMeta]:
+    """Build degraded effective Settings + meta without decrypting secrets."""
+    degraded = resolve_settings_non_secret_only(db, key=key, base_settings=base)
+    meta = build_runtime_meta(
+        db,
+        key,
+        base=base,
+        effective=None,
+        runtime_error_code=error.code,
+        runtime_safe_message=error.message,
+        secret_unreadable=True,
+    )
+    return degraded, meta
 
 
 def _write_audit(
@@ -332,7 +429,18 @@ def _write_audit(
     )
 
 
-def _normalize_patch_config(key: IntegrationKey, data: dict[str, Any]) -> dict[str, Any]:
+def _reject_production_fake_embedding(provider: str, base: Settings) -> None:
+    if provider == "fake" and (base.app_env or "").strip().lower() == "production":
+        raise AppError(
+            "production 환경에서는 fake 임베딩 Provider를 사용할 수 없습니다.",
+            code="INTEGRATION_RUNTIME_CONFIG_INVALID",
+            status_code=400,
+        )
+
+
+def _normalize_patch_config(
+    key: IntegrationKey, data: dict[str, Any], *, base: Settings
+) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for field, value in data.items():
         if field not in _FIELD_MAPS[key]:
@@ -353,6 +461,8 @@ def _normalize_patch_config(key: IntegrationKey, data: dict[str, Any]) -> dict[s
                     code="INTEGRATION_RUNTIME_CONFIG_INVALID",
                     status_code=400,
                 )
+            if key == IntegrationKey.EMBEDDING:
+                _reject_production_fake_embedding(provider, base)
             if key == IntegrationKey.LLM and provider != "openai_compatible":
                 raise AppError(
                     "LLM Provider는 openai_compatible만 지원합니다.",
@@ -369,6 +479,8 @@ def _normalize_patch_config(key: IntegrationKey, data: dict[str, Any]) -> dict[s
                     status_code=400,
                 )
             out[field] = stripped
+        elif field == "enable_thinking":
+            out[field] = value  # may be None (explicit clear)
         else:
             out[field] = value
     return out
@@ -384,12 +496,79 @@ def _identity_changed(
 
 
 def _schedule_embedding_reindex(db: Session, settings: Settings) -> None:
-    """Delete stored vectors and enqueue jobs for all active ideas."""
+    """Delete stored vectors and enqueue jobs for all active ideas (force)."""
     ideas = db.execute(select(Idea).where(Idea.deleted_at.is_(None))).scalars().all()
     for idea in ideas:
         embedding_service.sync_embedding_desired_state(
             db, idea, settings=settings, force=True
         )
+
+
+def _schedule_embedding_backfill(db: Session, settings: Settings) -> None:
+    """Enqueue missing/stale embeddings without force (disabled→enabled)."""
+    embedding_service.scan_ideas_for_enqueue(db, force=False, settings=settings)
+
+
+def _embedding_identity_from_settings(settings: Settings) -> dict[str, Any]:
+    return {
+        "provider": settings.embedding_provider,
+        "model_name": settings.embedding_model_name,
+        "enabled": bool(settings.embedding_enabled),
+    }
+
+
+def _embedding_identity_from_overlay(
+    base: Settings, config: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "provider": config.get("provider", base.embedding_provider),
+        "model_name": config.get("model_name", base.embedding_model_name),
+        "enabled": (
+            bool(config["enabled"])
+            if "enabled" in config
+            else bool(base.embedding_enabled)
+        ),
+    }
+
+
+def _resolve_before_embedding_state(
+    db: Session, *, base: Settings, previous_config: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        before = resolve_embedding_settings(db, base_settings=base)
+        return _embedding_identity_from_settings(before)
+    except AppError:
+        return _embedding_identity_from_overlay(base, previous_config)
+
+
+def _validate_upsert_candidate(
+    db: Session,
+    *,
+    key: IntegrationKey,
+    base: Settings,
+    merged: dict[str, Any],
+    next_mode: str,
+    next_cipher: str | None,
+) -> Settings:
+    """One-shot Settings validation with cross-integration non-secret overlays."""
+    payload = base.model_dump()
+
+    if key == IntegrationKey.LLM:
+        _overlay_config_into_payload(
+            payload,
+            IntegrationKey.WEB_SEARCH,
+            _current_non_secret_overlay(db, IntegrationKey.WEB_SEARCH),
+        )
+    elif key == IntegrationKey.WEB_SEARCH:
+        _overlay_config_into_payload(
+            payload,
+            IntegrationKey.LLM,
+            _current_non_secret_overlay(db, IntegrationKey.LLM),
+        )
+
+    _overlay_config_into_payload(payload, key, merged)
+    _overlay_secret_into_payload(payload, key, next_mode, next_cipher, base)
+    return _validate_settings_payload(payload)
 
 
 def upsert_runtime_config(
@@ -404,6 +583,7 @@ def upsert_runtime_config(
     base_settings: Settings | None = None,
 ) -> IntegrationRuntimeConfig:
     base = base_settings or get_settings()
+    _acquire_integration_lock(db, key)
     row = get_runtime_row(db, key, for_update=True)
     current_revision = int(row.revision) if row is not None else 0
     if expected_revision != current_revision:
@@ -419,8 +599,14 @@ def upsert_runtime_config(
         else {}
     )
     merged = dict(previous_config)
-    normalized = _normalize_patch_config(key, patch_fields)
+    normalized = _normalize_patch_config(key, patch_fields, base=base)
+    # Explicit null for enable_thinking must remain in JSONB after update.
     merged.update(normalized)
+
+    # Reject production fake even when inherited from previous merged config
+    if key == IntegrationKey.EMBEDDING:
+        provider = str(merged.get("provider", base.embedding_provider)).strip().lower()
+        _reject_production_fake_embedding(provider, base)
 
     # Secret handling
     prev_mode = row.secret_mode if row is not None else IntegrationSecretMode.INHERIT_ENV.value
@@ -457,41 +643,31 @@ def upsert_runtime_config(
             status_code=400,
         )
 
-    # Validate merged effective settings before write
-    try:
-        candidate = _apply_overrides_to_settings(
-            base,
-            key=key,
-            config_json=merged,
-            secret_mode=next_mode,
-            secret_ciphertext=next_cipher,
-        )
-    except AppError:
-        raise
-    except Exception as exc:
-        raise AppError(
-            "Runtime 설정이 유효하지 않습니다.",
-            code="INTEGRATION_RUNTIME_CONFIG_INVALID",
-            status_code=400,
-        ) from exc
+    # Validate merged effective settings before write (one-shot, with cross overlays)
+    candidate = _validate_upsert_candidate(
+        db,
+        key=key,
+        base=base,
+        merged=merged,
+        next_mode=next_mode,
+        next_cipher=next_cipher,
+    )
 
-    # Embedding identity change detection (provider/model)
-    reindex = False
+    # Embedding identity / enabled transition detection
+    schedule_reindex = False
+    schedule_backfill = False
+    before_state: dict[str, Any] | None = None
     if key == IntegrationKey.EMBEDDING:
-        before_identity = {
-            "provider": previous_config.get("provider", base.embedding_provider),
-            "model_name": previous_config.get("model_name", base.embedding_model_name),
-        }
-        after_identity = {
-            "provider": merged.get("provider", before_identity["provider"]),
-            "model_name": merged.get("model_name", before_identity["model_name"]),
-        }
-        if row is None:
-            before_identity = {
-                "provider": base.embedding_provider,
-                "model_name": base.embedding_model_name,
-            }
-        reindex = _identity_changed(before_identity, after_identity, fields=("provider", "model_name"))
+        before_state = _resolve_before_embedding_state(
+            db, base=base, previous_config=previous_config if row else {}
+        )
+        after_state = _embedding_identity_from_settings(candidate)
+        if _identity_changed(
+            before_state, after_state, fields=("provider", "model_name")
+        ):
+            schedule_reindex = True
+        elif (not before_state["enabled"]) and after_state["enabled"]:
+            schedule_backfill = True
 
     changed_fields = sorted(
         {f for f in normalized.keys()}
@@ -522,16 +698,7 @@ def upsert_runtime_config(
 
     db.flush()
 
-    if secret_action_audit and secret_action_audit != IntegrationConfigAuditAction.SECRET_REPLACED.value:
-        _write_audit(
-            db,
-            key=key,
-            action=secret_action_audit,
-            changed_fields=["api_key"],
-            revision=new_revision,
-            actor_id=actor_id,
-        )
-    elif secret_action_audit == IntegrationConfigAuditAction.SECRET_REPLACED.value:
+    if secret_action_audit:
         _write_audit(
             db,
             key=key,
@@ -552,9 +719,10 @@ def upsert_runtime_config(
             actor_id=actor_id,
         )
 
-    if reindex:
-        # Use candidate settings so jobs use new model identity
+    if schedule_reindex:
         _schedule_embedding_reindex(db, candidate)
+    elif schedule_backfill:
+        _schedule_embedding_backfill(db, candidate)
 
     logger.info(
         "integration_runtime_config_saved key=%s revision=%s actor=%s fields=%s",
@@ -572,7 +740,10 @@ def reset_runtime_config(
     key: IntegrationKey,
     actor_id: UUID,
     expected_revision: int,
+    base_settings: Settings | None = None,
 ) -> None:
+    base = base_settings or get_settings()
+    _acquire_integration_lock(db, key)
     row = get_runtime_row(db, key, for_update=True)
     current_revision = int(row.revision) if row is not None else 0
     if expected_revision != current_revision:
@@ -583,8 +754,29 @@ def reset_runtime_config(
         )
     if row is None:
         return
+
+    before_state: dict[str, Any] | None = None
+    if key == IntegrationKey.EMBEDDING:
+        previous_config = _whitelist_config(
+            key, row.config_json if isinstance(row.config_json, dict) else {}
+        )
+        before_state = _resolve_before_embedding_state(
+            db, base=base, previous_config=previous_config
+        )
+
     rev = int(row.revision)
     db.delete(row)
+    db.flush()
+
+    if key == IntegrationKey.EMBEDDING and before_state is not None:
+        after_state = _embedding_identity_from_settings(base)
+        if _identity_changed(
+            before_state, after_state, fields=("provider", "model_name")
+        ):
+            _schedule_embedding_reindex(db, base)
+        elif (not before_state["enabled"]) and after_state["enabled"]:
+            _schedule_embedding_backfill(db, base)
+
     _write_audit(
         db,
         key=key,
