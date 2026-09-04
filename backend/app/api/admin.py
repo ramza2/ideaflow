@@ -1,16 +1,17 @@
-"""Admin HTTP endpoints (Step 11)."""
+"""Admin HTTP endpoints (Step 11 / Step 17.6)."""
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import AuthContext, require_csrf, require_system_admin
+from app.core.errors import AppError
 from app.db.session import get_db
-from app.models.enums import SystemSettingKey
+from app.models.enums import IntegrationKey, SystemSettingKey
 from app.schemas.admin import (
     AdminIntegrationConfigResponse,
     AdminPasswordResetRequest,
@@ -19,19 +20,53 @@ from app.schemas.admin import (
     AdminUserPublic,
     AdminUserUpdateRequest,
     EmbeddingConnectionTestResult,
+    EmbeddingIntegrationUpdateRequest,
+    IntegrationConfigAuditListResponse,
     LlmConnectionTestResult,
+    LlmIntegrationUpdateRequest,
+    RuntimeResetRequest,
     SettingMetadata,
     SystemSettingsResponse,
     SystemSettingsUpdateRequest,
     WebSearchConnectionTestRequest,
     WebSearchConnectionTestResult,
+    WebSearchIntegrationUpdateRequest,
 )
 from app.models.user import User
 from app.services import admin_integration as admin_integration_service
 from app.services import admin_user as admin_user_service
 from app.services import system_setting as system_setting_service
+from app.services.integration_runtime_config import (
+    reset_runtime_config,
+    upsert_runtime_config,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+_UPDATE_META_KEYS = frozenset({"expected_revision", "api_key_action", "api_key"})
+
+
+def _patch_fields_from_update(body: Any) -> tuple[dict[str, Any], str, str | None, int]:
+    data = body.model_dump(exclude_unset=True)
+    expected_revision = int(data.pop("expected_revision"))
+    api_key_action = str(data.pop("api_key_action", "KEEP"))
+    api_key = data.pop("api_key", None)
+    patch_fields = {k: v for k, v in data.items() if k not in _UPDATE_META_KEYS}
+    return patch_fields, api_key_action, api_key, expected_revision
+
+
+def _parse_integration_key(value: str | None) -> IntegrationKey | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().upper()
+    try:
+        return IntegrationKey(normalized)
+    except ValueError as exc:
+        raise AppError(
+            "알 수 없는 integration 키입니다.",
+            code="INTEGRATION_RUNTIME_CONFIG_INVALID",
+            status_code=400,
+        ) from exc
 
 
 def _settings_response(db: Session) -> SystemSettingsResponse:
@@ -186,14 +221,157 @@ def get_integrations(
     return admin_integration_service.get_integration_config(db)
 
 
+@router.patch("/integrations/llm", response_model=AdminIntegrationConfigResponse)
+def patch_llm_integration(
+    body: LlmIntegrationUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    patch_fields, api_key_action, api_key, expected_revision = _patch_fields_from_update(body)
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.LLM,
+        actor_id=admin.id,
+        expected_revision=expected_revision,
+        patch_fields=patch_fields,
+        api_key_action=api_key_action,
+        api_key=api_key,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.patch("/integrations/web-search", response_model=AdminIntegrationConfigResponse)
+def patch_web_search_integration(
+    body: WebSearchIntegrationUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    patch_fields, api_key_action, api_key, expected_revision = _patch_fields_from_update(body)
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=expected_revision,
+        patch_fields=patch_fields,
+        api_key_action=api_key_action,
+        api_key=api_key,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.patch("/integrations/embedding", response_model=AdminIntegrationConfigResponse)
+def patch_embedding_integration(
+    body: EmbeddingIntegrationUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    patch_fields, api_key_action, api_key, expected_revision = _patch_fields_from_update(body)
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=expected_revision,
+        patch_fields=patch_fields,
+        api_key_action=api_key_action,
+        api_key=api_key,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.delete("/integrations/llm/runtime-config", response_model=AdminIntegrationConfigResponse)
+def reset_llm_runtime_config(
+    body: RuntimeResetRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    reset_runtime_config(
+        db,
+        key=IntegrationKey.LLM,
+        actor_id=admin.id,
+        expected_revision=body.expected_revision,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.delete(
+    "/integrations/web-search/runtime-config",
+    response_model=AdminIntegrationConfigResponse,
+)
+def reset_web_search_runtime_config(
+    body: RuntimeResetRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    reset_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=body.expected_revision,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.delete(
+    "/integrations/embedding/runtime-config",
+    response_model=AdminIntegrationConfigResponse,
+)
+def reset_embedding_runtime_config(
+    body: RuntimeResetRequest,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> AdminIntegrationConfigResponse:
+    del auth
+    reset_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=body.expected_revision,
+    )
+    db.commit()
+    return admin_integration_service.get_integration_config(db)
+
+
+@router.get(
+    "/integrations/config-audit",
+    response_model=IntegrationConfigAuditListResponse,
+)
+def list_integration_config_audit(
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_system_admin)],
+    integration: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> IntegrationConfigAuditListResponse:
+    del admin
+    key = _parse_integration_key(integration)
+    return admin_integration_service.get_config_audit_list(
+        db, integration=key, limit=limit
+    )
+
+
 @router.post("/integrations/llm/test", response_model=LlmConnectionTestResult)
 def test_llm(
     db: Annotated[Session, Depends(get_db)],
     auth: Annotated[AuthContext, Depends(require_csrf)],
     admin: Annotated[User, Depends(require_system_admin)],
 ) -> LlmConnectionTestResult:
-    del db, auth, admin
-    return admin_integration_service.test_llm_connection()
+    del auth, admin
+    return admin_integration_service.test_llm_connection(db)
 
 
 @router.post("/integrations/web-search/test", response_model=WebSearchConnectionTestResult)
@@ -203,8 +381,8 @@ def test_web_search(
     auth: Annotated[AuthContext, Depends(require_csrf)],
     admin: Annotated[User, Depends(require_system_admin)],
 ) -> WebSearchConnectionTestResult:
-    del db, auth, admin
-    return admin_integration_service.test_web_search_connection(body.query)
+    del auth, admin
+    return admin_integration_service.test_web_search_connection(db, body.query)
 
 
 @router.post("/integrations/embedding/test", response_model=EmbeddingConnectionTestResult)
@@ -213,5 +391,5 @@ def test_embedding(
     auth: Annotated[AuthContext, Depends(require_csrf)],
     admin: Annotated[User, Depends(require_system_admin)],
 ) -> EmbeddingConnectionTestResult:
-    del db, auth, admin
-    return admin_integration_service.test_embedding_connection()
+    del auth, admin
+    return admin_integration_service.test_embedding_connection(db)

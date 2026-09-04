@@ -10,6 +10,7 @@ from app.models.collaboration import (
 from app.models.embedding import IdeaEmbedding, IdeaEmbeddingJob
 from app.models.validation import IdeaValidation
 from app.models.system_setting import SystemSetting
+from app.models.integration_runtime import IntegrationConfigAudit, IntegrationRuntimeConfig
 from app.models.research import WebEvidence, WebResearchRun
 from app.models.auth import AuthSession
 from app.models.enums import (
@@ -95,6 +96,8 @@ __all__ = [
     "Notification",
     "SystemSetting",
     "SystemSettingKey",
+    "IntegrationRuntimeConfig",
+    "IntegrationConfigAudit",
     "ReviewKind",
     "ReviewStatus",
     "ReviewResult",

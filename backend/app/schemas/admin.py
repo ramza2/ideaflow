@@ -110,6 +110,13 @@ class LlmIntegrationConfig(BaseModel):
     enable_thinking: bool | None
     configured: bool
     configuration_source: str
+    runtime_override_exists: bool = False
+    runtime_revision: int = 0
+    updated_at: datetime | None = None
+    updated_by: AdminUserRef | None = None
+    api_key_source: str = "NONE"
+    secret_mode: str = "INHERIT_ENV"
+    secret_storage_ready: bool = False
 
 
 class WebSearchIntegrationConfig(BaseModel):
@@ -123,6 +130,13 @@ class WebSearchIntegrationConfig(BaseModel):
     max_total_results: int
     configured: bool
     configuration_source: str
+    runtime_override_exists: bool = False
+    runtime_revision: int = 0
+    updated_at: datetime | None = None
+    updated_by: AdminUserRef | None = None
+    api_key_source: str = "NONE"
+    secret_mode: str = "INHERIT_ENV"
+    secret_storage_ready: bool = False
 
 
 class EmbeddingJobCounts(BaseModel):
@@ -146,6 +160,13 @@ class EmbeddingIntegrationConfig(BaseModel):
     worker_enabled: bool
     configured: bool
     configuration_source: str
+    runtime_override_exists: bool = False
+    runtime_revision: int = 0
+    updated_at: datetime | None = None
+    updated_by: AdminUserRef | None = None
+    api_key_source: str = "NONE"
+    secret_mode: str = "INHERIT_ENV"
+    secret_storage_ready: bool = False
     stored_embedding_count: int = 0
     job_counts: EmbeddingJobCounts = Field(default_factory=EmbeddingJobCounts)
 
@@ -156,6 +177,73 @@ class AdminIntegrationConfigResponse(BaseModel):
     embedding: EmbeddingIntegrationConfig
     global_llm_enabled: bool
     global_web_search_enabled: bool
+
+
+class LlmIntegrationUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    api_url: str | None = None
+    model_name: str | None = None
+    chat_completions_path: str | None = None
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    enable_thinking: bool | None = None
+    api_key_action: str = "KEEP"
+    api_key: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WebSearchIntegrationUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    provider: str | None = None
+    api_url: str | None = None
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float | None = None
+    max_queries: int | None = None
+    max_results_per_query: int | None = None
+    max_total_results: int | None = None
+    api_key_action: str = "KEEP"
+    api_key: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EmbeddingIntegrationUpdateRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    enabled: bool | None = None
+    provider: str | None = None
+    api_url: str | None = None
+    model_name: str | None = None
+    embedding_path: str | None = None
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float | None = None
+    max_input_chars: int | None = None
+    api_key_action: str = "KEEP"
+    api_key: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RuntimeResetRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class IntegrationConfigAuditItem(BaseModel):
+    id: UUID
+    integration_key: str
+    action: str
+    changed_fields: list[str]
+    revision: int
+    actor: AdminUserRef | None
+    created_at: datetime
+
+
+class IntegrationConfigAuditListResponse(BaseModel):
+    items: list[IntegrationConfigAuditItem]
 
 
 class LlmConnectionTestResult(BaseModel):
