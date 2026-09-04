@@ -87,6 +87,8 @@ _ADVISORY_LOCK_IDS: dict[IntegrationKey, int] = {
     IntegrationKey.WEB_SEARCH: 1_760_002,
     IntegrationKey.EMBEDDING: 1_760_003,
 }
+# Serializes LLM↔Web Search cross-field Settings invariants (lease/timeout budget).
+_LLM_WEB_INVARIANT_LOCK_ID = 1_760_099
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,17 @@ def get_runtime_revision(db: Session, key: IntegrationKey) -> int:
 
 
 def _acquire_integration_lock(db: Session, key: IntegrationKey) -> None:
+    """Acquire locks in fixed order: shared LLM/Web invariant (if needed), then per-key.
+
+    LLM and WEB_SEARCH share a consistency domain for Settings lease/timeout
+    invariants. Without the shared lock, concurrent LLM + Web PATCHes can each
+    validate against a stale counterpart and commit an invalid final pair.
+    """
+    if key in (IntegrationKey.LLM, IntegrationKey.WEB_SEARCH):
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _LLM_WEB_INVARIANT_LOCK_ID},
+        )
     db.execute(
         text("SELECT pg_advisory_xact_lock(:lock_id)"),
         {"lock_id": _ADVISORY_LOCK_IDS[key]},

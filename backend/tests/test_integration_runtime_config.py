@@ -1636,6 +1636,236 @@ def test_concurrent_revision_zero_create_one_success_one_conflict(
     assert int(rows[0].revision) == 1
 
 
+def test_concurrent_llm_and_web_patch_cannot_create_invalid_pair(
+    db: Session, session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write-skew guard: concurrent LLM+Web PATCHes must not commit invalid lease budget."""
+    import threading
+
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import (
+        resolve_llm_and_web_search_settings,
+    )
+
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "1")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    # Ensure no leftover runtime rows for these keys
+    db.execute(
+        text(
+            "DELETE FROM integration_runtime_configs "
+            "WHERE integration_key IN ('LLM', 'WEB_SEARCH')"
+        )
+    )
+    db.commit()
+    base = get_settings()
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker_llm() -> None:
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            upsert_runtime_config(
+                session,
+                key=IntegrationKey.LLM,
+                actor_id=admin.id,
+                expected_revision=0,
+                patch_fields={"timeout_seconds": 200.0},
+                api_key_action="KEEP",
+                api_key=None,
+                base_settings=base,
+            )
+            session.commit()
+            results.append("ok")
+        except AppError as exc:
+            session.rollback()
+            results.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(type(exc).__name__)
+        finally:
+            session.close()
+
+    def worker_web() -> None:
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            upsert_runtime_config(
+                session,
+                key=IntegrationKey.WEB_SEARCH,
+                actor_id=admin.id,
+                expected_revision=0,
+                patch_fields={"max_queries": 5},
+                api_key_action="KEEP",
+                api_key=None,
+                base_settings=base,
+            )
+            session.commit()
+            results.append("ok")
+        except AppError as exc:
+            session.rollback()
+            results.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(type(exc).__name__)
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=worker_llm)
+    t2 = threading.Thread(target=worker_web)
+    t1.start()
+    t2.start()
+    t1.join(timeout=30)
+    t2.join(timeout=30)
+
+    assert results.count("ok") == 1, results
+    assert results.count("INTEGRATION_RUNTIME_CONFIG_INVALID") == 1, results
+
+    db.expire_all()
+    effective = resolve_llm_and_web_search_settings(db, base_settings=get_settings())
+    budget = (
+        effective.llm_timeout_seconds
+        + effective.web_search_timeout_seconds * effective.web_search_max_queries
+    )
+    assert effective.ai_job_lease_seconds > budget
+
+
+def test_concurrent_llm_reset_and_web_patch_keeps_valid_pair(
+    db: Session, session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shared invariant lock serializes reset + counterpart PATCH."""
+    import threading
+
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import (
+        reset_runtime_config,
+        resolve_llm_and_web_search_settings,
+    )
+
+    monkeypatch.setenv("AI_JOB_LEASE_SECONDS", "300")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("WEB_SEARCH_MAX_QUERIES", "1")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-llm")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    get_settings.cache_clear()
+
+    admin, _ = _admin_user(db)
+    db.execute(
+        text(
+            "DELETE FROM integration_runtime_configs "
+            "WHERE integration_key IN ('LLM', 'WEB_SEARCH')"
+        )
+    )
+    db.commit()
+    base = get_settings()
+
+    # Valid starting pair: LLM timeout 200 + Web q=1
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.LLM,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"timeout_seconds": 200.0},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=base,
+    )
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"max_queries": 1},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=base,
+    )
+    db.commit()
+
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker_reset_llm() -> None:
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            reset_runtime_config(
+                session,
+                key=IntegrationKey.LLM,
+                actor_id=admin.id,
+                expected_revision=1,
+                base_settings=base,
+            )
+            session.commit()
+            results.append("ok")
+        except AppError as exc:
+            session.rollback()
+            results.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(type(exc).__name__)
+        finally:
+            session.close()
+
+    def worker_patch_web() -> None:
+        session = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            upsert_runtime_config(
+                session,
+                key=IntegrationKey.WEB_SEARCH,
+                actor_id=admin.id,
+                expected_revision=1,
+                patch_fields={"max_queries": 5},
+                api_key_action="KEEP",
+                api_key=None,
+                base_settings=base,
+            )
+            session.commit()
+            results.append("ok")
+        except AppError as exc:
+            session.rollback()
+            results.append(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(type(exc).__name__)
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=worker_reset_llm)
+    t2 = threading.Thread(target=worker_patch_web)
+    t1.start()
+    t2.start()
+    t1.join(timeout=30)
+    t2.join(timeout=30)
+
+    # Serialized: either both succeed in a valid order, or one is rejected —
+    # never an invalid final Settings combination.
+    assert "IntegrityError" not in results, results
+    assert all(
+        r in ("ok", "INTEGRATION_RUNTIME_CONFIG_INVALID", "INTEGRATION_CONFIG_CHANGED")
+        for r in results
+    ), results
+
+    db.expire_all()
+    effective = resolve_llm_and_web_search_settings(db, base_settings=get_settings())
+    budget = (
+        effective.llm_timeout_seconds
+        + effective.web_search_timeout_seconds * effective.web_search_max_queries
+    )
+    assert effective.ai_job_lease_seconds > budget
+
+
 def test_enable_thinking_explicit_null_survives_reload(
     client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
