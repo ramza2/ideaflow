@@ -121,6 +121,8 @@ class FakeWebSearchProvider:
 def _clean_system_settings(engine):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM system_settings"))
+        conn.execute(text("DELETE FROM integration_config_audits"))
+        conn.execute(text("DELETE FROM integration_runtime_configs"))
     yield
 
 

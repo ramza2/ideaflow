@@ -61,6 +61,13 @@ def engine():
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
     command.upgrade(cfg, "head")
+    with eng.begin() as conn:
+        conn.execute(
+            text(
+                "TRUNCATE idea_embedding_jobs, idea_embeddings, "
+                "integration_config_audits, integration_runtime_configs CASCADE"
+            )
+        )
     yield eng
     eng.dispose()
     reset_engine()
@@ -72,6 +79,13 @@ def db(engine) -> Session:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
     try:
+        session.execute(
+            text(
+                "TRUNCATE idea_embedding_jobs, idea_embeddings, "
+                "integration_config_audits, integration_runtime_configs CASCADE"
+            )
+        )
+        session.commit()
         yield session
     finally:
         session.rollback()
@@ -97,6 +111,15 @@ def client(engine, monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+def _enable_embedding_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.test")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+
+
 def _user(db: Session, *, email: str | None = None, password: str = "password-ok-1") -> tuple[User, str]:
     email = email or f"emb-{uuid.uuid4().hex[:10]}@example.com"
     user = User(
@@ -116,7 +139,7 @@ def _team(db: Session, owner: User) -> Workspace:
     ws = Workspace(name=f"Team-{uuid.uuid4().hex[:6]}", type=WorkspaceType.TEAM.value, owner_id=owner.id)
     db.add(ws)
     db.flush()
-    seed_workspace_defaults(db, ws)
+    seed_workspace_defaults(db, ws.id)
     db.add(
         WorkspaceMember(
             workspace_id=ws.id,
@@ -151,8 +174,17 @@ def _stage(db: Session, ws: Workspace) -> WorkspaceStage:
     )
 
 
+def _csrf(client: TestClient) -> str:
+    return client.get("/api/v1/auth/csrf").json()["csrf_token"]
+
+
 def _login(client: TestClient, email: str, password: str) -> dict[str, str]:
-    r = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    client.cookies.clear()
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": password},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
     assert r.status_code == 200, r.text
     token = client.cookies.get(get_settings().auth_csrf_cookie_name)
     return {"X-CSRF-Token": token or ""}
@@ -197,8 +229,7 @@ def _store_embedding(db: Session, idea: Idea, *, text: str) -> None:
 
 
 def test_create_idea_enqueues_job(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
     owner, _ = _user(db)
     ws = _team(db, owner)
     idea = _create_idea(db, ws, owner, title="Queue me")
@@ -208,8 +239,7 @@ def test_create_idea_enqueues_job(db: Session, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_non_content_update_does_not_enqueue(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
     owner, _ = _user(db)
     ws = _team(db, owner)
     idea = _create_idea(db, ws, owner)
@@ -226,9 +256,7 @@ def test_non_content_update_does_not_enqueue(db: Session, monkeypatch: pytest.Mo
 
 
 def test_worker_success_stores_embedding(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
     owner, _ = _user(db)
     ws = _team(db, owner)
     idea = _create_idea(db, ws, owner, title="Worker success")
@@ -249,10 +277,7 @@ def test_worker_success_stores_embedding(db: Session, monkeypatch: pytest.Monkey
 
 
 def test_run_once_without_explicit_session_factory(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
-    monkeypatch.setenv("APP_ENV", "development")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
     owner, _ = _user(db)
     ws = _team(db, owner)
     idea = _create_idea(db, ws, owner, title="Default factory path")
@@ -271,10 +296,7 @@ def test_run_once_without_explicit_session_factory(db: Session, monkeypatch: pyt
 
 
 def test_race_two_independent_sessions_not_saved(engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
-    monkeypatch.setenv("APP_ENV", "development")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
 
     SessionFactory = sessionmaker(bind=engine, expire_on_commit=True)
     setup_session = SessionFactory()
@@ -377,9 +399,7 @@ def test_disabled_content_update_invalidates_embedding(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
-    monkeypatch.setenv("APP_ENV", "development")
-    get_settings.cache_clear()
+    _enable_embedding_env(monkeypatch)
 
     owner, pw = _user(db)
     ws = _team(db, owner)
@@ -442,21 +462,20 @@ def test_semantic_private_acl(client: TestClient, db: Session) -> None:
     text = build_idea_embedding_text(private, load_idea_tag_names(db, private.id))
     _store_embedding(db, private, text=text)
 
-    owner_headers = _login(client, owner.email, pw)
-    other_headers = _login(client, other.email, other_pw)
-
+    _login(client, owner.email, pw)
     r_owner = client.get(
         f"/api/v1/workspaces/{ws.id}/ideas",
         params={"q": "private semantic", "search_mode": "semantic"},
-        headers=owner_headers,
+        headers={"X-CSRF-Token": client.cookies.get(get_settings().auth_csrf_cookie_name) or ""},
     )
     assert r_owner.status_code == 200
     assert r_owner.json()["total"] >= 1
 
+    _login(client, other.email, other_pw)
     r_other = client.get(
         f"/api/v1/workspaces/{ws.id}/ideas",
         params={"q": "private semantic", "search_mode": "semantic"},
-        headers=other_headers,
+        headers={"X-CSRF-Token": client.cookies.get(get_settings().auth_csrf_cookie_name) or ""},
     )
     assert r_other.status_code == 200
     assert r_other.json()["total"] == 0
@@ -485,22 +504,21 @@ def test_semantic_selected_users_share(client: TestClient, db: Session) -> None:
     text = build_idea_embedding_text(idea, load_idea_tag_names(db, idea.id))
     _store_embedding(db, idea, text=text)
 
-    shared_headers = _login(client, shared_user.email, shared_pw)
-    outsider_headers = _login(client, outsider.email, outsider_pw)
-
+    _login(client, shared_user.email, shared_pw)
     assert (
         client.get(
             f"/api/v1/workspaces/{ws.id}/ideas",
             params={"q": "selected users semantic", "search_mode": "semantic"},
-            headers=shared_headers,
+            headers={"X-CSRF-Token": client.cookies.get(get_settings().auth_csrf_cookie_name) or ""},
         ).json()["total"]
         == 1
     )
+    _login(client, outsider.email, outsider_pw)
     assert (
         client.get(
             f"/api/v1/workspaces/{ws.id}/ideas",
             params={"q": "selected users semantic", "search_mode": "semantic"},
-            headers=outsider_headers,
+            headers={"X-CSRF-Token": client.cookies.get(get_settings().auth_csrf_cookie_name) or ""},
         ).json()["total"]
         == 0
     )
@@ -519,7 +537,7 @@ def test_semantic_unavailable_when_disabled(client: TestClient, db: Session, mon
         headers=headers,
     )
     assert r.status_code == 503
-    assert r.json()["code"] == "SEMANTIC_SEARCH_UNAVAILABLE"
+    assert r.json()["error"]["code"] == "SEMANTIC_SEARCH_UNAVAILABLE"
 
 
 def test_keyword_regression_unchanged(db: Session, client: TestClient) -> None:
@@ -645,4 +663,4 @@ def test_hybrid_result_window_exceeded_returns_400(client: TestClient, db: Sessi
         headers=headers,
     )
     assert r.status_code == 400
-    assert r.json()["code"] == "HYBRID_RESULT_WINDOW_EXCEEDED"
+    assert r.json()["error"]["code"] == "HYBRID_RESULT_WINDOW_EXCEEDED"

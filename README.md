@@ -25,7 +25,8 @@ IdeaFlow/
 - Step 15: Tavily Web Search Provider (`WEB_SEARCH_PROVIDER=tavily`). Step 9 approval workflow 유지; production 외부 검색 연결. Refinement는 `WEB_RESEARCH_REFINE_*`로 LLM 입력만 제한(저장 Evidence는 전량 유지).
 - Step 16: AI Review **임시 저장** (`PUT .../review-draft`) + reload 복구 (`review_state`, `draft_payload`). **전체 다시 생성**은 새 CREATE AiSession 생성(원본 session/research/evidence 보존, Web Search 자동 실행 없음).
 - Step 17: 등록된 Idea **AI로 발전시키기** (REFINE session). 사용자 검토 후 명시적 apply로 기존 Idea UPDATE. source snapshot + concurrency guard. 자동 overwrite / 자동 Web Research 없음.
-- Step 17.5: Workspace/User Settings IA 분리, 프로필 self-update, Admin Embedding 진단, ENV read-only 연결 정보 명확화, Home/AIInput dead placeholder 제거.
+- Step 17.5: Workspace/User Settings IA 분리, 프로필 self-update, Admin Embedding 진단, Home/AIInput dead placeholder 제거.
+- Step 17.6: **Runtime Integration Config** — Admin이 LLM/웹검색/임베딩 연결 설정을 UI에서 저장(ENV fallback + DB override). Secret은 Fernet 암호화 저장(`INTEGRATION_SECRET_ENCRYPTION_KEY`). 다음 작업부터 재시작 없이 적용. Embedding provider/model 변경 시 reindex.
 
 ## Docker Compose 배포
 
