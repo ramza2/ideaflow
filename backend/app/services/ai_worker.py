@@ -26,7 +26,8 @@ from app.llm.refine_schemas import (
     IdeaRefinementResult,
     LlmRefineInputTooLargeError,
     merge_refinement_patch,
-    prepare_refine_source_context,
+    merged_draft_differs_from_source,
+    prepare_refine_prompt_request,
     validate_refinement_against_source,
 )
 from app.llm.research_prompts import IDEA_RESEARCH_REFINE_PROMPT_VERSION
@@ -302,6 +303,12 @@ def _apply_refine_success(
         if checked.get("category_slug") is None:
             checked["category_slug"] = source_snapshot.get("category_slug")
         draft = checked
+
+    if result.decision == AiLlmDecision.READY_FOR_REVIEW and not merged_draft_differs_from_source(
+        source_snapshot, draft
+    ):
+        # e.g. invalid category_slug-only patch that sanitizes back to source.
+        raise LlmResponseValidationError("Refinement produced no effective changes vs source")
 
     provenance = dict(session.field_provenance or {})
     for key in result.draft_patch:
@@ -810,27 +817,26 @@ def process_refine_idea_job(
     request: IdeaRefinementRequest | None = None
     llm_error: LlmError | None = None
     try:
-        source_context, budget = prepare_refine_source_context(
-            source_snapshot,
+        request, budget = prepare_refine_prompt_request(
             direction=direction,
-            max_prompt_chars=cfg.ai_refine_max_prompt_chars,
-        )
-        # Metadata only — never log source content.
-        logger.info(
-            "ai_refine_prompt_budget session_id=%s direction=%s context_fields=%s "
-            "truncated_field_count=%s prompt_chars_estimate=%s output_max_tokens=%s",
-            session_id,
-            direction,
-            budget["context_fields"],
-            len(budget["truncated_fields"]),
-            budget["prompt_chars_estimate"],
-            cfg.ai_refine_max_tokens,
-        )
-        request = IdeaRefinementRequest(
-            direction=direction,
-            source_context=source_context,
+            source_snapshot=source_snapshot,
             clarifying_questions=session.clarifying_questions,
             clarification_answers=session.clarification_answers,
+            max_prompt_chars=cfg.ai_refine_max_prompt_chars,
+        )
+        # Metadata only — never log source / answers / prompt body.
+        logger.info(
+            "ai_refine_prompt_budget session_id=%s direction=%s system_chars=%s "
+            "user_prompt_chars=%s total_prompt_chars=%s context_fields=%s "
+            "truncated_field_count=%s output_max_tokens=%s",
+            session_id,
+            direction,
+            budget["system_chars"],
+            budget["user_prompt_chars"],
+            budget["total_prompt_chars"],
+            budget["context_fields"],
+            len(budget["truncated_fields"]),
+            cfg.ai_refine_max_tokens,
         )
     except LlmRefineInputTooLargeError as exc:
         llm_error = exc
@@ -895,14 +901,26 @@ def process_refine_idea_job(
         return
 
     assert result is not None
-    _apply_refine_success(
-        db,
-        job=job,
-        session=session,
-        result=result,
-        provider=provider,
-        source_snapshot=source_snapshot,
-    )
+    try:
+        _apply_refine_success(
+            db,
+            job=job,
+            session=session,
+            result=result,
+            provider=provider,
+            source_snapshot=source_snapshot,
+        )
+    except LlmResponseValidationError as exc:
+        _apply_failure(db, job=job, session=session, error=exc, settings=cfg)
+        db.commit()
+        logger.info(
+            "ai_refine_job_failed job_id=%s session_id=%s code=%s attempts=%s",
+            job.id,
+            session.id,
+            exc.code,
+            job.attempts,
+        )
+        return
     db.commit()
     logger.info(
         "ai_refine_job_succeeded job_id=%s session_id=%s decision=%s",

@@ -532,19 +532,23 @@ def get_idea_evidence(
         user_id=user_id,
     )
 
-    session = db.execute(
-        select(IdeaAiSession).where(
-            IdeaAiSession.result_idea_id == idea.id,
-            IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+    # One Idea may have many CONFIRMED sessions (CREATE + REFINE × N).
+    # Aggregate READY evidence across all of them — never pick a single session.
+    session_ids = list(
+        db.scalars(
+            select(IdeaAiSession.id).where(
+                IdeaAiSession.result_idea_id == idea.id,
+                IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+            )
         )
-    ).scalar_one_or_none()
-    if session is None:
+    )
+    if not session_ids:
         return IdeaEvidenceResponse(items=[])
 
     runs = list(
         db.scalars(
             select(WebResearchRun).where(
-                WebResearchRun.session_id == session.id,
+                WebResearchRun.session_id.in_(session_ids),
                 WebResearchRun.status == WebResearchRunStatus.READY.value,
             )
         )
@@ -557,7 +561,11 @@ def get_idea_evidence(
         db.scalars(
             select(WebEvidence)
             .where(WebEvidence.research_run_id.in_(run_ids))
-            .order_by(WebEvidence.fetched_at.asc(), WebEvidence.rank.asc())
+            .order_by(
+                WebEvidence.fetched_at.asc(),
+                WebEvidence.rank.asc(),
+                WebEvidence.created_at.asc(),
+            )
         )
     )
 

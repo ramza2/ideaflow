@@ -473,6 +473,9 @@ def update_idea(
 
     if "tags" in fields_set and payload.tags is not None:
         sync_idea_tags(db, idea, payload.tags)
+        # Tags live on IdeaTag rows; bump Idea.updated_at so REFINE/source
+        # concurrency guards observe tag-only edits like any other Idea change.
+        idea.updated_at = utcnow()
 
     db.flush()
     if embedding_fields_changed(fields_set):

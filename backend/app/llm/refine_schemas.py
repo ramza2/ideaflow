@@ -9,7 +9,11 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.llm.exceptions import LlmError, LlmResponseValidationError
-from app.llm.refine_prompts import DIRECTION_PRIORITY_FIELDS
+from app.llm.refine_prompts import (
+    DIRECTION_PRIORITY_FIELDS,
+    REFINE_SYSTEM_PROMPT,
+    build_refine_user_prompt,
+)
 from app.llm.schemas import ClarifyingQuestionRaw, FieldProvenanceEntry, MAX_CLARIFYING_QUESTIONS, MAX_RESEARCH_TOPICS
 from app.models.enums import AiLlmDecision, IdeaFeasibility, IdeaPriority, IdeaRefineDirection
 
@@ -84,10 +88,35 @@ class IdeaRefinementPatch(BaseModel):
     challenges: str | None = None
     minimum_validation: str | None = None
     related_project: str | None = None
-    category_slug: str | None = None
+    category_slug: str | None = Field(default=None, max_length=64)
     priority: IdeaPriority | None = None
     feasibility: IdeaFeasibility | None = None
     tags: list[str] | None = None
+
+    @field_validator("title")
+    @classmethod
+    def title_nonempty_when_set(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("title must be non-empty when supplied")
+        return cleaned
+
+    @field_validator("one_line_definition")
+    @classmethod
+    def strip_one_line(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
+
+    @field_validator("category_slug")
+    @classmethod
+    def strip_category_slug(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -97,6 +126,18 @@ class IdeaRefinementPatch(BaseModel):
         if not isinstance(value, list):
             raise ValueError("tags must be a list")
         return [str(t).strip() for t in value if str(t).strip()]
+
+
+def _typed_sparse_patch(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate patch values via IdeaRefinementPatch while keeping sparse keys."""
+    bad = sorted(set(raw.keys()) & _PROTECTED_FIELDS)
+    if bad:
+        raise ValueError(f"draft_patch includes protected fields: {', '.join(bad)}")
+    unknown = sorted(set(raw.keys()) - set(REFINE_PATCH_FIELDS))
+    if unknown:
+        raise ValueError(f"draft_patch includes unknown fields: {', '.join(unknown)}")
+    patch = IdeaRefinementPatch.model_validate(raw)
+    return patch.model_dump(mode="json", exclude_unset=True)
 
 
 class IdeaRefinementResult(BaseModel):
@@ -128,18 +169,12 @@ class IdeaRefinementResult(BaseModel):
 
     @field_validator("draft_patch", mode="before")
     @classmethod
-    def reject_protected_fields(cls, value: Any) -> Any:
+    def validate_typed_patch(cls, value: Any) -> Any:
         if value is None:
             return {}
         if not isinstance(value, dict):
             raise ValueError("draft_patch must be an object")
-        bad = sorted(set(value.keys()) & _PROTECTED_FIELDS)
-        if bad:
-            raise ValueError(f"draft_patch includes protected fields: {', '.join(bad)}")
-        unknown = sorted(set(value.keys()) - set(REFINE_PATCH_FIELDS))
-        if unknown:
-            raise ValueError(f"draft_patch includes unknown fields: {', '.join(unknown)}")
-        return value
+        return _typed_sparse_patch(value)
 
     @model_validator(mode="after")
     def validate_decision_shape(self) -> IdeaRefinementResult:
@@ -198,6 +233,19 @@ def validate_refinement_against_source(
         raise ValueError("READY_FOR_REVIEW requires at least one actual change vs source")
 
 
+def merged_draft_differs_from_source(
+    source_snapshot: dict[str, Any],
+    merged_draft: dict[str, Any],
+) -> bool:
+    """True when sanitized/merged draft still differs from the source snapshot."""
+    for key in REFINE_PATCH_FIELDS:
+        if _normalize_comparable(source_snapshot.get(key)) != _normalize_comparable(
+            merged_draft.get(key)
+        ):
+            return True
+    return False
+
+
 def merge_refinement_patch(
     source_snapshot: dict[str, Any],
     draft_patch: dict[str, Any],
@@ -253,68 +301,174 @@ def _field_char_len(value: Any) -> int:
     return len(str(value))
 
 
+def refine_prompt_char_counts(
+    *,
+    direction: str,
+    source_context: dict[str, Any],
+    clarifying_questions: list[dict[str, Any]] | None = None,
+    clarification_answers: list[dict[str, Any]] | None = None,
+) -> tuple[int, int, int]:
+    """Exact system + user prompt sizes used by the OpenAI-compatible provider."""
+    system_chars = len(REFINE_SYSTEM_PROMPT)
+    user_prompt_chars = len(
+        build_refine_user_prompt(
+            direction=direction,
+            source_context=source_context,
+            clarifying_questions=clarifying_questions,
+            clarification_answers=clarification_answers,
+        )
+    )
+    return system_chars, user_prompt_chars, system_chars + user_prompt_chars
+
+
+def _truncate_field_value(raw: Any, *, max_field_chars: int) -> tuple[Any, bool]:
+    if isinstance(raw, str) and len(raw) > max_field_chars:
+        return raw[: max_field_chars - 1] + "…", True
+    return raw, False
+
+
 def prepare_refine_source_context(
     source_snapshot: dict[str, Any],
     *,
     direction: str,
     max_prompt_chars: int,
     max_field_chars: int = 1200,
+    clarifying_questions: list[dict[str, Any]] | None = None,
+    clarification_answers: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Select/truncate source fields for prompt budget. Returns (context, meta)."""
+    """
+    Select/truncate source fields so system + user prompt (incl. Q/A) fit budget.
+
+    Returns (source_context, meta). Raises LlmRefineInputTooLargeError when even a
+    minimal prompt exceeds max_prompt_chars.
+    """
+    empty_system, empty_user, empty_total = refine_prompt_char_counts(
+        direction=direction,
+        source_context={},
+        clarifying_questions=clarifying_questions,
+        clarification_answers=clarification_answers,
+    )
+    if empty_total > max_prompt_chars:
+        raise LlmRefineInputTooLargeError()
+
     priority = list(DIRECTION_PRIORITY_FIELDS.get(direction, REFINE_PATCH_FIELDS))
-    # Ensure always-include fields first, then direction priority, then remaining.
     ordered: list[str] = []
     for key in list(_ALWAYS_INCLUDE) + priority + list(REFINE_PATCH_FIELDS):
         if key in REFINE_PATCH_FIELDS and key not in ordered:
             ordered.append(key)
 
-    context: dict[str, Any] = {"direction": direction}
+    context: dict[str, Any] = {}
     truncated_fields: list[str] = []
     included: list[str] = []
 
-    # Reserve space for wrapper / direction guidance overhead.
-    used = 400
     for key in ordered:
         if key not in source_snapshot:
             continue
         raw = source_snapshot.get(key)
         if raw is None:
             continue
-        if isinstance(raw, str):
-            value: Any = raw
-            if len(value) > max_field_chars:
-                value = value[: max_field_chars - 1] + "…"
-                truncated_fields.append(key)
-        elif isinstance(raw, list):
-            value = raw
-        else:
-            value = raw
+        value, was_truncated = _truncate_field_value(raw, max_field_chars=max_field_chars)
         candidate = dict(context)
         candidate[key] = value
-        size = len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":")))
-        if used + size > max_prompt_chars and key not in _ALWAYS_INCLUDE:
+        _sys, _user, total = refine_prompt_char_counts(
+            direction=direction,
+            source_context=candidate,
+            clarifying_questions=clarifying_questions,
+            clarification_answers=clarification_answers,
+        )
+        if total > max_prompt_chars:
+            if key not in _ALWAYS_INCLUDE:
+                continue
+            # Always-include fields: shrink further until they fit or give up.
+            if isinstance(value, str):
+                fitted = False
+                for limit in (200, 80, 40, 16):
+                    shrunk = value[: limit - 1] + "…" if len(value) > limit else value
+                    trial = dict(context)
+                    trial[key] = shrunk
+                    _s, _u, trial_total = refine_prompt_char_counts(
+                        direction=direction,
+                        source_context=trial,
+                        clarifying_questions=clarifying_questions,
+                        clarification_answers=clarification_answers,
+                    )
+                    if trial_total <= max_prompt_chars:
+                        context[key] = shrunk
+                        included.append(key)
+                        truncated_fields.append(key)
+                        fitted = True
+                        break
+                if not fitted:
+                    raise LlmRefineInputTooLargeError()
+            else:
+                raise LlmRefineInputTooLargeError()
             continue
-        if used + size > max_prompt_chars and key in _ALWAYS_INCLUDE:
-            # Still include but truncate further.
-            if isinstance(value, str) and len(value) > 200:
-                value = value[:199] + "…"
-                truncated_fields.append(key)
-                candidate[key] = value
-                size = len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":")))
+
         context[key] = value
         included.append(key)
-        used = size
+        if was_truncated:
+            truncated_fields.append(key)
 
-    if len(included) < 2:
+    if len(included) < 1 or (
+        "title" not in included and "one_line_definition" not in included and not context
+    ):
+        # Require at least one content field when the snapshot had any.
+        has_source_content = any(
+            source_snapshot.get(k) is not None for k in REFINE_PATCH_FIELDS
+        )
+        if has_source_content and not included:
+            raise LlmRefineInputTooLargeError()
+
+    system_chars, user_prompt_chars, total_prompt_chars = refine_prompt_char_counts(
+        direction=direction,
+        source_context=context,
+        clarifying_questions=clarifying_questions,
+        clarification_answers=clarification_answers,
+    )
+    if total_prompt_chars > max_prompt_chars:
         raise LlmRefineInputTooLargeError()
 
     meta = {
         "context_fields": len(included),
         "included_fields": included,
         "truncated_fields": truncated_fields,
-        "prompt_chars_estimate": used,
+        "system_chars": system_chars,
+        "user_prompt_chars": user_prompt_chars,
+        "total_prompt_chars": total_prompt_chars,
+        # Backward-compatible alias — total only, never source-context-only.
+        "prompt_chars_estimate": total_prompt_chars,
+        "empty_prompt_chars": empty_total,
+        "empty_system_chars": empty_system,
+        "empty_user_chars": empty_user,
     }
     return context, meta
+
+
+def prepare_refine_prompt_request(
+    *,
+    direction: str,
+    source_snapshot: dict[str, Any],
+    clarifying_questions: list[dict[str, Any]] | None = None,
+    clarification_answers: list[dict[str, Any]] | None = None,
+    max_prompt_chars: int,
+    max_field_chars: int = 1200,
+) -> tuple[IdeaRefinementRequest, dict[str, Any]]:
+    """Build a budgeted IdeaRefinementRequest using exact system+user lengths."""
+    source_context, meta = prepare_refine_source_context(
+        source_snapshot,
+        direction=direction,
+        max_prompt_chars=max_prompt_chars,
+        max_field_chars=max_field_chars,
+        clarifying_questions=clarifying_questions,
+        clarification_answers=clarification_answers,
+    )
+    request = IdeaRefinementRequest(
+        direction=direction,
+        source_context=source_context,
+        clarifying_questions=clarifying_questions,
+        clarification_answers=clarification_answers,
+    )
+    return request, meta
 
 
 def build_idea_source_snapshot(idea: Any, *, category_slug: str | None) -> dict[str, Any]:

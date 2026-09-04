@@ -883,6 +883,15 @@ def apply_refinement(
         for_update=True,
     )
 
+    # Purpose must be checked before any CONFIRMED idempotent short-circuit so
+    # CREATE (or other) sessions cannot succeed on apply-refinement.
+    if session.purpose != IdeaAiSessionPurpose.REFINE.value:
+        raise AppError(
+            "Only purpose=REFINE sessions can be applied.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=400,
+        )
+
     if (
         session.status == IdeaAiSessionStatus.CONFIRMED.value
         and session.result_idea_id is not None
@@ -898,16 +907,16 @@ def apply_refinement(
                 code="AI_SESSION_RESULT_IDEA_DELETED",
                 status_code=409,
             )
-        share = idea_access.get_idea_share(db, applied.id, user.id)
-        detail = idea_service.to_detail(db, applied, user_id=user.id, share=share)
+        # Mutation endpoint: re-check EDIT even for idempotent replay.
+        idea, share, _access = idea_service.require_idea_edit(
+            db,
+            workspace_id=workspace.id,
+            idea_id=applied.id,
+            user_id=user.id,
+        )
+        detail = idea_service.to_detail(db, idea, user_id=user.id, share=share)
         return AiRefineApplyResponse(updated=False, idea=detail)
 
-    if session.purpose != IdeaAiSessionPurpose.REFINE.value:
-        raise AppError(
-            "Only purpose=REFINE sessions can be applied.",
-            code="AI_SESSION_INVALID_STATE",
-            status_code=400,
-        )
     if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
         raise AppError(
             "AI session is not ready to apply.",
