@@ -12,6 +12,7 @@ from app.api.deps import AuthContext, require_csrf
 from app.api.workspace_deps import WorkspaceContext, get_workspace_context
 from app.core.errors import AppError
 from app.db.session import get_db
+from app.schemas.ai import AiRefineSessionCreate, AiSessionPublic
 from app.schemas.idea import (
     IdeaCreate,
     IdeaDetail,
@@ -21,6 +22,7 @@ from app.schemas.idea import (
     IdeaUpdate,
 )
 from app.schemas.research import IdeaEvidenceResponse
+from app.services import ai_session as ai_session_service
 from app.services import idea as idea_service
 from app.services import idea_access
 from app.services import idea_search
@@ -189,6 +191,38 @@ def delete_idea(
     except Exception:
         db.rollback()
         raise
+
+
+@router.post(
+    "/{idea_id}/ai-refine-sessions",
+    response_model=AiSessionPublic,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_ai_refine_session(
+    idea_id: UUID,
+    body: AiRefineSessionCreate,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> AiSessionPublic:
+    del auth
+    try:
+        session = ai_session_service.create_refine_ai_session(
+            db,
+            workspace=ctx.workspace,
+            requester=ctx.user,
+            idea_id=idea_id,
+            direction=body.direction,
+        )
+        db.commit()
+        db.refresh(session)
+    except AppError:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    return ai_session_service.to_public(session)
 
 
 @router.get("/{idea_id}/shares", response_model=list[IdeaSharePublic])

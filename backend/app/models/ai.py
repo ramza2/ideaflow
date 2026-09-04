@@ -47,6 +47,14 @@ class IdeaAiSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_idea_ai_sessions_requester_id", "requester_id"),
         Index("ix_idea_ai_sessions_status", "status"),
         Index("ix_idea_ai_sessions_result_idea_id", "result_idea_id"),
+        Index("ix_idea_ai_sessions_source_idea_id", "source_idea_id"),
+        CheckConstraint(
+            "refine_direction IS NULL OR refine_direction IN ("
+            "'EXPAND_DETAIL', 'TECHNICAL_IMPLEMENTATION', 'BUSINESS_PERSPECTIVE', "
+            "'USER_PERSPECTIVE', 'COUNTER_PERSPECTIVE', 'RISK_ANALYSIS', "
+            "'MINIMUM_VALIDATION', 'NEXT_ACTIONS')",
+            name="idea_ai_session_refine_direction",
+        ),
     )
 
     workspace_id: Mapped[PyUUID] = mapped_column(
@@ -94,6 +102,17 @@ class IdeaAiSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
     )
 
+    source_idea_id: Mapped[PyUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ideas.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_idea_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_idea_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    refine_direction: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
@@ -112,7 +131,7 @@ class AiJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "ai_jobs"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('STRUCTURE_IDEA', 'WEB_RESEARCH')",
+            "job_type IN ('STRUCTURE_IDEA', 'REFINE_IDEA', 'WEB_RESEARCH')",
             name="ai_job_type",
         ),
         CheckConstraint(
@@ -120,7 +139,7 @@ class AiJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ai_job_status",
         ),
         CheckConstraint(
-            "(job_type = 'STRUCTURE_IDEA' AND research_run_id IS NULL) OR "
+            "(job_type IN ('STRUCTURE_IDEA', 'REFINE_IDEA') AND research_run_id IS NULL) OR "
             "(job_type = 'WEB_RESEARCH' AND research_run_id IS NOT NULL)",
             name="ai_job_research_run_type",
         ),

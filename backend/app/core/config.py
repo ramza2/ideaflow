@@ -115,6 +115,10 @@ class Settings(BaseSettings):
         default=1200, alias="WEB_RESEARCH_REFINE_MAX_TOKENS"
     )
 
+    # Registered Idea AI refinement (Step 17)
+    ai_refine_max_prompt_chars: int = Field(default=5500, alias="AI_REFINE_MAX_PROMPT_CHARS")
+    ai_refine_max_tokens: int = Field(default=1600, alias="AI_REFINE_MAX_TOKENS")
+
     # Embeddings (Step 13 — separate from LLM)
     embedding_enabled: bool = Field(default=False, alias="EMBEDDING_ENABLED")
     embedding_provider: str = Field(default="openai_compatible", alias="EMBEDDING_PROVIDER")
@@ -197,6 +201,8 @@ class Settings(BaseSettings):
         "web_research_refine_max_evidence_chars",
         "web_research_refine_max_prompt_chars",
         "web_research_refine_max_tokens",
+        "ai_refine_max_prompt_chars",
+        "ai_refine_max_tokens",
         "embedding_job_lease_seconds",
         "embedding_job_max_attempts",
         "embedding_max_input_chars",

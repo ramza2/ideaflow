@@ -13,6 +13,7 @@ from app.models.enums import (
     IdeaAiSessionStatus,
     IdeaFeasibility,
     IdeaPriority,
+    IdeaRefineDirection,
     IdeaSharePermission,
     IdeaVisibility,
 )
@@ -39,6 +40,12 @@ class AiSessionCreate(BaseModel):
         if value != IdeaAiSessionPurpose.CREATE:
             raise ValueError("Only purpose=CREATE is supported in this step")
         return value
+
+
+class AiRefineSessionCreate(BaseModel):
+    """Start an AI refinement session on an already-registered Idea (Step 17)."""
+
+    direction: IdeaRefineDirection
 
 
 class ClarificationAnswerInput(BaseModel):
@@ -205,6 +212,43 @@ class AiSessionConfirmRequest(BaseModel):
         return self
 
 
+class AiRefineApplyRequest(BaseModel):
+    """User-reviewed refinement applied to the source Idea.
+
+    Excludes stage/visibility/assignee/next_review_date/shares — refinement
+    never changes workflow or ACL fields of the registered Idea.
+    """
+
+    title: str = Field(min_length=1, max_length=200)
+    one_line_definition: str | None = Field(default=None, max_length=500)
+
+    background: str | None = None
+    problem: str | None = None
+    core_concept: str | None = None
+    major_features: str | None = None
+    expected_effect: str | None = None
+    target_users: str | None = None
+    scenarios: str | None = None
+    challenges: str | None = None
+    minimum_validation: str | None = None
+    related_project: str | None = None
+
+    category_id: UUID | None = None
+
+    priority: IdeaPriority = IdeaPriority.MEDIUM
+    feasibility: IdeaFeasibility = IdeaFeasibility.UNKNOWN
+
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("title must not be empty")
+        return stripped
+
+
 class AiSessionFailurePublic(BaseModel):
     code: str
     message: str
@@ -239,6 +283,11 @@ class AiSessionPublic(BaseModel):
     failure: AiSessionFailurePublic | None = None
     llm: AiSessionLlmPublic
 
+    source_idea_id: UUID | None = None
+    source_idea_updated_at: datetime | None = None
+    source_idea_snapshot: dict[str, Any] | None = None
+    refine_direction: IdeaRefineDirection | None = None
+
     created_at: datetime
     updated_at: datetime
     ready_at: datetime | None = None
@@ -247,4 +296,9 @@ class AiSessionPublic(BaseModel):
 
 class AiSessionConfirmResponse(BaseModel):
     created: bool
+    idea: IdeaDetail
+
+
+class AiRefineApplyResponse(BaseModel):
+    updated: bool
     idea: IdeaDetail

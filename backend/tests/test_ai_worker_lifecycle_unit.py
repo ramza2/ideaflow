@@ -30,6 +30,9 @@ class CountingProvider:
     def refine_idea_with_evidence(self, request):
         raise AssertionError("no jobs expected in empty-poll lifecycle test")
 
+    def refine_idea(self, request):
+        raise AssertionError("no jobs expected in empty-poll lifecycle test")
+
     def close(self) -> None:
         if not self.closed_instance:
             self.closed_instance = True

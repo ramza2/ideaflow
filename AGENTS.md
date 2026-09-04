@@ -36,6 +36,7 @@ IdeaFlow is a natural-language idea-management product. The `frontend/` is an ap
 - Validation (Step 14): `IdeaValidation` manual workflow under Idea Detail; ACL inherits parent Idea; start may move `validation_candidate` → `validating`; complete does **not** auto-promote to `execution_candidate`.
 - Web Search provider (Step 15): production supports Tavily Search API (`WEB_SEARCH_PROVIDER=tavily`); `http_json` remains for generic/custom endpoints. Refinement uses `WEB_RESEARCH_REFINE_*` budgets (`MAX_PROMPT_CHARS`, `MAX_TOKENS`, evidence caps) so all stored evidence is kept while LLM input stays bounded.
 - AI Review draft save (Step 16): manual temp save on Review (`PUT .../review-draft`, `review_state` + `draft_payload`); reload restores management UI + `edited_fields`. Whole regeneration creates a new CREATE `IdeaAiSession` + `STRUCTURE_IDEA` job; original session/research/evidence preserved; no automatic Web Search on regeneration.
+- Registered Idea AI refine (Step 17): `AI로 발전시키기` creates a REFINE session (`source_idea_id` snapshot + `REFINE_IDEA` job). User reviews/applies explicitly — no automatic Idea overwrite, no automatic Web Research. Source `updated_at` concurrency guard on apply/regenerate.
 - Migrations (PostgreSQL required):
 
 ```text

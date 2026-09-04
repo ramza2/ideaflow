@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.llm.refine_schemas import IdeaRefinementRequest, IdeaRefinementResult
 from app.llm.research_schemas import EvidenceRefinementRequest, EvidenceRefinementResult
 from app.llm.schemas import IdeaStructuringRequest, IdeaStructuringResult
 
@@ -20,4 +21,8 @@ class LlmProvider(Protocol):
         self, request: EvidenceRefinementRequest
     ) -> EvidenceRefinementResult:
         """Refine a draft using web search evidence."""
+        ...
+
+    def refine_idea(self, request: IdeaRefinementRequest) -> IdeaRefinementResult:
+        """Evolve a registered idea along a user-selected refine direction."""
         ...

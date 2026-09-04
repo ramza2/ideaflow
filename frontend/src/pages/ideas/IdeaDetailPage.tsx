@@ -19,7 +19,9 @@ import {
   ClipboardCheck,
   FlaskConical,
   AtSign,
+  Loader2,
 } from "lucide-react";
+import { createIdeaRefineSession } from "../../api/aiSessions";
 import { deleteIdea, getIdea } from "../../api/ideas";
 import { getIdeaEvidence } from "../../api/webResearch";
 import {
@@ -46,20 +48,20 @@ import { IdeaValidationPanel } from "../../components/ideas/IdeaValidationPanel"
 import { useAuth } from "../../auth/AuthProvider";
 import { toDisplayUser } from "../../utils/avatar";
 import { REVIEW_KIND_OPTIONS, dispatchReviewCountsChanged } from "../../utils/collaboration";
-import type { IdeaComment, IdeaDetail, IdeaEvidenceItem, StageRef, UserRef } from "../../types/api";
+import { REFINE_DIRECTION_OPTIONS } from "../../utils/refineDirection";
+import type {
+  IdeaComment,
+  IdeaDetail,
+  IdeaEvidenceItem,
+  IdeaRefineDirection,
+  StageRef,
+  UserRef,
+} from "../../types/api";
 
 type DetailTab = "overview" | "research" | "validation" | "discussion" | "history";
 
-const AI_EVOLVE_OPTIONS = [
-  "더 구체적으로 확장",
-  "기술 구현 관점",
-  "사업화 관점",
-  "사용자 관점",
-  "반대 관점",
-  "위험 분석",
-  "최소 검증안",
-  "다음 실행 항목",
-];
+const AI_EVOLVE_OPTIONS: { direction: IdeaRefineDirection; label: string }[] =
+  REFINE_DIRECTION_OPTIONS;
 
 export function IdeaDetailPage() {
   const navigate = useNavigate();
@@ -73,6 +75,7 @@ export function IdeaDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [aiDrawer, setAiDrawer] = useState(false);
+  const [refiningDirection, setRefiningDirection] = useState<IdeaRefineDirection | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [evidence, setEvidence] = useState<IdeaEvidenceItem[]>([]);
@@ -281,6 +284,20 @@ export function IdeaDetailPage() {
     toast.success("링크가 복사되었습니다");
   }
 
+  async function handleStartRefine(direction: IdeaRefineDirection) {
+    if (!workspaceId || !ideaId || refiningDirection) return;
+    setRefiningDirection(direction);
+    try {
+      const session = await createIdeaRefineSession(workspaceId, ideaId, { direction });
+      setAiDrawer(false);
+      navigate(`/w/${workspaceId}/ideas/${ideaId}/ai/refine/${session.id}/analyzing`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "AI 발전 요청을 시작하지 못했습니다."));
+    } finally {
+      setRefiningDirection(null);
+    }
+  }
+
   async function handleDelete() {
     if (!workspaceId || !ideaId) return;
     setDeleting(true);
@@ -408,9 +425,11 @@ export function IdeaDetailPage() {
                   <Trash2 className="w-4 h-4 text-[#dc2626]" />
                 </Button>
               )}
-              <Button variant="ai" size="sm" icon={<Sparkles className="w-3.5 h-3.5" />} onClick={() => setAiDrawer(true)}>
-                <span className="hidden sm:inline">AI로 발전시키기</span>
-              </Button>
+              {canEdit && (
+                <Button variant="ai" size="sm" icon={<Sparkles className="w-3.5 h-3.5" />} onClick={() => setAiDrawer(true)}>
+                  <span className="hidden sm:inline">AI로 발전시키기</span>
+                </Button>
+              )}
               <Button variant="icon"><MoreHorizontal className="w-4 h-4" /></Button>
             </div>
           </div>
@@ -715,7 +734,7 @@ export function IdeaDetailPage() {
         </div>
       </div>
 
-      {aiDrawer && (
+      {canEdit && aiDrawer && (
         <div className="fixed right-0 top-16 bottom-0 w-80 bg-white border-l border-[rgba(0,0,0,0.08)] shadow-xl z-30 flex flex-col">
           <div className="flex items-center justify-between px-5 py-4 border-b border-[rgba(0,0,0,0.06)]">
             <div className="flex items-center gap-2">
@@ -727,13 +746,28 @@ export function IdeaDetailPage() {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-4">
-            <p className="text-xs text-[#6b6b80] mb-3">발전 방향을 선택하세요. (Step 8에서 실제 AI 연동 예정)</p>
+            <p className="text-xs text-[#6b6b80] mb-3">발전 방향을 선택하세요.</p>
             <div className="space-y-2">
-              {AI_EVOLVE_OPTIONS.map((opt) => (
-                <button key={opt} type="button" className="w-full text-left px-3 py-2.5 rounded-lg border border-[rgba(0,0,0,0.08)] hover:border-[#7c3aed]/30 hover:bg-[#f5f3ff] text-sm text-[#111118]">
-                  {opt}
-                </button>
-              ))}
+              {AI_EVOLVE_OPTIONS.map((opt) => {
+                const isStarting = refiningDirection === opt.direction;
+                return (
+                  <button
+                    key={opt.direction}
+                    type="button"
+                    disabled={refiningDirection !== null}
+                    onClick={() => void handleStartRefine(opt.direction)}
+                    className={clsx(
+                      "w-full text-left px-3 py-2.5 rounded-lg border border-[rgba(0,0,0,0.08)] text-sm text-[#111118] flex items-center justify-between gap-2",
+                      refiningDirection === null
+                        ? "hover:border-[#7c3aed]/30 hover:bg-[#f5f3ff]"
+                        : "opacity-60 cursor-not-allowed",
+                    )}
+                  >
+                    {opt.label}
+                    {isStarting && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#7c3aed]" />}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

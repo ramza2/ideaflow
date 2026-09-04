@@ -20,6 +20,16 @@ from app.llm.exceptions import (
     LlmTimeoutError,
 )
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
+from app.llm.refine_prompts import (
+    IDEA_REFINE_PROMPT_VERSION,
+    REFINE_SYSTEM_PROMPT,
+    build_refine_user_prompt,
+)
+from app.llm.refine_schemas import (
+    IdeaRefinementRequest,
+    IdeaRefinementResult,
+    parse_refinement_result as parse_idea_refinement_result,
+)
 from app.llm.research_prompts import (
     IDEA_RESEARCH_REFINE_PROMPT_VERSION,
     RESEARCH_SYSTEM_PROMPT,
@@ -52,6 +62,7 @@ class OpenAICompatibleLlmProvider:
         self._settings = settings
         self.model_name = settings.llm_model_name
         self.prompt_version = IDEA_STRUCTURE_PROMPT_VERSION
+        self.refine_prompt_version = IDEA_REFINE_PROMPT_VERSION
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(
@@ -184,6 +195,72 @@ class OpenAICompatibleLlmProvider:
             hashlib.sha256(content_bytes).hexdigest()[:12],
         )
         return parse_refinement_result(content)
+
+    def refine_idea(self, request: IdeaRefinementRequest) -> IdeaRefinementResult:
+        url = self._settings.llm_chat_completions_url
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        api_key = self._settings.llm_api_key.strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        body: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": REFINE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": build_refine_user_prompt(
+                        direction=request.direction.value,
+                        source_context=request.source_context,
+                        clarifying_questions=request.clarifying_questions,
+                        clarification_answers=request.clarification_answers,
+                    ),
+                },
+            ],
+            "temperature": self._settings.llm_temperature,
+            "max_tokens": self._settings.ai_refine_max_tokens,
+        }
+        if self._settings.llm_enable_thinking is not None:
+            body["chat_template_kwargs"] = {
+                "enable_thinking": bool(self._settings.llm_enable_thinking),
+            }
+
+        try:
+            response = self._client.post(url, headers=headers, json=body)
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                "llm_timeout provider=%s model=%s",
+                self.provider_name,
+                self.model_name,
+            )
+            raise LlmTimeoutError() from exc
+        except httpx.RequestError as exc:
+            logger.warning(
+                "llm_connection_error provider=%s model=%s category=%s",
+                self.provider_name,
+                self.model_name,
+                type(exc).__name__,
+            )
+            raise LlmConnectionError() from exc
+
+        self._raise_for_status(response)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise LlmResponseValidationError("LLM response is not JSON") from exc
+
+        content = self._extract_content(payload)
+        content_bytes = content.encode("utf-8")
+        logger.info(
+            "llm_refine_ok provider=%s model=%s status=%s bytes=%s sha256=%s",
+            self.provider_name,
+            self.model_name,
+            response.status_code,
+            len(content_bytes),
+            hashlib.sha256(content_bytes).hexdigest()[:12],
+        )
+        return parse_idea_refinement_result(content)
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code

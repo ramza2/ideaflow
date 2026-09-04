@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION
+from app.llm.refine_prompts import IDEA_REFINE_PROMPT_VERSION, direction_label_ko
+from app.llm.refine_schemas import REFINE_PATCH_FIELDS, build_idea_source_snapshot
 from app.models.ai import AiJob, IdeaAiSession
 from app.models.enums import (
     AiJobStatus,
@@ -19,12 +21,16 @@ from app.models.enums import (
     FieldProvenanceSource,
     IdeaAiSessionPurpose,
     IdeaAiSessionStatus,
+    IdeaRefineDirection,
     IdeaVisibility,
 )
 from app.models.idea import Idea
+from app.models.relations import IdeaTag
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceCategory
+from app.models.workspace import Tag, Workspace, WorkspaceCategory
 from app.schemas.ai import (
+    AiRefineApplyRequest,
+    AiRefineApplyResponse,
     AiSessionConfirmRequest,
     AiSessionConfirmResponse,
     AiSessionCreate,
@@ -34,8 +40,9 @@ from app.schemas.ai import (
     AiSessionReviewDraftSaveRequest,
     ClarificationSubmit,
 )
-from app.schemas.idea import IdeaCreate
+from app.schemas.idea import IdeaCreate, IdeaUpdate
 from app.services import idea as idea_service
+from app.services import idea_access
 from app.services import system_setting as system_setting_service
 
 _DRAFT_COMPARE_FIELDS = (
@@ -54,6 +61,12 @@ _DRAFT_COMPARE_FIELDS = (
     "priority",
     "feasibility",
 )
+
+REFINE_SOURCE_CHANGED_MESSAGE = (
+    "원본 아이디어가 변경되어 이 발전 결과를 적용할 수 없습니다. "
+    "다시 발전시켜 주세요."
+)
+REFINE_NO_CHANGES_MESSAGE = "변경된 내용이 없습니다. 적용할 내용을 확인해 주세요."
 
 
 def utcnow() -> datetime:
@@ -169,6 +182,140 @@ def create_ai_session(
     return session
 
 
+def _idea_tag_names(db: Session, idea_id: UUID) -> list[str]:
+    return list(
+        db.scalars(
+            select(Tag.name)
+            .join(IdeaTag, IdeaTag.tag_id == Tag.id)
+            .where(IdeaTag.idea_id == idea_id)
+            .order_by(Tag.name)
+        )
+    )
+
+
+def build_source_snapshot(db: Session, idea: Idea) -> dict[str, Any]:
+    """AI-facing snapshot of a registered Idea (Step 17 REFINE source)."""
+    category_slug: str | None = None
+    if idea.category_id is not None:
+        category = db.get(WorkspaceCategory, idea.category_id)
+        if category is not None and category.deleted_at is None:
+            category_slug = category.slug
+    snapshot = build_idea_source_snapshot(idea, category_slug=category_slug)
+    snapshot["tags"] = _idea_tag_names(db, idea.id)
+    return snapshot
+
+
+def _job_type_for_session(session: IdeaAiSession) -> str:
+    if session.purpose == IdeaAiSessionPurpose.REFINE.value:
+        return AiJobType.REFINE_IDEA.value
+    return AiJobType.STRUCTURE_IDEA.value
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _require_unchanged_source(idea: Idea, session: IdeaAiSession) -> None:
+    if _as_utc(idea.updated_at) != _as_utc(session.source_idea_updated_at):
+        raise AppError(
+            REFINE_SOURCE_CHANGED_MESSAGE,
+            code="AI_REFINE_SOURCE_CHANGED",
+            status_code=409,
+        )
+
+
+def _load_refine_source_idea(
+    db: Session,
+    *,
+    workspace: Workspace,
+    user: User,
+    session: IdeaAiSession,
+    for_update: bool = False,
+) -> tuple[Idea, str]:
+    """Re-check source existence + edit permission, then compare freshness."""
+    if session.source_idea_id is None:
+        raise AppError(
+            "AI session has no source idea.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+    if for_update:
+        # populate_existing keeps the locked row authoritative for the freshness check.
+        locked = db.execute(
+            select(Idea)
+            .where(Idea.id == session.source_idea_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked is None or locked.deleted_at is not None or locked.workspace_id != workspace.id:
+            raise AppError("Idea not found.", code="IDEA_NOT_FOUND", status_code=404)
+
+    idea, _share, access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace.id,
+        idea_id=session.source_idea_id,
+        user_id=user.id,
+    )
+    _require_unchanged_source(idea, session)
+    return idea, access
+
+
+def create_refine_ai_session(
+    db: Session,
+    *,
+    workspace: Workspace,
+    requester: User,
+    idea_id: UUID,
+    direction: IdeaRefineDirection,
+    settings: Settings | None = None,
+) -> IdeaAiSession:
+    """Start an AI refinement session for an already-registered Idea."""
+    _require_llm_enabled(db, workspace)
+    cfg = settings or get_settings()
+
+    idea, _share, _access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace.id,
+        idea_id=idea_id,
+        user_id=requester.id,
+    )
+
+    session = IdeaAiSession(
+        workspace_id=workspace.id,
+        requester_id=requester.id,
+        purpose=IdeaAiSessionPurpose.REFINE.value,
+        status=IdeaAiSessionStatus.PROCESSING.value,
+        input_text=f"발전 방향: {direction_label_ko(direction.value)}",
+        source_idea_id=idea.id,
+        source_idea_updated_at=idea.updated_at,
+        source_idea_snapshot=build_source_snapshot(db, idea),
+        refine_direction=direction.value,
+        result_idea_id=None,
+        research_recommended=False,
+        research_topics=[],
+        prompt_version=IDEA_REFINE_PROMPT_VERSION,
+    )
+    db.add(session)
+    db.flush()
+
+    db.add(
+        AiJob(
+            session_id=session.id,
+            job_type=AiJobType.REFINE_IDEA.value,
+            status=AiJobStatus.QUEUED.value,
+            attempts=0,
+            max_attempts=cfg.ai_job_max_attempts,
+            available_at=utcnow(),
+        )
+    )
+    db.flush()
+    return session
+
+
 def submit_clarifications(
     db: Session,
     *,
@@ -219,7 +366,7 @@ def submit_clarifications(
     db.add(
         AiJob(
             session_id=session.id,
-            job_type=AiJobType.STRUCTURE_IDEA.value,
+            job_type=_job_type_for_session(session),
             status=AiJobStatus.QUEUED.value,
             attempts=0,
             max_attempts=cfg.ai_job_max_attempts,
@@ -262,7 +409,7 @@ def retry_ai_session(
     db.add(
         AiJob(
             session_id=session.id,
-            job_type=AiJobType.STRUCTURE_IDEA.value,
+            job_type=_job_type_for_session(session),
             status=AiJobStatus.QUEUED.value,
             attempts=0,
             max_attempts=cfg.ai_job_max_attempts,
@@ -342,6 +489,14 @@ def to_public(session: IdeaAiSession) -> AiSessionPublic:
             model=session.llm_model,
             prompt_version=session.prompt_version,
         ),
+        source_idea_id=session.source_idea_id,
+        source_idea_updated_at=session.source_idea_updated_at,
+        source_idea_snapshot=session.source_idea_snapshot,
+        refine_direction=(
+            IdeaRefineDirection(session.refine_direction)
+            if session.refine_direction
+            else None
+        ),
         created_at=session.created_at,
         updated_at=session.updated_at,
         ready_at=session.ready_at,
@@ -358,7 +513,7 @@ def _confirm_payload_dict(body: AiSessionConfirmRequest) -> dict[str, Any]:
 def _merge_user_edit_provenance(
     original: dict[str, Any] | None,
     draft: dict[str, Any] | None,
-    confirm: AiSessionConfirmRequest,
+    confirm: AiSessionConfirmRequest | AiRefineApplyRequest,
 ) -> dict[str, Any]:
     provenance = dict(original or {})
     draft = draft or {}
@@ -507,25 +662,50 @@ def regenerate_ai_session(
             status_code=409,
         )
 
-    new_session = IdeaAiSession(
-        workspace_id=workspace.id,
-        requester_id=requester.id,
-        purpose=IdeaAiSessionPurpose.CREATE.value,
-        status=IdeaAiSessionStatus.PROCESSING.value,
-        input_text=session.input_text,
-        clarifying_questions=session.clarifying_questions,
-        clarification_answers=session.clarification_answers,
-        research_recommended=False,
-        research_topics=[],
-        prompt_version=IDEA_STRUCTURE_PROMPT_VERSION,
-    )
+    if session.purpose == IdeaAiSessionPurpose.REFINE.value:
+        idea, _access = _load_refine_source_idea(
+            db,
+            workspace=workspace,
+            user=requester,
+            session=session,
+        )
+        new_session = IdeaAiSession(
+            workspace_id=workspace.id,
+            requester_id=requester.id,
+            purpose=IdeaAiSessionPurpose.REFINE.value,
+            status=IdeaAiSessionStatus.PROCESSING.value,
+            input_text=session.input_text,
+            source_idea_id=idea.id,
+            source_idea_updated_at=session.source_idea_updated_at,
+            source_idea_snapshot=session.source_idea_snapshot,
+            refine_direction=session.refine_direction,
+            research_recommended=False,
+            research_topics=[],
+            prompt_version=IDEA_REFINE_PROMPT_VERSION,
+        )
+        job_type = AiJobType.REFINE_IDEA.value
+    else:
+        new_session = IdeaAiSession(
+            workspace_id=workspace.id,
+            requester_id=requester.id,
+            purpose=IdeaAiSessionPurpose.CREATE.value,
+            status=IdeaAiSessionStatus.PROCESSING.value,
+            input_text=session.input_text,
+            clarifying_questions=session.clarifying_questions,
+            clarification_answers=session.clarification_answers,
+            research_recommended=False,
+            research_topics=[],
+            prompt_version=IDEA_STRUCTURE_PROMPT_VERSION,
+        )
+        job_type = AiJobType.STRUCTURE_IDEA.value
+
     db.add(new_session)
     db.flush()
 
     db.add(
         AiJob(
             session_id=new_session.id,
-            job_type=AiJobType.STRUCTURE_IDEA.value,
+            job_type=job_type,
             status=AiJobStatus.QUEUED.value,
             attempts=0,
             max_attempts=cfg.ai_job_max_attempts,
@@ -637,3 +817,180 @@ def confirm_ai_session(
 
     detail = idea_service.to_detail(db, idea, user_id=user.id, share=None)
     return AiSessionConfirmResponse(created=True, idea=detail)
+
+
+def _normalize_refine_value(value: Any) -> Any:
+    if hasattr(value, "value"):
+        value = value.value
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, list):
+        return sorted({str(v).strip() for v in value if str(v).strip()})
+    return value
+
+
+def _refine_payload_snapshot(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    payload: AiRefineApplyRequest,
+) -> dict[str, Any]:
+    category_slug: str | None = None
+    if payload.category_id is not None:
+        category = db.get(WorkspaceCategory, payload.category_id)
+        if (
+            category is not None
+            and category.deleted_at is None
+            and category.workspace_id == workspace_id
+        ):
+            category_slug = category.slug
+    snapshot = {field: getattr(payload, field, None) for field in REFINE_PATCH_FIELDS}
+    snapshot["category_slug"] = category_slug
+    return snapshot
+
+
+def _refine_changes_source(
+    *,
+    source_snapshot: dict[str, Any],
+    payload_snapshot: dict[str, Any],
+) -> bool:
+    for field in REFINE_PATCH_FIELDS:
+        old = _normalize_refine_value(source_snapshot.get(field))
+        new = _normalize_refine_value(payload_snapshot.get(field))
+        if field == "tags":
+            old = old or []
+            new = new or []
+        if old != new:
+            return True
+    return False
+
+
+def apply_refinement(
+    db: Session,
+    *,
+    workspace: Workspace,
+    user: User,
+    session_id: UUID,
+    payload: AiRefineApplyRequest,
+) -> AiRefineApplyResponse:
+    """Apply a reviewed REFINE draft back onto its source Idea (idempotent)."""
+    session = get_session_for_requester(
+        db,
+        workspace_id=workspace.id,
+        session_id=session_id,
+        user_id=user.id,
+        for_update=True,
+    )
+
+    # Purpose must be checked before any CONFIRMED idempotent short-circuit so
+    # CREATE (or other) sessions cannot succeed on apply-refinement.
+    if session.purpose != IdeaAiSessionPurpose.REFINE.value:
+        raise AppError(
+            "Only purpose=REFINE sessions can be applied.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=400,
+        )
+
+    if (
+        session.status == IdeaAiSessionStatus.CONFIRMED.value
+        and session.result_idea_id is not None
+    ):
+        applied = db.get(Idea, session.result_idea_id)
+        if (
+            applied is None
+            or applied.deleted_at is not None
+            or applied.workspace_id != workspace.id
+        ):
+            raise AppError(
+                "Refined idea was deleted.",
+                code="AI_SESSION_RESULT_IDEA_DELETED",
+                status_code=409,
+            )
+        # Mutation endpoint: re-check EDIT even for idempotent replay.
+        idea, share, _access = idea_service.require_idea_edit(
+            db,
+            workspace_id=workspace.id,
+            idea_id=applied.id,
+            user_id=user.id,
+        )
+        detail = idea_service.to_detail(db, idea, user_id=user.id, share=share)
+        return AiRefineApplyResponse(updated=False, idea=detail)
+
+    if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        raise AppError(
+            "AI session is not ready to apply.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+    from app.services import web_research as web_research_service
+
+    if web_research_service.has_blocking_research_for_regenerate(db, session.id):
+        raise AppError(
+            "Complete or cancel in-progress web research before applying.",
+            code="AI_RESEARCH_IN_PROGRESS",
+            status_code=409,
+        )
+
+    idea, access = _load_refine_source_idea(
+        db,
+        workspace=workspace,
+        user=user,
+        session=session,
+        for_update=True,
+    )
+
+    source_snapshot = dict(session.source_idea_snapshot or {})
+    payload_snapshot = _refine_payload_snapshot(
+        db, workspace_id=workspace.id, payload=payload
+    )
+    if not _refine_changes_source(
+        source_snapshot=source_snapshot,
+        payload_snapshot=payload_snapshot,
+    ):
+        raise AppError(
+            REFINE_NO_CHANGES_MESSAGE,
+            code="AI_REFINE_NO_CHANGES",
+            status_code=400,
+        )
+
+    idea = idea_service.update_idea(
+        db,
+        idea=idea,
+        access=access,
+        payload=IdeaUpdate(
+            title=payload.title,
+            one_line_definition=payload.one_line_definition,
+            background=payload.background,
+            problem=payload.problem,
+            core_concept=payload.core_concept,
+            major_features=payload.major_features,
+            expected_effect=payload.expected_effect,
+            target_users=payload.target_users,
+            scenarios=payload.scenarios,
+            challenges=payload.challenges,
+            minimum_validation=payload.minimum_validation,
+            related_project=payload.related_project,
+            category_id=payload.category_id,
+            priority=payload.priority,
+            feasibility=payload.feasibility,
+            tags=payload.tags,
+        ),
+    )
+
+    session.result_idea_id = idea.id
+    _assert_transition(session.status, IdeaAiSessionStatus.CONFIRMED.value)
+    session.status = IdeaAiSessionStatus.CONFIRMED.value
+    session.confirmed_payload = payload.model_dump(mode="json")
+    session.field_provenance = _merge_user_edit_provenance(
+        session.field_provenance,
+        session.draft_payload,
+        payload,
+    )
+    session.confirmed_at = utcnow()
+    db.flush()
+
+    share = idea_access.get_idea_share(db, idea.id, user.id)
+    detail = idea_service.to_detail(db, idea, user_id=user.id, share=share)
+    return AiRefineApplyResponse(updated=True, idea=detail)
