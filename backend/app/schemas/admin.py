@@ -108,6 +108,7 @@ class LlmIntegrationConfig(BaseModel):
     max_tokens: int
     temperature: float
     enable_thinking: bool | None
+    configured: bool
     configuration_source: str
 
 

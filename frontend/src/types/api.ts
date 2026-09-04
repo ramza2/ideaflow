@@ -725,6 +725,7 @@ export interface LlmIntegrationConfig {
   max_tokens: number;
   temperature: number;
   enable_thinking: boolean | null;
+  configured: boolean;
   configuration_source: string;
 }
 

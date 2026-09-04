@@ -702,10 +702,53 @@ def test_integrations_get_does_not_leak_secret_keys(
         assert secret not in dumped
     body = r.json()
     assert body["llm"]["api_key_configured"] is True
+    assert body["llm"]["configured"] is True
     assert body["web_search"]["api_key_configured"] is True
     assert body["llm"]["api_url"] == "https://example.com/api"
     assert body["llm"]["chat_completions_path"] == "/v1/chat/completions"
     assert body["web_search"]["api_url"] == "https://example.com/search"
+
+
+def test_llm_configured_without_api_key(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_API_URL", "https://internal-llm.example.com/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "Qwen3-14B")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.get("/api/v1/admin/integrations", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    dumped = json.dumps(body)
+    assert body["llm"]["configured"] is True
+    assert body["llm"]["api_key_configured"] is False
+    assert "api_key" not in body["llm"] or "api_key_configured" in body["llm"]
+    assert body["llm"].get("api_key") is None
+    assert "Qwen3-14B" in dumped
+    # No secret-like key field value beyond the boolean flag.
+    assert '"api_key":' not in dumped
+
+
+def test_llm_not_configured_when_url_empty(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_API_URL", "")
+    monkeypatch.setenv("LLM_MODEL_NAME", "Qwen3-14B")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.get("/api/v1/admin/integrations", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["configured"] is False
+    assert body["llm"]["api_key_configured"] is False
 
 
 def test_llm_connection_test_uses_fake_provider_metadata_only(

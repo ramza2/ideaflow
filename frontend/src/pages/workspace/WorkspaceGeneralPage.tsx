@@ -144,13 +144,8 @@ export function WorkspaceGeneralPage() {
                 <p className="text-xs text-[#6b6b80] mt-1 flex items-center gap-2">
                   실제 적용 상태
                   <EffectiveBadge
-                    workspaceAllow={allowLlm}
-                    effective={
-                      // After local toggle before save, show based on current saved effective when unchanged.
-                      allowLlm === currentWorkspace.allow_llm
-                        ? currentWorkspace.effective_allow_llm
-                        : allowLlm && currentWorkspace.effective_allow_llm
-                    }
+                    workspaceAllow={currentWorkspace.allow_llm}
+                    effective={currentWorkspace.effective_allow_llm}
                     kind="AI"
                   />
                 </p>
@@ -172,12 +167,8 @@ export function WorkspaceGeneralPage() {
                 <p className="text-xs text-[#6b6b80] mt-1 flex items-center gap-2">
                   실제 적용 상태
                   <EffectiveBadge
-                    workspaceAllow={allowWebSearch}
-                    effective={
-                      allowWebSearch === currentWorkspace.allow_web_search
-                        ? currentWorkspace.effective_allow_web_search
-                        : allowWebSearch && currentWorkspace.effective_allow_web_search
-                    }
+                    workspaceAllow={currentWorkspace.allow_web_search}
+                    effective={currentWorkspace.effective_allow_web_search}
                     kind="웹 검색"
                   />
                 </p>
@@ -192,6 +183,11 @@ export function WorkspaceGeneralPage() {
                 {allowWebSearch ? "허용" : "비허용"}
               </label>
             </div>
+            {dirty && (
+              <p className="text-xs text-[#b45309]">
+                저장 후 실제 적용 상태가 갱신됩니다.
+              </p>
+            )}
             <p className="text-xs text-[#6b6b80]">
               전역 시스템 설정에서 AI/웹 검색이 차단되면 작업공간에서 허용해도 실제 적용 상태는 차단됩니다.
             </p>

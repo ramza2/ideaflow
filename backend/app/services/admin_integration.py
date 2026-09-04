@@ -131,6 +131,8 @@ def get_integration_config(db: Session, settings: Settings | None = None) -> Adm
             max_tokens=cfg.llm_max_tokens,
             temperature=cfg.llm_temperature,
             enable_thinking=cfg.llm_enable_thinking,
+            # API key is optional for openai_compatible providers (e.g. internal Qwen).
+            configured=bool(cfg.llm_api_url.strip() and cfg.llm_model_name.strip()),
             configuration_source="ENVIRONMENT",
         ),
         web_search=WebSearchIntegrationConfig(

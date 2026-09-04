@@ -139,8 +139,8 @@ export function AdminIntegrationsPage() {
     ? [
         {
           label: "LLM",
-          value: config.llm.api_key_configured ? "구성됨" : "API Key 미설정",
-          color: config.llm.api_key_configured ? "#16a34a" : "#d97706",
+          value: config.llm.configured ? "구성됨" : "미설정",
+          color: config.llm.configured ? "#16a34a" : "#6b6b80",
         },
         {
           label: "웹 검색",
