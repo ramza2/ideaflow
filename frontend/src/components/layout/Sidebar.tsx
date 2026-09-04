@@ -62,16 +62,37 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
   }, [loadReviewCount]);
 
   const navItems = [
-    { label: "홈", icon: Home, to: `${base}/home` },
-    { label: "아이디어", icon: Lightbulb, to: `${base}/ideas` },
+    {
+      label: "홈",
+      icon: Home,
+      to: `${base}/home`,
+      isActive: location.pathname.startsWith(`${base}/home`),
+    },
+    {
+      label: "아이디어",
+      icon: Lightbulb,
+      to: `${base}/ideas`,
+      isActive: location.pathname.startsWith(`${base}/ideas`),
+    },
     {
       label: "검토함",
       icon: ClipboardCheck,
       to: `${base}/reviews`,
       badge: reviewCount > 0 ? reviewCount : undefined,
+      isActive: location.pathname.startsWith(`${base}/reviews`),
     },
-    { label: "작업공간", icon: Building2, to: `${base}/settings/members` },
-    { label: "설정", icon: Settings, to: `${base}/settings` },
+    {
+      label: "작업공간",
+      icon: Building2,
+      to: `${base}/workspace/general`,
+      isActive: location.pathname.startsWith(`${base}/workspace`),
+    },
+    {
+      label: "설정",
+      icon: Settings,
+      to: `${base}/settings/profile`,
+      isActive: location.pathname.startsWith(`${base}/settings`),
+    },
   ];
 
   return (
@@ -86,15 +107,13 @@ export function Sidebar({ workspaceId, collapsed, onToggle }: SidebarProps) {
           <NavLink
             key={item.to}
             to={item.to}
-            className={({ isActive }) =>
-              clsx(
-                "flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm font-medium transition-colors group relative",
-                isActive
-                  ? "bg-[#ede9fe] text-[#4f46e5]"
-                  : "text-[#6b6b80] hover:bg-[#f4f4f8] hover:text-[#111118]",
-                collapsed && "justify-center px-0",
-              )
-            }
+            className={clsx(
+              "flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm font-medium transition-colors group relative",
+              item.isActive
+                ? "bg-[#ede9fe] text-[#4f46e5]"
+                : "text-[#6b6b80] hover:bg-[#f4f4f8] hover:text-[#111118]",
+              collapsed && "justify-center px-0",
+            )}
             title={collapsed ? item.label : undefined}
           >
             <item.icon className="w-4.5 h-4.5 shrink-0" />

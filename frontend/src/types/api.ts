@@ -54,6 +54,12 @@ export interface TeamWorkspaceCreate {
   allow_web_search?: boolean;
 }
 
+export interface WorkspaceUpdateRequest {
+  name?: string;
+  allow_llm?: boolean;
+  allow_web_search?: boolean;
+}
+
 export interface MemberPublic {
   user_id: string;
   email: string;
@@ -719,6 +725,7 @@ export interface LlmIntegrationConfig {
   max_tokens: number;
   temperature: number;
   enable_thinking: boolean | null;
+  configured: boolean;
   configuration_source: string;
 }
 
@@ -735,11 +742,49 @@ export interface WebSearchIntegrationConfig {
   configuration_source: string;
 }
 
+export interface EmbeddingJobCounts {
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+}
+
+export interface EmbeddingIntegrationConfig {
+  enabled: boolean;
+  provider: string;
+  api_url: string | null;
+  embedding_path: string;
+  api_key_configured: boolean;
+  model_name: string;
+  dimension: number;
+  timeout_seconds: number;
+  connect_timeout_seconds: number;
+  max_input_chars: number;
+  worker_enabled: boolean;
+  configured: boolean;
+  configuration_source: string;
+  stored_embedding_count: number;
+  job_counts: EmbeddingJobCounts;
+}
+
 export interface AdminIntegrationConfigResponse {
   llm: LlmIntegrationConfig;
   web_search: WebSearchIntegrationConfig;
+  embedding: EmbeddingIntegrationConfig;
   global_llm_enabled: boolean;
   global_web_search_enabled: boolean;
+}
+
+export interface EmbeddingConnectionTestResult {
+  status: string;
+  provider?: string | null;
+  model?: string | null;
+  dimension?: number | null;
+  latency_ms?: number | null;
+  tested_at: string;
+  error_code?: string | null;
+  retryable?: boolean | null;
+  safe_message?: string | null;
 }
 
 export interface LlmConnectionTestResult {

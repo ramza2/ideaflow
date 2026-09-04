@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation } from "react-router";
-import { Sparkles, Paperclip, Globe } from "lucide-react";
+import { Sparkles, Check } from "lucide-react";
 import { Button } from "../../components/common/Button";
 import { Select } from "../../components/common/Input";
 import { ProgressStepper } from "../../components/common/EmptyState";
@@ -14,32 +14,6 @@ import type { IdeaVisibility } from "../../types/api";
 interface AiInputLocationState {
   text?: string;
 }
-
-const ANALYSIS_OPTIONS: {
-  id: string;
-  label: string;
-  note: string;
-  icon?: "globe";
-}[] = [
-  { id: "similar", label: "유사 아이디어 확인", note: "추후 제공" },
-  {
-    id: "webSearch",
-    label: "외부 웹 검색으로 보완",
-    note: "초안 검토 단계에서 선택 가능",
-    icon: "globe",
-  },
-  {
-    id: "validation",
-    label: "최소 검증 방법 제안",
-    note: "AI 초안에 기본 포함",
-  },
-  { id: "counterpoint", label: "반대 관점 검토", note: "추후 제공" },
-  {
-    id: "risk",
-    label: "위험요소 분석",
-    note: "AI 초안 challenges에 기본 포함",
-  },
-];
 
 export function AIInputPage() {
   const navigate = useNavigate();
@@ -181,51 +155,39 @@ export function AIInputPage() {
             maxLength={5000}
             disabled={isSubmitting}
           />
-          <div className="flex items-center gap-2 mt-2">
-            <button
-              type="button"
-              disabled
-              title="추후 제공 예정"
-              className="flex items-center gap-1.5 text-xs text-[#9ca3af] cursor-not-allowed opacity-60"
-            >
-              <Paperclip className="w-3.5 h-3.5" />
-              파일 첨부
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f0f0f5]">
-                추후 제공 예정
-              </span>
-            </button>
-          </div>
         </div>
 
         <div className="bg-white rounded-xl border border-[rgba(0,0,0,0.07)] p-5">
-          <h3 className="text-sm font-semibold text-[#111118] mb-1">분석 옵션</h3>
-          <p className="text-xs text-[#9ca3af] mb-4">
-            아래 옵션은 참고용이며, 현재 AI 세션 API에는 전달되지 않습니다.
-          </p>
-          <div className="space-y-3">
-            {ANALYSIS_OPTIONS.map((opt) => (
-              <div key={opt.id} className="flex items-center gap-3 opacity-70">
-                <input
-                  type="checkbox"
-                  id={opt.id}
-                  disabled
-                  checked={opt.id === "validation" || opt.id === "risk"}
-                  className="w-4 h-4 accent-[#4f46e5] cursor-not-allowed"
-                />
-                <label
-                  htmlFor={opt.id}
-                  className="text-sm text-[#6b6b80] flex items-center gap-1.5"
-                >
-                  {opt.icon === "globe" && (
-                    <Globe className="w-3.5 h-3.5 text-[#9ca3af]" />
-                  )}
-                  {opt.label}
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f0f0f5] text-[#9ca3af]">
-                    {opt.note}
-                  </span>
-                </label>
+          <h3 className="text-sm font-semibold text-[#111118] mb-4">AI 분석 범위</h3>
+          <div className="space-y-4">
+            <div className="flex gap-3">
+              <Check className="w-4 h-4 text-[#16a34a] shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-[#111118]">최소 검증 방법</p>
+                <p className="text-xs text-[#6b6b80] mt-0.5">AI 초안에 기본 포함됩니다.</p>
               </div>
-            ))}
+            </div>
+            <div className="flex gap-3">
+              <Check className="w-4 h-4 text-[#16a34a] shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-[#111118]">위험요소 및 주요 난제</p>
+                <p className="text-xs text-[#6b6b80] mt-0.5">AI 초안에 기본 포함됩니다.</p>
+              </div>
+            </div>
+            <div className="pt-3 border-t border-[rgba(0,0,0,0.06)] space-y-3">
+              <div>
+                <p className="text-sm font-medium text-[#111118]">웹 조사</p>
+                <p className="text-xs text-[#6b6b80] mt-0.5">
+                  초안 검토 단계에서 검색어를 확인하고 사용자가 승인한 경우에만 실행할 수 있습니다.
+                </p>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-[#111118]">반대 관점</p>
+                <p className="text-xs text-[#6b6b80] mt-0.5">
+                  {"아이디어 등록 후 AI로 발전시키기 > 반대 관점에서 사용할 수 있습니다."}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -234,20 +196,15 @@ export function AIInputPage() {
         <Button variant="ghost" onClick={() => navigate(-1)} disabled={isSubmitting}>
           취소
         </Button>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" disabled title="추후 제공">
-            임시 저장
-          </Button>
-          <Button
-            variant="ai"
-            icon={<Sparkles className="w-4 h-4" />}
-            disabled={!text.trim() || !allowLlm || llmDisabled}
-            loading={isSubmitting}
-            onClick={() => void handleSubmit()}
-          >
-            AI로 정리하기
-          </Button>
-        </div>
+        <Button
+          variant="ai"
+          icon={<Sparkles className="w-4 h-4" />}
+          disabled={!text.trim() || !allowLlm || llmDisabled}
+          loading={isSubmitting}
+          onClick={() => void handleSubmit()}
+        >
+          AI로 정리하기
+        </Button>
       </div>
     </div>
   );

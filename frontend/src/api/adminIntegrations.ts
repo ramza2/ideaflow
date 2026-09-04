@@ -1,6 +1,7 @@
 import { apiRequest } from "./client";
 import type {
   AdminIntegrationConfigResponse,
+  EmbeddingConnectionTestResult,
   LlmConnectionTestResult,
   WebSearchConnectionTestResult,
 } from "../types/api";
@@ -20,6 +21,13 @@ export function testWebSearchConnection(query: string): Promise<WebSearchConnect
   return apiRequest<WebSearchConnectionTestResult>("/admin/integrations/web-search/test", {
     method: "POST",
     body: { query },
+    csrf: true,
+  });
+}
+
+export function testEmbeddingConnection(): Promise<EmbeddingConnectionTestResult> {
+  return apiRequest<EmbeddingConnectionTestResult>("/admin/integrations/embedding/test", {
+    method: "POST",
     csrf: true,
   });
 }

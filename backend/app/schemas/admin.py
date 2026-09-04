@@ -108,6 +108,7 @@ class LlmIntegrationConfig(BaseModel):
     max_tokens: int
     temperature: float
     enable_thinking: bool | None
+    configured: bool
     configuration_source: str
 
 
@@ -124,9 +125,35 @@ class WebSearchIntegrationConfig(BaseModel):
     configuration_source: str
 
 
+class EmbeddingJobCounts(BaseModel):
+    queued: int = 0
+    running: int = 0
+    succeeded: int = 0
+    failed: int = 0
+
+
+class EmbeddingIntegrationConfig(BaseModel):
+    enabled: bool
+    provider: str
+    api_url: str | None
+    embedding_path: str
+    api_key_configured: bool
+    model_name: str
+    dimension: int
+    timeout_seconds: float
+    connect_timeout_seconds: float
+    max_input_chars: int
+    worker_enabled: bool
+    configured: bool
+    configuration_source: str
+    stored_embedding_count: int = 0
+    job_counts: EmbeddingJobCounts = Field(default_factory=EmbeddingJobCounts)
+
+
 class AdminIntegrationConfigResponse(BaseModel):
     llm: LlmIntegrationConfig
     web_search: WebSearchIntegrationConfig
+    embedding: EmbeddingIntegrationConfig
     global_llm_enabled: bool
     global_web_search_enabled: bool
 
@@ -140,6 +167,19 @@ class LlmConnectionTestResult(BaseModel):
     error_code: str | None = None
     retryable: bool | None = None
     safe_message: str | None = None
+
+
+class EmbeddingConnectionTestResult(BaseModel):
+    status: str
+    provider: str | None = None
+    model: str | None = None
+    dimension: int | None = None
+    latency_ms: int | None = None
+    tested_at: datetime
+    error_code: str | None = None
+    retryable: bool | None = None
+    safe_message: str | None = None
+
 
 
 class WebSearchTestResultItem(BaseModel):

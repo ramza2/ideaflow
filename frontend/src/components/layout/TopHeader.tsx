@@ -393,7 +393,14 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
                 <p className="text-sm font-semibold text-[#111118]">{displayUser?.name ?? user?.name ?? ""}</p>
                 <p className="text-xs text-[#6b6b80]">{displayUser?.email ?? user?.email ?? ""}</p>
               </div>
-              <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]">
+              <button
+                type="button"
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#111118] hover:bg-[#f4f4f8]"
+                onClick={() => {
+                  navigate(`/w/${workspaceId}/settings/profile`);
+                  setProfileOpen(false);
+                }}
+              >
                 <User className="w-4 h-4 text-[#6b6b80]" /> 프로필
               </button>
               {user?.system_role === "SYSTEM_ADMIN" && (

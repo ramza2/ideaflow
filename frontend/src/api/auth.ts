@@ -27,6 +27,16 @@ export async function fetchMe(): Promise<UserPublic> {
   return apiRequest<UserPublic>("/auth/me", { handleUnauthorized: false });
 }
 
+export async function updateMyProfile(payload: {
+  name: string;
+}): Promise<UserPublic> {
+  return apiRequest<UserPublic>("/auth/me", {
+    method: "PATCH",
+    body: payload,
+    csrf: true,
+  });
+}
+
 export async function logout(): Promise<void> {
   await apiRequest<void>("/auth/logout", { method: "POST", csrf: true });
 }

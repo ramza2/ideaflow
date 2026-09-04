@@ -18,6 +18,7 @@ from app.schemas.admin import (
     AdminUserListResponse,
     AdminUserPublic,
     AdminUserUpdateRequest,
+    EmbeddingConnectionTestResult,
     LlmConnectionTestResult,
     SettingMetadata,
     SystemSettingsResponse,
@@ -204,3 +205,13 @@ def test_web_search(
 ) -> WebSearchConnectionTestResult:
     del db, auth, admin
     return admin_integration_service.test_web_search_connection(body.query)
+
+
+@router.post("/integrations/embedding/test", response_model=EmbeddingConnectionTestResult)
+def test_embedding(
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    admin: Annotated[User, Depends(require_system_admin)],
+) -> EmbeddingConnectionTestResult:
+    del db, auth, admin
+    return admin_integration_service.test_embedding_connection()

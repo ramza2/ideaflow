@@ -16,6 +16,11 @@ import { AIAnalyzingPage } from "../pages/ideas/AIAnalyzingPage";
 import { AIReviewPage } from "../pages/ideas/AIReviewPage";
 import { ReviewsPage } from "../pages/reviews/ReviewsPage";
 import { MembersPage } from "../pages/workspace/MembersPage";
+import { WorkspaceGeneralPage } from "../pages/workspace/WorkspaceGeneralPage";
+import { WorkspaceStagesPage } from "../pages/workspace/WorkspaceStagesPage";
+import { WorkspaceCategoriesPage } from "../pages/workspace/WorkspaceCategoriesPage";
+import { ProfileSettingsPage } from "../pages/settings/ProfileSettingsPage";
+import { SecuritySettingsPage } from "../pages/settings/SecuritySettingsPage";
 import { AdminIntegrationsPage } from "../pages/admin/AdminIntegrationsPage";
 import { AdminSystemSettingsPage } from "../pages/admin/AdminSystemSettingsPage";
 import { AdminUsersPage } from "../pages/admin/AdminUsersPage";
@@ -86,8 +91,21 @@ const router = createBrowserRouter([
               { path: "ideas/:ideaId", element: <IdeaDetailPage /> },
               { path: "ideas/:ideaId/edit", element: <IdeaEditPage /> },
               { path: "reviews", element: <ReviewsPage /> },
-              { path: "settings/members", element: <MembersPage /> },
-              { path: "settings", element: <MembersPage /> },
+              { path: "workspace", element: <Navigate to="general" replace /> },
+              { path: "workspace/general", element: <WorkspaceGeneralPage /> },
+              { path: "workspace/members", element: <MembersPage /> },
+              { path: "workspace/stages", element: <WorkspaceStagesPage /> },
+              { path: "workspace/categories", element: <WorkspaceCategoriesPage /> },
+              { path: "settings/profile", element: <ProfileSettingsPage /> },
+              { path: "settings/security", element: <SecuritySettingsPage /> },
+              {
+                path: "settings/members",
+                element: <Navigate to="../workspace/members" replace />,
+              },
+              {
+                path: "settings",
+                element: <Navigate to="profile" replace />,
+              },
               { path: "help", element: <HelpPage /> },
             ],
           },
