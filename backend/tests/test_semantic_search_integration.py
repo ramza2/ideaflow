@@ -317,6 +317,7 @@ def test_race_two_independent_sessions_not_saved(engine, monkeypatch: pytest.Mon
             worker_session,
             job=worker_job,
             worker_id="worker-1",
+            claimed_revision=0,
         )
         assert work is not None
         assert work.content_hash == hash_a

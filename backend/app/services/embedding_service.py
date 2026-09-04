@@ -157,7 +157,14 @@ def sync_embedding_desired_state(
 
 
 def on_idea_embedding_content_changed(db: Session, idea: Idea) -> None:
-    sync_embedding_desired_state(db, idea)
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    try:
+        cfg = resolve_embedding_settings(db)
+    except AppError:
+        cfg = get_settings()
+    sync_embedding_desired_state(db, idea, settings=cfg)
 
 
 def enqueue_embedding_if_needed(
@@ -168,7 +175,16 @@ def enqueue_embedding_if_needed(
     force: bool = False,
 ) -> bool:
     """Enqueue or refresh an embedding job (requires embeddings enabled)."""
-    cfg = settings or get_settings()
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    if settings is None:
+        try:
+            cfg = resolve_embedding_settings(db)
+        except AppError:
+            cfg = get_settings()
+    else:
+        cfg = settings
     if not cfg.embedding_enabled:
         return False
     return sync_embedding_desired_state(db, idea, settings=cfg, force=force)
@@ -182,7 +198,16 @@ def scan_ideas_for_enqueue(
     settings: Settings | None = None,
 ) -> tuple[int, int, int]:
     """Return (scanned, already_current, queued)."""
-    cfg = settings or get_settings()
+    from app.core.errors import AppError
+    from app.services.integration_runtime_config import resolve_embedding_settings
+
+    if settings is None:
+        try:
+            cfg = resolve_embedding_settings(db)
+        except AppError:
+            cfg = get_settings()
+    else:
+        cfg = settings
     if not cfg.embedding_enabled:
         return 0, 0, 0
 

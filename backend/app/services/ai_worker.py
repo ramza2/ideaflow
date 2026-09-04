@@ -15,9 +15,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
+from app.core.errors import AppError
 from app.db.session import get_session_factory
 from app.llm.base import LlmProvider
-from app.llm.exceptions import LlmError, LlmResearchRefineInputTooLargeError, LlmResponseValidationError, LlmUnavailableError
+from app.llm.exceptions import (
+    LlmConfigurationError,
+    LlmError,
+    LlmResearchRefineInputTooLargeError,
+    LlmResponseValidationError,
+    LlmUnavailableError,
+)
 from app.llm.factory import get_llm_provider
 from app.llm.prompts import IDEA_STRUCTURE_PROMPT_VERSION, categories_from_rows
 from app.llm.refine_prompts import IDEA_REFINE_PROMPT_VERSION
@@ -1065,6 +1072,58 @@ def process_claimed_job(
     )
 
 
+def _fail_job_for_configuration(
+    db: Session,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    settings: Settings,
+    code: str,
+    safe_message: str,
+) -> None:
+    """Mark a claimed job FAILED due to runtime config errors (non-retryable)."""
+    now = utcnow()
+    job = db.execute(
+        select(AiJob).where(AiJob.id == job_id).with_for_update()
+    ).scalar_one_or_none()
+    if job is None:
+        db.rollback()
+        return
+    if job.worker_id != worker_id or job.status != AiJobStatus.RUNNING.value:
+        db.rollback()
+        return
+
+    job.status = AiJobStatus.FAILED.value
+    job.finished_at = now
+    job.locked_at = None
+    job.lease_until = None
+    job.last_error_code = code
+    job.last_error_message = safe_message[:512]
+
+    if job.job_type == AiJobType.WEB_RESEARCH.value and job.research_run_id is not None:
+        run = db.get(WebResearchRun, job.research_run_id)
+        if run is not None and run.status in _ACTIVE_WEB_RESEARCH_RUN_STATUSES:
+            run.status = WebResearchRunStatus.FAILED.value
+            run.failure_phase = "SEARCH"
+            run.failure_code = code
+            run.failure_message = safe_message[:512]
+            run.completed_at = now
+    else:
+        session = db.get(IdeaAiSession, job.session_id)
+        if session is not None and session.status == IdeaAiSessionStatus.PROCESSING.value:
+            session.status = IdeaAiSessionStatus.FAILED.value
+            session.failure_code = code
+            session.failure_message = safe_message[:512]
+
+    db.commit()
+    logger.info(
+        "ai_job_config_failed job_id=%s code=%s",
+        job_id,
+        code,
+    )
+    del settings
+
+
 def run_once(
     *,
     session_factory: sessionmaker[Session] | None = None,
@@ -1074,67 +1133,210 @@ def run_once(
     worker_id: str | None = None,
     recover: bool = True,
 ) -> bool:
-    """Recover stale jobs, claim one job, process it. Returns True if work done."""
-    cfg = settings or get_settings()
+    """Recover stale jobs, claim one job, process it. Returns True if work done.
+
+    Operational Settings (poll/lease/retry) come from ``settings`` / ENV bootstrap.
+    When ``provider`` is not injected, LLM/Web Search providers are built per job
+    from effective Runtime Integration Config (DB override + ENV fallback).
+    In-flight external calls keep their snapshot; the next claimed job uses
+    the latest runtime config without process restart.
+    """
+    from app.services.integration_runtime_config import (
+        resolve_llm_and_web_search_settings,
+        resolve_llm_settings,
+    )
+
+    operational = settings or get_settings()
     factory = session_factory or get_session_factory()
     wid = worker_id or make_worker_id()
-    owns_provider = provider is None
-    owns_search = search_provider is None
-    llm = provider or get_llm_provider(cfg)
-    search: WebSearchProvider | None = search_provider
-    if search is None and cfg.web_search_api_url.strip():
-        try:
-            search = get_web_search_provider(cfg)
-            owns_search = True
-        except Exception:  # noqa: BLE001
-            search = None
 
-    try:
-        db = factory()
+    # Injected-provider path (tests): keep bootstrap settings snapshot.
+    if provider is not None:
+        owns_provider = False
+        owns_search = search_provider is None
+        llm = provider
+        search: WebSearchProvider | None = search_provider
+        cfg = operational
+        if search is None and cfg.web_search_api_url.strip():
+            try:
+                search = get_web_search_provider(cfg)
+                owns_search = True
+            except Exception:  # noqa: BLE001
+                search = None
         try:
-            if recover:
-                recover_stale_jobs(db, settings=cfg)
-            job = claim_next_job(db, worker_id=wid, settings=cfg)
-            if job is None:
-                return False
-            job_id = job.id
-            job_type = job.job_type
+            db = factory()
+            try:
+                if recover:
+                    recover_stale_jobs(db, settings=operational)
+                job = claim_next_job(db, worker_id=wid, settings=operational)
+                if job is None:
+                    return False
+                job_id = job.id
+                job_type = job.job_type
+            finally:
+                db.close()
+
+            if job_type == AiJobType.WEB_RESEARCH.value and search is None:
+                db_fail = factory()
+                try:
+                    job_row = db_fail.execute(
+                        select(AiJob).where(AiJob.id == job_id).with_for_update()
+                    ).scalar_one_or_none()
+                    run_row = (
+                        db_fail.get(WebResearchRun, job_row.research_run_id)
+                        if job_row and job_row.research_run_id
+                        else None
+                    )
+                    if job_row is not None:
+                        from app.web_search.exceptions import WebSearchConfigurationError
+
+                        err = WebSearchConfigurationError()
+                        if run_row is not None:
+                            _apply_web_research_failure(
+                                db_fail,
+                                job=job_row,
+                                run=run_row,
+                                error=err,
+                                settings=cfg,
+                                failure_phase="SEARCH",
+                            )
+                        else:
+                            job_row.status = AiJobStatus.FAILED.value
+                            job_row.finished_at = utcnow()
+                            job_row.last_error_code = err.code
+                            job_row.last_error_message = err.safe_message
+                        db_fail.commit()
+                finally:
+                    db_fail.close()
+                return True
+
+            db2 = factory()
+            try:
+                process_claimed_job(
+                    db2,
+                    job_id=job_id,
+                    worker_id=wid,
+                    provider=llm,
+                    search_provider=search,
+                    settings=cfg,
+                )
+                return True
+            finally:
+                db2.close()
         finally:
-            db.close()
+            if owns_provider:
+                close = getattr(llm, "close", None)
+                if callable(close):
+                    close()
+            if owns_search and search is not None:
+                close_search = getattr(search, "close", None)
+                if callable(close_search):
+                    close_search()
 
-        if job_type == AiJobType.WEB_RESEARCH.value and search is None:
+    # Production path: resolve effective provider config after claim.
+    db = factory()
+    try:
+        if recover:
+            recover_stale_jobs(db, settings=operational)
+        job = claim_next_job(db, worker_id=wid, settings=operational)
+        if job is None:
+            return False
+        job_id = job.id
+        job_type = job.job_type
+    finally:
+        db.close()
+
+    db_resolve = factory()
+    try:
+        try:
+            if job_type == AiJobType.WEB_RESEARCH.value:
+                cfg = resolve_llm_and_web_search_settings(
+                    db_resolve, base_settings=operational
+                )
+            else:
+                cfg = resolve_llm_settings(db_resolve, base_settings=operational)
+        except AppError as exc:
+            _fail_job_for_configuration(
+                db_resolve,
+                job_id=job_id,
+                worker_id=wid,
+                settings=operational,
+                code=exc.code or "LLM_CONFIGURATION_ERROR",
+                safe_message=str(exc) or LlmConfigurationError.safe_message,
+            )
+            return True
+    finally:
+        db_resolve.close()
+
+    owns_provider = True
+    owns_search = False
+    llm: LlmProvider | None = None
+    search = None
+    try:
+        try:
+            llm = get_llm_provider(cfg)
+        except Exception as exc:  # noqa: BLE001
             db_fail = factory()
             try:
-                job_row = db_fail.execute(
-                    select(AiJob).where(AiJob.id == job_id).with_for_update()
-                ).scalar_one_or_none()
-                run_row = (
-                    db_fail.get(WebResearchRun, job_row.research_run_id)
-                    if job_row and job_row.research_run_id
-                    else None
+                _fail_job_for_configuration(
+                    db_fail,
+                    job_id=job_id,
+                    worker_id=wid,
+                    settings=operational,
+                    code="LLM_CONFIGURATION_ERROR",
+                    safe_message=LlmConfigurationError.safe_message,
                 )
-                if job_row is not None:
-                    from app.web_search.exceptions import WebSearchConfigurationError
-
-                    err = WebSearchConfigurationError()
-                    if run_row is not None:
-                        _apply_web_research_failure(
-                            db_fail,
-                            job=job_row,
-                            run=run_row,
-                            error=err,
-                            settings=cfg,
-                            failure_phase="SEARCH",
-                        )
-                    else:
-                        job_row.status = AiJobStatus.FAILED.value
-                        job_row.finished_at = utcnow()
-                        job_row.last_error_code = err.code
-                        job_row.last_error_message = err.safe_message
-                    db_fail.commit()
             finally:
                 db_fail.close()
+            logger.info(
+                "ai_job_provider_create_failed job_id=%s category=%s",
+                job_id,
+                type(exc).__name__,
+            )
             return True
+
+        if job_type == AiJobType.WEB_RESEARCH.value:
+            if not cfg.web_search_api_url.strip() and cfg.web_search_provider != "tavily":
+                # tavily may use default URL; still try factory
+                pass
+            try:
+                search = get_web_search_provider(cfg)
+                owns_search = True
+            except Exception:  # noqa: BLE001
+                search = None
+            if search is None:
+                db_fail = factory()
+                try:
+                    job_row = db_fail.execute(
+                        select(AiJob).where(AiJob.id == job_id).with_for_update()
+                    ).scalar_one_or_none()
+                    run_row = (
+                        db_fail.get(WebResearchRun, job_row.research_run_id)
+                        if job_row and job_row.research_run_id
+                        else None
+                    )
+                    if job_row is not None:
+                        from app.web_search.exceptions import WebSearchConfigurationError
+
+                        err = WebSearchConfigurationError()
+                        if run_row is not None:
+                            _apply_web_research_failure(
+                                db_fail,
+                                job=job_row,
+                                run=run_row,
+                                error=err,
+                                settings=cfg,
+                                failure_phase="SEARCH",
+                            )
+                        else:
+                            job_row.status = AiJobStatus.FAILED.value
+                            job_row.finished_at = utcnow()
+                            job_row.last_error_code = err.code
+                            job_row.last_error_message = err.safe_message
+                        db_fail.commit()
+                finally:
+                    db_fail.close()
+                return True
 
         db2 = factory()
         try:
@@ -1150,7 +1352,7 @@ def run_once(
         finally:
             db2.close()
     finally:
-        if owns_provider:
+        if owns_provider and llm is not None:
             close = getattr(llm, "close", None)
             if callable(close):
                 close()
@@ -1161,7 +1363,12 @@ def run_once(
 
 
 class AiWorker:
-    """Daemon thread polling the DB job queue."""
+    """Daemon thread polling the DB job queue.
+
+    Worker operational Settings (poll/lease) are fixed at startup from ENV.
+    Provider connection config is resolved from DB Runtime Integration Config
+    on each claimed job — no process-lifetime provider cache.
+    """
 
     def __init__(
         self,
@@ -1172,10 +1379,8 @@ class AiWorker:
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
-        if provider_factory is not None:
-            self._provider_factory = provider_factory
-        else:
-            self._provider_factory = lambda: get_llm_provider(self._settings or get_settings())
+        # Kept for backward-compatible constructor; unused (providers are per-job).
+        self._provider_factory = provider_factory
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.worker_id = make_worker_id()
@@ -1200,38 +1405,20 @@ class AiWorker:
 
     def _loop(self) -> None:
         cfg = self._settings or get_settings()
-        provider = self._provider_factory()
-        search_provider: WebSearchProvider | None = None
-        if cfg.web_search_api_url.strip():
+        while not self._stop.is_set():
             try:
-                search_provider = get_web_search_provider(cfg)
-            except Exception:  # noqa: BLE001
-                search_provider = None
-        try:
-            while not self._stop.is_set():
-                try:
-                    did_work = run_once(
-                        session_factory=self._session_factory,
-                        provider=provider,
-                        search_provider=search_provider,
-                        settings=cfg,
-                        worker_id=self.worker_id,
-                        recover=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "ai_worker_loop_error worker_id=%s category=%s",
-                        self.worker_id,
-                        type(exc).__name__,
-                    )
-                    did_work = False
-                interval = cfg.ai_job_poll_interval_seconds
-                self._stop.wait(0 if did_work else interval)
-        finally:
-            close = getattr(provider, "close", None)
-            if callable(close):
-                close()
-            if search_provider is not None:
-                close_search = getattr(search_provider, "close", None)
-                if callable(close_search):
-                    close_search()
+                did_work = run_once(
+                    session_factory=self._session_factory,
+                    settings=cfg,
+                    worker_id=self.worker_id,
+                    recover=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "ai_worker_loop_error worker_id=%s category=%s",
+                    self.worker_id,
+                    type(exc).__name__,
+                )
+                did_work = False
+            interval = cfg.ai_job_poll_interval_seconds
+            self._stop.wait(0 if did_work else interval)

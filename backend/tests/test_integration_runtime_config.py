@@ -1,0 +1,1271 @@
+"""PostgreSQL Runtime Integration Config tests (Step 17.6)."""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from datetime import datetime, timezone
+
+import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.core.config import EMBEDDING_DIMENSION, get_settings
+from app.core.security import hash_password
+from app.db.session import reset_engine
+from app.embeddings.canonical import compute_content_hash
+from app.embeddings.fake import FakeEmbeddingProvider, _text_to_vector
+from app.llm.schemas import (
+    FieldProvenanceEntry,
+    IdeaDraftPayload,
+    IdeaStructuringRequest,
+    IdeaStructuringResult,
+)
+from app.main import app
+from app.models.embedding import IdeaEmbedding, IdeaEmbeddingJob
+from app.models.enums import (
+    AiLlmDecision,
+    FieldProvenanceSource,
+    IdeaEmbeddingJobStatus,
+    IdeaVisibility,
+    IntegrationKey,
+    IntegrationSecretMode,
+    SystemRole,
+    UserStatus,
+    WorkspaceMemberStatus,
+    WorkspaceRole,
+    WorkspaceType,
+)
+from app.models.idea import Idea
+from app.models.integration_runtime import IntegrationConfigAudit, IntegrationRuntimeConfig
+from app.models.user import User
+from app.models.workspace import Workspace, WorkspaceMember
+from app.schemas.idea import IdeaCreate
+from app.services import admin_integration as admin_integration_service
+from app.services import ai_worker
+from app.services import embedding_worker
+from app.services import idea as idea_service
+from app.services.embedding_worker import (
+    claim_next_embedding_job,
+    finalize_embedding_result,
+    prepare_claimed_embedding_work,
+)
+from app.services.integration_runtime_config import (
+    resolve_llm_settings,
+    upsert_runtime_config,
+)
+from app.services.workspace import seed_workspace_defaults
+from app.web_search.base import WebSearchResult
+from tests.pgvector_helpers import requires_pgvector
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+pytestmark = pytest.mark.skipif(
+    not DATABASE_URL,
+    reason="DATABASE_URL not set — skipping runtime integration config tests",
+)
+
+
+class FakeLlmProvider:
+    provider_name = "fake"
+    prompt_version = "v2"
+
+    def __init__(self, settings=None) -> None:
+        self.settings = settings
+        self.model_name = getattr(settings, "llm_model_name", "fake-model") if settings else "fake-model"
+        self.calls = 0
+
+    def structure_idea(self, request: IdeaStructuringRequest) -> IdeaStructuringResult:
+        self.calls += 1
+        return IdeaStructuringResult(
+            decision=AiLlmDecision.READY_FOR_REVIEW,
+            draft=IdeaDraftPayload(title="Probe", one_line_definition="probe", tags=[]),
+            field_provenance={
+                "title": FieldProvenanceEntry(
+                    source=FieldProvenanceSource.LLM_SUMMARY,
+                    note="probe",
+                )
+            },
+            clarifying_questions=[],
+            research_recommended=False,
+            research_topics=[],
+        )
+
+    def refine_idea(self, request):
+        raise NotImplementedError
+
+    def refine_idea_with_evidence(self, request):
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+
+class FakeWebSearchProvider:
+    provider_name = "fake"
+
+    def __init__(self, settings=None) -> None:
+        self.settings = settings
+        self.calls: list[dict[str, object]] = []
+
+    def search(self, *, query: str, max_results: int) -> list[WebSearchResult]:
+        self.calls.append({"query": query, "max_results": max_results})
+        return [
+            WebSearchResult(
+                title="Result",
+                url="https://example.com/r",
+                snippet="snippet",
+                source="example.com",
+                published_at=None,
+            )
+        ]
+
+    def close(self) -> None:
+        pass
+
+
+class RecordingEmbeddingProvider:
+    """Records model_name from settings passed at construction."""
+
+    provider_name = "recording"
+    seen_models: list[str] = []
+
+    def __init__(self, settings) -> None:
+        self._settings = settings
+        self.model_name = settings.embedding_model_name
+        type(self).seen_models.append(settings.embedding_model_name)
+
+    def close(self) -> None:
+        return None
+
+    def embed_text(self, text: str) -> list[float]:
+        return _text_to_vector(text, dimension=self._settings.embedding_dimension)
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed_text(t) for t in texts]
+
+
+@pytest.fixture(scope="module")
+def engine():
+    reset_engine()
+    get_settings.cache_clear()
+    eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    with eng.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.commit()
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    command.upgrade(cfg, "head")
+    yield eng
+    eng.dispose()
+    reset_engine()
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clean_runtime_tables(engine):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM integration_config_audits"))
+        conn.execute(text("DELETE FROM integration_runtime_configs"))
+    yield
+
+
+@pytest.fixture
+def db(engine) -> Session:
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session = factory()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture
+def session_factory(engine):
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+@pytest.fixture
+def client(engine, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    monkeypatch.setenv("AI_WORKER_ENABLED", "false")
+    monkeypatch.setenv("EMBEDDING_WORKER_ENABLED", "false")
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    reset_engine()
+    with TestClient(app) as c:
+        yield c
+    reset_engine()
+    get_settings.cache_clear()
+
+
+def _user(
+    db: Session,
+    *,
+    email: str | None = None,
+    password: str = "password-ok-1",
+    system_role: str = SystemRole.USER.value,
+    must_change_password: bool = False,
+) -> tuple[User, str]:
+    email = email or f"rt-{uuid.uuid4().hex[:10]}@example.com"
+    user = User(
+        email=email.lower(),
+        name=email.split("@")[0],
+        password_hash=hash_password(password),
+        status=UserStatus.ACTIVE.value,
+        system_role=system_role,
+        must_change_password=must_change_password,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user, password
+
+
+def _admin_user(db: Session, **kwargs) -> tuple[User, str]:
+    return _user(db, system_role=SystemRole.SYSTEM_ADMIN.value, **kwargs)
+
+
+def _team(db: Session, owner: User) -> Workspace:
+    ws = Workspace(
+        name=f"RT Team {uuid.uuid4().hex[:6]}",
+        type=WorkspaceType.TEAM.value,
+        owner_id=owner.id,
+        allow_llm=True,
+        allow_web_search=True,
+    )
+    db.add(ws)
+    db.flush()
+    db.add(
+        WorkspaceMember(
+            workspace_id=ws.id,
+            user_id=owner.id,
+            role=WorkspaceRole.ADMIN.value,
+            status=WorkspaceMemberStatus.ACTIVE.value,
+        )
+    )
+    seed_workspace_defaults(db, ws.id)
+    db.commit()
+    db.refresh(ws)
+    return ws
+
+
+def _csrf(client: TestClient) -> str:
+    return client.get("/api/v1/auth/csrf").json()["csrf_token"]
+
+
+def _login(client: TestClient, email: str, password: str) -> None:
+    client.cookies.clear()
+    r = client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": password},
+        headers={"X-CSRF-Token": _csrf(client)},
+    )
+    assert r.status_code == 200, r.text
+
+
+def _auth_headers(client: TestClient) -> dict[str, str]:
+    token = client.cookies.get(get_settings().auth_csrf_cookie_name)
+    assert token
+    return {"X-CSRF-Token": token}
+
+
+def _assert_no_secret_leak(payload: object, *forbidden: str) -> None:
+    dumped = json.dumps(payload)
+    for value in forbidden:
+        if value:
+            assert value not in dumped
+    assert '"api_key":' not in dumped
+    assert "secret_ciphertext" not in dumped
+
+
+def _create_idea(db: Session, ws: Workspace, author: User, **kwargs) -> Idea:
+    payload = IdeaCreate(
+        title=kwargs.get("title", "Runtime idea"),
+        one_line_definition=kwargs.get("one_line_definition"),
+        problem=kwargs.get("problem", "problem"),
+        core_concept=kwargs.get("core_concept", "concept"),
+        tags=kwargs.get("tags", []),
+        visibility=kwargs.get("visibility", IdeaVisibility.WORKSPACE),
+    )
+    idea = idea_service.create_idea(db, workspace_id=ws.id, author=author, payload=payload)
+    db.commit()
+    db.refresh(idea)
+    return idea
+
+
+def _store_embedding(db: Session, idea: Idea, *, text: str, model_name: str | None = None) -> None:
+    settings = get_settings()
+    vector = _text_to_vector(text, dimension=settings.embedding_dimension)
+    content_hash = compute_content_hash(text)
+    row = db.get(IdeaEmbedding, idea.id)
+    model = model_name or settings.embedding_model_name
+    if row is None:
+        db.add(
+            IdeaEmbedding(
+                idea_id=idea.id,
+                workspace_id=idea.workspace_id,
+                embedding=vector,
+                content_hash=content_hash,
+                model_name=model,
+                dimension=settings.embedding_dimension,
+            )
+        )
+    else:
+        row.embedding = vector
+        row.content_hash = content_hash
+        row.model_name = model
+    db.commit()
+
+
+# --- ENV fallback / non-secret override ---
+
+
+def test_env_fallback_when_no_runtime_row(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL_FALLBACK")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    r = client.get("/api/v1/admin/integrations", headers=_auth_headers(client))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["configuration_source"] == "ENVIRONMENT"
+    assert body["llm"]["runtime_override_exists"] is False
+    assert body["llm"]["runtime_revision"] == 0
+    assert body["llm"]["model_name"] == "ENV_MODEL_FALLBACK"
+    assert body["llm"]["api_url"] == "https://llm.env.example/v1"
+    assert body["web_search"]["configuration_source"] == "ENVIRONMENT"
+    assert body["embedding"]["configuration_source"] == "ENVIRONMENT"
+
+
+def test_runtime_non_secret_override_and_env_fallback(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.3")
+    monkeypatch.setenv("LLM_API_KEY", "ENV_LLM_KEY_SHOULD_NOT_LEAK")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "RUNTIME_MODEL"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["configuration_source"] == "RUNTIME"
+    assert body["llm"]["runtime_override_exists"] is True
+    assert body["llm"]["runtime_revision"] == 1
+    assert body["llm"]["model_name"] == "RUNTIME_MODEL"
+    # unset fields fall back to ENV
+    assert body["llm"]["api_url"] == "https://llm.env.example/v1"
+    assert body["llm"]["temperature"] == 0.3
+    _assert_no_secret_leak(body, "ENV_LLM_KEY_SHOULD_NOT_LEAK")
+
+    row = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert row is not None
+    assert "api_key" not in (row.config_json or {})
+    dumped_row = json.dumps(row.config_json)
+    assert "ENV_LLM_KEY_SHOULD_NOT_LEAK" not in dumped_row
+
+
+# --- Secret modes ---
+
+
+def test_secret_modes_inherit_replace_clear(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    env_key = "ENV_SECRET_KEY_VALUE_AAA"
+    runtime_key = "RUNTIME_SECRET_KEY_VALUE_BBB"
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    monkeypatch.setenv("LLM_API_KEY", env_key)
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    # Baseline: INHERIT_ENV uses ENV key
+    r = client.get("/api/v1/admin/integrations", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["llm"]["api_key_source"] == "ENVIRONMENT"
+    assert body["llm"]["api_key_configured"] is True
+    assert body["llm"]["secret_mode"] == "INHERIT_ENV"
+    assert body["llm"]["secret_storage_ready"] is True
+    _assert_no_secret_leak(body, env_key, runtime_key, fernet_key)
+
+    # Create runtime row with KEEP (still inherit)
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "M1", "api_key_action": "KEEP"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["api_key_source"] == "ENVIRONMENT"
+    assert body["llm"]["secret_mode"] == "INHERIT_ENV"
+    rev = body["llm"]["runtime_revision"]
+
+    # REPLACE stores encrypted ciphertext (no plaintext in DB)
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={
+            "expected_revision": rev,
+            "api_key_action": "REPLACE",
+            "api_key": runtime_key,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["api_key_source"] == "RUNTIME"
+    assert body["llm"]["api_key_configured"] is True
+    assert body["llm"]["secret_mode"] == "ENCRYPTED"
+    _assert_no_secret_leak(body, env_key, runtime_key)
+
+    db.expire_all()
+    row = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert row is not None
+    assert row.secret_mode == IntegrationSecretMode.ENCRYPTED.value
+    assert row.secret_ciphertext is not None
+    assert row.secret_ciphertext != runtime_key
+    assert runtime_key not in json.dumps(row.config_json or {})
+    assert runtime_key not in (row.secret_ciphertext or "")
+    effective = resolve_llm_settings(db)
+    assert effective.llm_api_key == runtime_key
+    rev = body["llm"]["runtime_revision"]
+
+    # CLEAR → effective empty key
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": rev, "api_key_action": "CLEAR"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["api_key_source"] == "NONE"
+    assert body["llm"]["api_key_configured"] is False
+    assert body["llm"]["secret_mode"] == "CLEARED"
+    _assert_no_secret_leak(body, env_key, runtime_key)
+    db.expire_all()
+    effective = resolve_llm_settings(db)
+    assert effective.llm_api_key == ""
+    rev = body["llm"]["runtime_revision"]
+
+    # INHERIT_ENV again → ENV key
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": rev, "api_key_action": "INHERIT_ENV"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["api_key_source"] == "ENVIRONMENT"
+    assert body["llm"]["api_key_configured"] is True
+    assert body["llm"]["secret_mode"] == "INHERIT_ENV"
+    _assert_no_secret_leak(body, env_key, runtime_key)
+    db.expire_all()
+    effective = resolve_llm_settings(db)
+    assert effective.llm_api_key == env_key
+
+
+# --- Revision concurrency ---
+
+
+def test_revision_concurrency_conflict(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "M1"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["llm"]["runtime_revision"] == 1
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 1, "model_name": "M2"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["llm"]["runtime_revision"] == 2
+
+    # Stale expected_revision
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 1, "model_name": "STALE"},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_CONFIG_CHANGED"
+    db.expire_all()
+    row = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert row is not None
+    assert row.config_json.get("model_name") == "M2"
+    assert row.revision == 2
+
+    # Stale reset
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": 1},
+        headers=headers,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_CONFIG_CHANGED"
+    db.expire_all()
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value) is not None
+
+
+# --- Auth ---
+
+
+def test_runtime_config_auth_gates(client: TestClient, db: Session) -> None:
+    admin, admin_pw = _admin_user(db)
+    user, user_pw = _user(db)
+
+    # Unauthenticated
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "X"},
+    )
+    assert r.status_code in (401, 403)
+
+    r = client.get("/api/v1/admin/integrations/config-audit")
+    assert r.status_code in (401, 403)
+
+    # Regular USER forbidden
+    _login(client, user.email, user_pw)
+    headers = _auth_headers(client)
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "X"},
+        headers=headers,
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
+    r = client.get("/api/v1/admin/integrations/config-audit", headers=headers)
+    assert r.status_code == 403
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": 0},
+        headers=headers,
+    )
+    assert r.status_code == 403
+
+    # Admin without CSRF denied
+    _login(client, admin.email, admin_pw)
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "X"},
+    )
+    assert r.status_code in (401, 403)
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": 0},
+    )
+    assert r.status_code in (401, 403)
+
+    # Admin + CSRF ok
+    headers = _auth_headers(client)
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "AUTH_OK"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    rev = r.json()["llm"]["runtime_revision"]
+
+    r = client.get("/api/v1/admin/integrations/config-audit", headers=headers)
+    assert r.status_code == 200, r.text
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": rev},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+
+# --- Validation ---
+
+
+def test_validation_rejects_invalid_values_without_db_write(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("EMBEDDING_API_URL", "")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    # Seed a valid LLM runtime row
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "GOOD"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    good_rev = r.json()["llm"]["runtime_revision"]
+    db.expire_all()
+    before = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert before is not None
+    before_json = dict(before.config_json)
+    before_rev = before.revision
+
+    # Negative timeout
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": good_rev, "timeout_seconds": -1},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+
+    # temperature > 2
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": good_rev, "temperature": 2.5},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+
+    db.expire_all()
+    after = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert after is not None
+    assert after.revision == before_rev
+    assert after.config_json == before_json
+
+    # max_queries > 10
+    r = client.patch(
+        "/api/v1/admin/integrations/web-search",
+        json={"expected_revision": 0, "max_queries": 11},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.WEB_SEARCH.value) is None
+
+    # embedding dimension in request → 422 (extra forbid)
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={"expected_revision": 0, "dimension": 512},
+        headers=headers,
+    )
+    assert r.status_code == 422, r.text
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.EMBEDDING.value) is None
+
+    # enabled=true with empty URL invalid
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={"expected_revision": 0, "enabled": True, "api_url": ""},
+        headers=headers,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "INTEGRATION_RUNTIME_CONFIG_INVALID"
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.EMBEDDING.value) is None
+
+
+# --- Reset / audit ---
+
+
+def test_reset_to_env_deletes_row(client: TestClient, db: Session) -> None:
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "RUNTIME_THEN_RESET"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    rev = r.json()["llm"]["runtime_revision"]
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value) is not None
+
+    r = client.request(
+        "DELETE",
+        "/api/v1/admin/integrations/llm/runtime-config",
+        json={"expected_revision": rev},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["llm"]["configuration_source"] == "ENVIRONMENT"
+    assert body["llm"]["runtime_override_exists"] is False
+    assert body["llm"]["runtime_revision"] == 0
+    db.expire_all()
+    assert db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value) is None
+
+
+def test_audit_list_returns_field_names_only(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    secret = "AUDIT_SHOULD_NOT_SHOW_THIS_KEY"
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={
+            "expected_revision": 0,
+            "model_name": "AUDITED_MODEL",
+            "api_key_action": "REPLACE",
+            "api_key": secret,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.get("/api/v1/admin/integrations/config-audit?integration=LLM", headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["items"]
+    dumped = json.dumps(body)
+    assert secret not in dumped
+    assert fernet_key not in dumped
+    for item in body["items"]:
+        assert isinstance(item["changed_fields"], list)
+        for field in item["changed_fields"]:
+            assert isinstance(field, str)
+            assert field in {"model_name", "api_key"} or field.isidentifier() or "_" in field
+        assert secret not in json.dumps(item["changed_fields"])
+
+
+# --- Connection test uses runtime ---
+
+
+def test_connection_test_uses_runtime_override(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_MODEL")
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    get_settings.cache_clear()
+    reset_engine()
+
+    captured: list[str] = []
+
+    def capture_provider(settings=None):
+        assert settings is not None
+        captured.append(settings.llm_model_name)
+        return FakeLlmProvider(settings)
+
+    monkeypatch.setattr(admin_integration_service, "get_llm_provider", capture_provider)
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={"expected_revision": 0, "model_name": "RUNTIME_PROBE_MODEL"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.post("/api/v1/admin/integrations/llm/test", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "OK"
+    assert captured == ["RUNTIME_PROBE_MODEL"]
+
+
+# --- Embedding identity / fencing / hot reload ---
+
+
+@requires_pgvector
+def test_embedding_identity_change_schedules_reindex_url_only_does_not(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "model-v1")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    idea = _create_idea(db, ws, admin, title="Reindex me")
+    # Clear auto-enqueued job so we control state
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is not None:
+        db.delete(job)
+        db.commit()
+    _store_embedding(db, idea, text="canonical text for idea", model_name="model-v1")
+    emb_before = db.get(IdeaEmbedding, idea.id)
+    assert emb_before is not None
+    hash_before = emb_before.content_hash
+
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    # URL-only change: no full reindex
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": 0,
+            "api_url": "http://embed.runtime.example",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    emb = db.get(IdeaEmbedding, idea.id)
+    assert emb is not None
+    assert emb.model_name == "model-v1"
+    assert emb.content_hash == hash_before
+    assert db.get(IdeaEmbeddingJob, idea.id) is None
+    rev = r.json()["embedding"]["runtime_revision"]
+
+    # Identity (model) change: delete embedding + queue jobs
+    r = client.patch(
+        "/api/v1/admin/integrations/embedding",
+        json={
+            "expected_revision": rev,
+            "model_name": "model-v2",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    assert db.get(IdeaEmbedding, idea.id) is None
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    assert job is not None
+    assert job.status == IdeaEmbeddingJobStatus.QUEUED.value
+
+
+@requires_pgvector
+def test_embedding_in_flight_revision_fencing(
+    db: Session, session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "fence-model")
+    get_settings.cache_clear()
+
+    # Avoid claiming unrelated leftover jobs from other tests
+    db.execute(
+        text(
+            "UPDATE idea_embedding_jobs SET status = 'SUCCEEDED', "
+            "worker_id = NULL, locked_at = NULL, lease_until = NULL "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.commit()
+
+    admin, _ = _admin_user(db)
+    ws = _team(db, admin)
+    idea = _create_idea(db, ws, admin, title="Fence idea")
+    settings = get_settings()
+
+    job = db.get(IdeaEmbeddingJob, idea.id)
+    if job is None:
+        from app.services.embedding_service import sync_embedding_desired_state
+
+        sync_embedding_desired_state(db, idea, settings=settings, force=True)
+        db.commit()
+        job = db.get(IdeaEmbeddingJob, idea.id)
+    assert job is not None
+    job.status = IdeaEmbeddingJobStatus.QUEUED.value
+    job.available_at = datetime.now(timezone.utc)
+    db.commit()
+
+    # Create runtime revision 1 (same identity as ENV → no reindex)
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"api_url": "http://embed.env.example"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=settings,
+    )
+    db.commit()
+    claimed_revision = 1
+
+    worker_id = "fence-worker-1"
+    claim_db = session_factory()
+    try:
+        claimed = claim_next_embedding_job(claim_db, worker_id=worker_id, settings=settings)
+        assert claimed is not None
+        assert claimed.idea_id == idea.id
+        work = prepare_claimed_embedding_work(
+            claim_db,
+            job=claimed,
+            worker_id=worker_id,
+            claimed_revision=claimed_revision,
+        )
+        assert work is not None
+        claim_db.commit()
+    finally:
+        claim_db.close()
+
+    # Bump revision via URL-only change (no identity reindex that would reset the lease)
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=1,
+        patch_fields={"api_url": "http://embed.other.example"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=settings,
+    )
+    db.commit()
+
+    old_vector = [0.01] * EMBEDDING_DIMENSION
+    finalize_db = session_factory()
+    try:
+        finalize_embedding_result(
+            finalize_db,
+            idea_id=work.idea_id,
+            workspace_id=work.workspace_id,
+            worker_id=worker_id,
+            claimed_hash=work.content_hash,
+            vector=old_vector,
+            settings=settings,
+            claimed_revision=claimed_revision,
+        )
+    finally:
+        finalize_db.close()
+
+    db.expire_all()
+    assert db.get(IdeaEmbedding, idea.id) is None
+    refreshed = db.get(IdeaEmbeddingJob, idea.id)
+    assert refreshed is not None
+    assert refreshed.status == IdeaEmbeddingJobStatus.QUEUED.value
+    assert refreshed.last_error_code == "EMBEDDING_RUNTIME_CONFIG_CHANGED"
+
+
+@requires_pgvector
+def test_ai_and_embedding_worker_hot_reload_without_restart(
+    client: TestClient,
+    db: Session,
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_API_URL", "https://llm.env.example/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "ENV_LLM")
+    monkeypatch.setenv("WEB_SEARCH_API_URL", "https://search.env.example/q")
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "http_json")
+    monkeypatch.setenv("EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.env.example")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "emb-env")
+    monkeypatch.setenv("AI_WORKER_ENABLED", "false")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    ws = _team(db, admin)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    # Drain leftover queue rows so this test claims only its own work
+    db.execute(
+        text(
+            "UPDATE ai_jobs SET status = 'FAILED' "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.execute(
+        text(
+            "UPDATE idea_embedding_jobs SET status = 'SUCCEEDED', "
+            "worker_id = NULL, locked_at = NULL, lease_until = NULL "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.commit()
+
+    # Two AI sessions → two STRUCTURE jobs
+    for i in range(2):
+        r = client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions",
+            json={"input_text": f"hot reload idea {i}"},
+            headers=headers,
+        )
+        assert r.status_code == 202, r.text
+
+    seen_llm_models: list[str] = []
+    seen_ws_urls: list[str] = []
+
+    def llm_factory(settings=None):
+        assert settings is not None
+        seen_llm_models.append(settings.llm_model_name)
+        return FakeLlmProvider(settings)
+
+    def ws_factory(settings=None):
+        assert settings is not None
+        seen_ws_urls.append(settings.web_search_api_url)
+        return FakeWebSearchProvider(settings)
+
+    monkeypatch.setattr("app.services.ai_worker.get_llm_provider", llm_factory)
+    monkeypatch.setattr("app.services.ai_worker.get_web_search_provider", ws_factory)
+
+    operational = get_settings()
+    worker_id = "hot-reload-worker"
+
+    # Upsert model A, process one job without injected provider
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.LLM,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"model_name": "MODEL_A"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+
+    did = ai_worker.run_once(
+        session_factory=session_factory,
+        provider=None,
+        search_provider=None,
+        settings=operational,
+        worker_id=worker_id,
+        recover=False,
+    )
+    assert did is True
+
+    # Upsert model B on same worker settings object; next job resolves new model
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.LLM,
+        actor_id=admin.id,
+        expected_revision=1,
+        patch_fields={"model_name": "MODEL_B"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+
+    did = ai_worker.run_once(
+        session_factory=session_factory,
+        provider=None,
+        search_provider=None,
+        settings=operational,
+        worker_id=worker_id,
+        recover=False,
+    )
+    assert did is True
+    assert seen_llm_models == ["MODEL_A", "MODEL_B"]
+
+    # Web search provider hot reload (WEB_RESEARCH jobs need research runs — exercise factory via resolve path)
+    # Patch web-search runtime and ensure connection-test / resolve path sees new URL.
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={"api_url": "https://search.runtime-a.example/q"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    monkeypatch.setattr(admin_integration_service, "get_web_search_provider", ws_factory)
+    r = client.post(
+        "/api/v1/admin/integrations/web-search/test",
+        json={"query": "ideaflow"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "OK"
+    assert seen_ws_urls[-1] == "https://search.runtime-a.example/q"
+
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.WEB_SEARCH,
+        actor_id=admin.id,
+        expected_revision=1,
+        patch_fields={"api_url": "https://search.runtime-b.example/q"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    r = client.post(
+        "/api/v1/admin/integrations/web-search/test",
+        json={"query": "ideaflow"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert seen_ws_urls[-1] == "https://search.runtime-b.example/q"
+
+    # Embedding: two ideas / jobs; change model between run_once calls
+    RecordingEmbeddingProvider.seen_models = []
+    db.execute(
+        text(
+            "UPDATE idea_embedding_jobs SET status = 'SUCCEEDED', "
+            "worker_id = NULL, locked_at = NULL, lease_until = NULL "
+            "WHERE status IN ('QUEUED', 'RUNNING')"
+        )
+    )
+    db.commit()
+
+    idea1 = _create_idea(db, ws, admin, title="Emb hot 1")
+    idea2 = _create_idea(db, ws, admin, title="Emb hot 2")
+    for idea in (idea1, idea2):
+        job = db.get(IdeaEmbeddingJob, idea.id)
+        assert job is not None
+        job.status = IdeaEmbeddingJobStatus.QUEUED.value
+        job.available_at = datetime.now(timezone.utc)
+    db.commit()
+
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=0,
+        patch_fields={
+            "model_name": "emb-A",
+            "enabled": True,
+            "api_url": "http://embed.env.example",
+        },
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    emb_rev = 1
+
+    emb_db = session_factory()
+    try:
+        assert embedding_worker.run_once(
+            emb_db,
+            worker_id="emb-hot-1",
+            settings=operational,
+            provider_factory=RecordingEmbeddingProvider,
+            session_factory=session_factory,
+            resolve_runtime=True,
+        )
+    finally:
+        emb_db.close()
+
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=emb_rev,
+        patch_fields={"model_name": "emb-B"},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+    emb_rev = 2
+
+    emb_db = session_factory()
+    try:
+        assert embedding_worker.run_once(
+            emb_db,
+            worker_id="emb-hot-1",
+            settings=operational,
+            provider_factory=RecordingEmbeddingProvider,
+            session_factory=session_factory,
+            resolve_runtime=True,
+        )
+    finally:
+        emb_db.close()
+
+    assert RecordingEmbeddingProvider.seen_models == ["emb-A", "emb-B"]
+
+    # enabled=false skips claim
+    upsert_runtime_config(
+        db,
+        key=IntegrationKey.EMBEDDING,
+        actor_id=admin.id,
+        expected_revision=emb_rev,
+        patch_fields={"enabled": False},
+        api_key_action="KEEP",
+        api_key=None,
+        base_settings=operational,
+    )
+    db.commit()
+
+    idea3 = _create_idea(db, ws, admin, title="Emb skip")
+    job3 = db.get(IdeaEmbeddingJob, idea3.id)
+    if job3 is None:
+        db.add(
+            IdeaEmbeddingJob(
+                idea_id=idea3.id,
+                content_hash="deadbeef" + "0" * 56,
+                status=IdeaEmbeddingJobStatus.QUEUED.value,
+                max_attempts=3,
+            )
+        )
+        db.commit()
+    else:
+        job3.status = IdeaEmbeddingJobStatus.QUEUED.value
+        db.commit()
+
+    before_status = db.get(IdeaEmbeddingJob, idea3.id).status
+    emb_db = session_factory()
+    try:
+        did = embedding_worker.run_once(
+            emb_db,
+            worker_id="emb-hot-skip",
+            settings=operational,
+            provider_factory=RecordingEmbeddingProvider,
+            session_factory=session_factory,
+            resolve_runtime=True,
+        )
+        assert did is False
+    finally:
+        emb_db.close()
+    db.expire_all()
+    assert db.get(IdeaEmbeddingJob, idea3.id).status == before_status
