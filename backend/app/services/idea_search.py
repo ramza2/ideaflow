@@ -38,8 +38,25 @@ def _validate_hybrid_result_window(offset: int, limit: int) -> None:
         )
 
 
-def _require_semantic_enabled(settings: Settings | None = None) -> Settings:
-    cfg = settings or get_settings()
+def _require_semantic_enabled(
+    db: Session | None = None,
+    settings: Settings | None = None,
+) -> Settings:
+    if settings is not None:
+        cfg = settings
+    elif db is not None:
+        from app.services.integration_runtime_config import resolve_embedding_settings
+
+        try:
+            cfg = resolve_embedding_settings(db)
+        except AppError as exc:
+            raise AppError(
+                "Semantic search is unavailable.",
+                code="SEMANTIC_SEARCH_UNAVAILABLE",
+                status_code=503,
+            ) from exc
+    else:
+        cfg = get_settings()
     if not cfg.embedding_enabled:
         raise AppError(
             "Semantic search is unavailable because embeddings are disabled.",
@@ -104,7 +121,7 @@ def list_semantic_ideas(
     settings: Settings | None = None,
     provider_factory=None,
 ) -> tuple[list[Idea], int]:
-    cfg = _require_semantic_enabled(settings)
+    cfg = _require_semantic_enabled(db, settings)
     factory = provider_factory or get_embedding_provider
     query_vector = _embed_query(q, settings=cfg, provider_factory=factory)
     limit, offset = _normalize_list_pagination(limit, offset)
@@ -256,7 +273,7 @@ def list_hybrid_ideas(
     settings: Settings | None = None,
     provider_factory=None,
 ) -> tuple[list[Idea], int]:
-    cfg = _require_semantic_enabled(settings)
+    cfg = _require_semantic_enabled(db, settings)
     limit, offset = _normalize_list_pagination(limit, offset)
     _validate_hybrid_result_window(offset, limit)
     factory = provider_factory or get_embedding_provider

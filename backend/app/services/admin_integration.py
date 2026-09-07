@@ -1,11 +1,13 @@
-"""Admin integration diagnostics service (Step 11 / Step 17.5)."""
+"""Admin integration diagnostics service (Step 11 / Step 17.5 / Step 17.6)."""
 
 from __future__ import annotations
 
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import urlparse, urlunparse
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -17,12 +19,16 @@ from app.llm.exceptions import LlmError
 from app.llm.factory import get_llm_provider
 from app.llm.schemas import CategoryOption, IdeaStructuringRequest
 from app.models.embedding import IdeaEmbedding, IdeaEmbeddingJob
-from app.models.enums import IdeaEmbeddingJobStatus, SystemSettingKey
+from app.models.enums import IdeaEmbeddingJobStatus, IntegrationKey, SystemSettingKey
+from app.models.user import User
 from app.schemas.admin import (
     AdminIntegrationConfigResponse,
+    AdminUserRef,
     EmbeddingConnectionTestResult,
     EmbeddingIntegrationConfig,
     EmbeddingJobCounts,
+    IntegrationConfigAuditItem,
+    IntegrationConfigAuditListResponse,
     LlmConnectionTestResult,
     LlmIntegrationConfig,
     WebSearchConnectionTestResult,
@@ -30,6 +36,16 @@ from app.schemas.admin import (
     WebSearchTestResultItem,
 )
 from app.services import system_setting as system_setting_service
+from app.core.errors import AppError
+from app.services.integration_runtime_config import (
+    RuntimeMeta,
+    build_runtime_meta,
+    build_runtime_meta_from_row_safe,
+    list_config_audits,
+    resolve_embedding_settings,
+    resolve_llm_settings,
+    resolve_web_search_settings,
+)
 from app.web_search.exceptions import WebSearchConfigurationError, WebSearchError
 from app.web_search.factory import get_web_search_provider, is_web_search_configured
 
@@ -80,6 +96,29 @@ def sanitize_path_for_display(path: str) -> str:
     return parsed.path or stripped.split("?", 1)[0].split("#", 1)[0]
 
 
+def _updated_by_ref(meta: RuntimeMeta) -> AdminUserRef | None:
+    if meta.updated_by_id is None:
+        return None
+    return AdminUserRef(id=meta.updated_by_id, name=meta.updated_by_name or "")
+
+
+def runtime_meta_response_fields(meta: RuntimeMeta) -> dict[str, Any]:
+    """Map RuntimeMeta onto Admin integration response fields (never secrets)."""
+    return {
+        "configuration_source": meta.configuration_source,
+        "runtime_override_exists": meta.runtime_override_exists,
+        "runtime_revision": meta.runtime_revision,
+        "updated_at": meta.updated_at,
+        "updated_by": _updated_by_ref(meta),
+        "api_key_source": meta.api_key_source,
+        "secret_mode": meta.secret_mode,
+        "secret_storage_ready": meta.secret_storage_ready,
+        "api_key_configured": meta.api_key_configured,
+        "runtime_error_code": meta.runtime_error_code,
+        "runtime_safe_message": meta.runtime_safe_message,
+    }
+
+
 def _embedding_job_counts(db: Session) -> EmbeddingJobCounts:
     rows = db.execute(
         select(IdeaEmbeddingJob.status, func.count()).group_by(IdeaEmbeddingJob.status)
@@ -93,61 +132,132 @@ def _embedding_job_counts(db: Session) -> EmbeddingJobCounts:
     )
 
 
-def _embedding_config(db: Session, cfg: Settings) -> EmbeddingIntegrationConfig:
-    url = sanitize_url_for_display(cfg.embedding_api_url) if cfg.embedding_api_url.strip() else None
-    configured = bool(cfg.embedding_enabled and cfg.embedding_api_url.strip())
-    stored = int(db.scalar(select(func.count()).select_from(IdeaEmbedding)) or 0)
-    return EmbeddingIntegrationConfig(
-        enabled=bool(cfg.embedding_enabled),
-        provider=cfg.embedding_provider,
-        api_url=url,
-        embedding_path=sanitize_path_for_display(cfg.embedding_path),
-        api_key_configured=bool(cfg.embedding_api_key.strip()),
-        model_name=cfg.embedding_model_name,
-        dimension=cfg.embedding_dimension,
-        timeout_seconds=cfg.embedding_timeout_seconds,
-        connect_timeout_seconds=cfg.embedding_connect_timeout_seconds,
-        max_input_chars=cfg.embedding_max_input_chars,
-        worker_enabled=bool(cfg.embedding_worker_enabled),
-        configured=configured,
-        configuration_source="ENVIRONMENT",
-        stored_embedding_count=stored,
-        job_counts=_embedding_job_counts(db),
+def _llm_config(effective: Settings, meta: RuntimeMeta) -> LlmIntegrationConfig:
+    return LlmIntegrationConfig(
+        provider="openai_compatible",
+        api_url=sanitize_url_for_display(effective.llm_api_url),
+        chat_completions_path=sanitize_path_for_display(effective.llm_chat_completions_path),
+        model_name=effective.llm_model_name,
+        timeout_seconds=effective.llm_timeout_seconds,
+        connect_timeout_seconds=effective.llm_connect_timeout_seconds,
+        max_tokens=effective.llm_max_tokens,
+        temperature=effective.llm_temperature,
+        enable_thinking=effective.llm_enable_thinking,
+        # API key is optional for openai_compatible providers (e.g. internal Qwen).
+        configured=bool(effective.llm_api_url.strip() and effective.llm_model_name.strip()),
+        **runtime_meta_response_fields(meta),
     )
 
 
-def get_integration_config(db: Session, settings: Settings | None = None) -> AdminIntegrationConfigResponse:
-    cfg = settings or get_settings()
-    ws_url = sanitize_url_for_display(cfg.web_search_api_url) if cfg.web_search_api_url.strip() else None
+def _web_search_config(effective: Settings, meta: RuntimeMeta) -> WebSearchIntegrationConfig:
+    ws_url = (
+        sanitize_url_for_display(effective.web_search_api_url)
+        if effective.web_search_api_url.strip()
+        else None
+    )
+    return WebSearchIntegrationConfig(
+        provider=effective.web_search_provider,
+        api_url=ws_url,
+        timeout_seconds=effective.web_search_timeout_seconds,
+        connect_timeout_seconds=effective.web_search_connect_timeout_seconds,
+        max_queries=effective.web_search_max_queries,
+        max_results_per_query=effective.web_search_max_results_per_query,
+        max_total_results=effective.web_search_max_total_results,
+        configured=is_web_search_configured(effective),
+        **runtime_meta_response_fields(meta),
+    )
+
+
+def _embedding_config(
+    db: Session, effective: Settings, meta: RuntimeMeta
+) -> EmbeddingIntegrationConfig:
+    url = (
+        sanitize_url_for_display(effective.embedding_api_url)
+        if effective.embedding_api_url.strip()
+        else None
+    )
+    configured = bool(effective.embedding_enabled and effective.embedding_api_url.strip())
+    stored = int(db.scalar(select(func.count()).select_from(IdeaEmbedding)) or 0)
+    return EmbeddingIntegrationConfig(
+        enabled=bool(effective.embedding_enabled),
+        provider=effective.embedding_provider,
+        api_url=url,
+        embedding_path=sanitize_path_for_display(effective.embedding_path),
+        model_name=effective.embedding_model_name,
+        dimension=effective.embedding_dimension,
+        timeout_seconds=effective.embedding_timeout_seconds,
+        connect_timeout_seconds=effective.embedding_connect_timeout_seconds,
+        max_input_chars=effective.embedding_max_input_chars,
+        worker_enabled=bool(effective.embedding_worker_enabled),
+        configured=configured,
+        stored_embedding_count=stored,
+        job_counts=_embedding_job_counts(db),
+        **runtime_meta_response_fields(meta),
+    )
+
+
+def get_integration_config(
+    db: Session, settings: Settings | None = None
+) -> AdminIntegrationConfigResponse:
+    base = settings or get_settings()
+
+    # Prefer combined LLM+Web resolve so cross-field lease invariants that are
+    # valid only together do not spuriously fail Admin GET. On failure, isolate
+    # per integration (broken secret / invalid config on one side).
+    combined: Settings | None = None
+    try:
+        from app.services.integration_runtime_config import (
+            resolve_llm_and_web_search_settings,
+        )
+
+        combined = resolve_llm_and_web_search_settings(db, base_settings=base)
+    except AppError:
+        combined = None
+
+    if combined is not None:
+        llm_effective = combined
+        web_search_effective = combined
+        llm_meta = build_runtime_meta(
+            db, IntegrationKey.LLM, base=base, effective=llm_effective
+        )
+        web_search_meta = build_runtime_meta(
+            db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
+        )
+    else:
+        try:
+            llm_effective = resolve_llm_settings(db, base_settings=base)
+            llm_meta = build_runtime_meta(
+                db, IntegrationKey.LLM, base=base, effective=llm_effective
+            )
+        except AppError as exc:
+            llm_effective, llm_meta = build_runtime_meta_from_row_safe(
+                db, IntegrationKey.LLM, base=base, error=exc
+            )
+
+        try:
+            web_search_effective = resolve_web_search_settings(db, base_settings=base)
+            web_search_meta = build_runtime_meta(
+                db, IntegrationKey.WEB_SEARCH, base=base, effective=web_search_effective
+            )
+        except AppError as exc:
+            web_search_effective, web_search_meta = build_runtime_meta_from_row_safe(
+                db, IntegrationKey.WEB_SEARCH, base=base, error=exc
+            )
+
+    try:
+        embedding_effective = resolve_embedding_settings(db, base_settings=base)
+        embedding_meta = build_runtime_meta(
+            db, IntegrationKey.EMBEDDING, base=base, effective=embedding_effective
+        )
+    except AppError as exc:
+        embedding_effective, embedding_meta = build_runtime_meta_from_row_safe(
+            db, IntegrationKey.EMBEDDING, base=base, error=exc
+        )
+
     return AdminIntegrationConfigResponse(
-        llm=LlmIntegrationConfig(
-            provider="openai_compatible",
-            api_url=sanitize_url_for_display(cfg.llm_api_url),
-            chat_completions_path=sanitize_path_for_display(cfg.llm_chat_completions_path),
-            model_name=cfg.llm_model_name,
-            api_key_configured=bool(cfg.llm_api_key.strip()),
-            timeout_seconds=cfg.llm_timeout_seconds,
-            connect_timeout_seconds=cfg.llm_connect_timeout_seconds,
-            max_tokens=cfg.llm_max_tokens,
-            temperature=cfg.llm_temperature,
-            enable_thinking=cfg.llm_enable_thinking,
-            # API key is optional for openai_compatible providers (e.g. internal Qwen).
-            configured=bool(cfg.llm_api_url.strip() and cfg.llm_model_name.strip()),
-            configuration_source="ENVIRONMENT",
-        ),
-        web_search=WebSearchIntegrationConfig(
-            provider=cfg.web_search_provider,
-            api_url=ws_url,
-            api_key_configured=bool(cfg.web_search_api_key.strip()),
-            timeout_seconds=cfg.web_search_timeout_seconds,
-            connect_timeout_seconds=cfg.web_search_connect_timeout_seconds,
-            max_queries=cfg.web_search_max_queries,
-            max_results_per_query=cfg.web_search_max_results_per_query,
-            max_total_results=cfg.web_search_max_total_results,
-            configured=is_web_search_configured(cfg),
-            configuration_source="ENVIRONMENT",
-        ),
-        embedding=_embedding_config(db, cfg),
+        llm=_llm_config(llm_effective, llm_meta),
+        web_search=_web_search_config(web_search_effective, web_search_meta),
+        embedding=_embedding_config(db, embedding_effective, embedding_meta),
         global_llm_enabled=system_setting_service.get_bool_setting(
             db, SystemSettingKey.GLOBAL_LLM_ENABLED
         ),
@@ -157,8 +267,10 @@ def get_integration_config(db: Session, settings: Settings | None = None) -> Adm
     )
 
 
-def test_llm_connection(settings: Settings | None = None) -> LlmConnectionTestResult:
-    cfg = settings or get_settings()
+def test_llm_connection(
+    db: Session, settings: Settings | None = None
+) -> LlmConnectionTestResult:
+    cfg = resolve_llm_settings(db, base_settings=settings)
     tested_at = utcnow()
     provider = None
     started = time.perf_counter()
@@ -211,10 +323,11 @@ def test_llm_connection(settings: Settings | None = None) -> LlmConnectionTestRe
 
 
 def test_web_search_connection(
+    db: Session,
     query: str,
     settings: Settings | None = None,
 ) -> WebSearchConnectionTestResult:
-    cfg = settings or get_settings()
+    cfg = resolve_web_search_settings(db, base_settings=settings)
     tested_at = utcnow()
     if not cfg.web_search_api_url.strip():
         return WebSearchConnectionTestResult(
@@ -287,8 +400,10 @@ def test_web_search_connection(
             provider.close()
 
 
-def test_embedding_connection(settings: Settings | None = None) -> EmbeddingConnectionTestResult:
-    cfg = settings or get_settings()
+def test_embedding_connection(
+    db: Session, settings: Settings | None = None
+) -> EmbeddingConnectionTestResult:
+    cfg = resolve_embedding_settings(db, base_settings=settings)
     tested_at = utcnow()
     if not cfg.embedding_enabled or not cfg.embedding_api_url.strip():
         return EmbeddingConnectionTestResult(
@@ -374,3 +489,40 @@ def test_embedding_connection(settings: Settings | None = None) -> EmbeddingConn
     finally:
         if provider is not None:
             provider.close()
+
+
+def get_config_audit_list(
+    db: Session,
+    *,
+    integration: IntegrationKey | None = None,
+    limit: int = 20,
+) -> IntegrationConfigAuditListResponse:
+    rows = list_config_audits(db, integration=integration, limit=limit)
+    actor_ids = {row.actor_id for row in rows if row.actor_id is not None}
+    actors: dict[UUID, User] = {}
+    if actor_ids:
+        for user in db.execute(select(User).where(User.id.in_(actor_ids))).scalars().all():
+            actors[user.id] = user
+
+    items: list[IntegrationConfigAuditItem] = []
+    for row in rows:
+        actor_ref = None
+        if row.actor_id is not None:
+            actor = actors.get(row.actor_id)
+            actor_ref = AdminUserRef(
+                id=row.actor_id,
+                name=actor.name if actor is not None else "",
+            )
+        changed = row.changed_fields if isinstance(row.changed_fields, list) else []
+        items.append(
+            IntegrationConfigAuditItem(
+                id=row.id,
+                integration_key=row.integration_key,
+                action=row.action,
+                changed_fields=[str(f) for f in changed],
+                revision=int(row.revision),
+                actor=actor_ref,
+                created_at=row.created_at,
+            )
+        )
+    return IntegrationConfigAuditListResponse(items=items)

@@ -121,6 +121,8 @@ class FakeWebSearchProvider:
 def _clean_system_settings(engine):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM system_settings"))
+        conn.execute(text("DELETE FROM integration_config_audits"))
+        conn.execute(text("DELETE FROM integration_runtime_configs"))
     yield
 
 
@@ -1196,3 +1198,58 @@ def test_embedding_connection_test_provider_failure_safe(
     assert "KEY=abc" not in dumped
     assert "raw secret" not in dumped
     assert body["safe_message"]
+
+
+def test_runtime_encrypted_secret_never_leaks_in_get(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 17.6: REPLACE stores ciphertext; GET/audit never expose plaintext."""
+    from cryptography.fernet import Fernet
+
+    from app.models.enums import IntegrationKey
+    from app.models.integration_runtime import IntegrationRuntimeConfig
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    runtime_secret = "RUNTIME_LLM_SECRET_DO_NOT_LEAK"
+    monkeypatch.setenv("INTEGRATION_SECRET_ENCRYPTION_KEY", fernet_key)
+    monkeypatch.setenv("LLM_API_URL", "https://llm.example.com/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "Qwen3-14B")
+    monkeypatch.setenv("LLM_API_KEY", "ENV_LLM_KEY")
+    get_settings.cache_clear()
+    reset_engine()
+
+    admin, pw = _admin_user(db)
+    _login(client, admin.email, pw)
+    headers = _auth_headers(client)
+
+    r = client.patch(
+        "/api/v1/admin/integrations/llm",
+        json={
+            "expected_revision": 0,
+            "api_key_action": "REPLACE",
+            "api_key": runtime_secret,
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    dumped = json.dumps(body)
+    assert runtime_secret not in dumped
+    assert fernet_key not in dumped
+    assert body["llm"]["api_key_configured"] is True
+    assert body["llm"]["api_key_source"] == "RUNTIME"
+    assert body["llm"]["secret_mode"] == "ENCRYPTED"
+    assert '"api_key":' not in dumped
+    assert "secret_ciphertext" not in dumped
+
+    row = db.get(IntegrationRuntimeConfig, IntegrationKey.LLM.value)
+    assert row is not None
+    assert row.secret_ciphertext is not None
+    assert row.secret_ciphertext != runtime_secret
+    assert runtime_secret not in json.dumps(row.config_json or {})
+
+    r = client.get("/api/v1/admin/integrations/config-audit", headers=headers)
+    assert r.status_code == 200, r.text
+    audit_dump = json.dumps(r.json())
+    assert runtime_secret not in audit_dump
+    assert fernet_key not in audit_dump

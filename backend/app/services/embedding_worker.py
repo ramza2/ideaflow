@@ -1,4 +1,4 @@
-"""DB-backed in-process embedding job worker (Step 13)."""
+"""DB-backed in-process embedding job worker (Step 13 / 17.6)."""
 
 from __future__ import annotations
 
@@ -16,11 +16,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
+from app.core.errors import AppError
 from app.db.session import get_session_factory
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.canonical import build_idea_embedding_text
 from app.embeddings.exceptions import (
     EmbeddingAuthenticationError,
+    EmbeddingConfigurationError,
     EmbeddingError,
     EmbeddingResponseValidationError,
     EmbeddingServerError,
@@ -29,7 +31,7 @@ from app.embeddings.exceptions import (
 )
 from app.embeddings.factory import get_embedding_provider
 from app.models.embedding import IdeaEmbedding, IdeaEmbeddingJob
-from app.models.enums import IdeaEmbeddingJobStatus
+from app.models.enums import IdeaEmbeddingJobStatus, IntegrationKey
 from app.models.idea import Idea
 from app.services.embedding_service import compute_idea_content_hash, load_idea_tag_names
 
@@ -49,6 +51,7 @@ class PreparedEmbeddingWork:
     workspace_id: UUID
     content_hash: str
     embedding_text: str
+    claimed_revision: int
 
 
 def utcnow() -> datetime:
@@ -81,17 +84,16 @@ def _job_owned_by_worker(job: IdeaEmbeddingJob, *, worker_id: str, now: datetime
     return _lease_valid(job, now)
 
 
-def _load_fresh_idea(db: Session, idea_id: UUID) -> Idea | None:
-    db.expire_all()
-    return db.execute(
-        select(Idea).where(Idea.id == idea_id).execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-
-
 def _clear_job_lease(job: IdeaEmbeddingJob) -> None:
     job.locked_at = None
     job.lease_until = None
     job.worker_id = None
+
+
+def _load_fresh_idea(db: Session, idea_id: UUID) -> Idea | None:
+    return db.execute(
+        select(Idea).where(Idea.id == idea_id).with_for_update()
+    ).scalar_one_or_none()
 
 
 def recover_stale_embedding_jobs(db: Session, *, settings: Settings | None = None) -> int:
@@ -171,6 +173,7 @@ def prepare_claimed_embedding_work(
     *,
     job: IdeaEmbeddingJob,
     worker_id: str,
+    claimed_revision: int,
 ) -> PreparedEmbeddingWork | None:
     """Read immutable work inputs and end the claim transaction before external API calls."""
     now = utcnow()
@@ -201,6 +204,7 @@ def prepare_claimed_embedding_work(
         workspace_id=idea.workspace_id,
         content_hash=job.content_hash,
         embedding_text=text,
+        claimed_revision=claimed_revision,
     )
 
 
@@ -213,8 +217,13 @@ def finalize_embedding_result(
     claimed_hash: str,
     vector: list[float],
     settings: Settings,
+    claimed_revision: int | None = None,
 ) -> None:
-    """Persist embedding only when fresh DB state still matches the claimed job hash."""
+    """Persist embedding only when fresh DB state still matches the claimed job hash
+    and (when provided) the Embedding Runtime revision has not changed.
+    """
+    from app.services.integration_runtime_config import get_runtime_revision
+
     now = utcnow()
     job = db.execute(
         select(IdeaEmbeddingJob)
@@ -232,6 +241,26 @@ def finalize_embedding_result(
     if job.content_hash != claimed_hash:
         db.rollback()
         return
+
+    # In-flight fencing: discard old vectors if runtime embedding config changed.
+    if claimed_revision is not None:
+        current_revision = get_runtime_revision(db, IntegrationKey.EMBEDDING)
+        if current_revision != claimed_revision:
+            job.status = IdeaEmbeddingJobStatus.QUEUED.value
+            job.available_at = now
+            _clear_job_lease(job)
+            job.last_error_code = "EMBEDDING_RUNTIME_CONFIG_CHANGED"
+            job.last_error_message = (
+                "Embedding runtime config changed; job requeued for latest config."
+            )
+            db.commit()
+            logger.info(
+                "embedding_result_discarded_revision_mismatch idea_id=%s claimed=%s current=%s",
+                idea_id,
+                claimed_revision,
+                current_revision,
+            )
+            return
 
     idea = _load_fresh_idea(db, idea_id)
     if idea is None or idea.deleted_at is not None:
@@ -300,6 +329,8 @@ def _fail_or_retry_job_locked(
         retryable = False
     if isinstance(exc, EmbeddingAuthenticationError):
         retryable = False
+    if isinstance(exc, EmbeddingConfigurationError):
+        retryable = False
 
     if retryable and job.attempts < job.max_attempts:
         delay = backoff_seconds(settings.embedding_job_retry_base_seconds, job.attempts)
@@ -324,10 +355,13 @@ def process_claimed_embedding_job(
     provider: EmbeddingProvider,
     settings: Settings | None = None,
     session_factory: sessionmaker | None = None,
+    claimed_revision: int = 0,
 ) -> None:
     """Process one claimed job: prepare, external API, finalize in a fresh session."""
     cfg = settings or get_settings()
-    work = prepare_claimed_embedding_work(db, job=job, worker_id=worker_id)
+    work = prepare_claimed_embedding_work(
+        db, job=job, worker_id=worker_id, claimed_revision=claimed_revision
+    )
     if work is None:
         return
 
@@ -357,6 +391,7 @@ def process_claimed_embedding_job(
             claimed_hash=work.content_hash,
             vector=vector,
             settings=cfg,
+            claimed_revision=work.claimed_revision,
         )
 
 
@@ -367,20 +402,66 @@ def run_once(
     settings: Settings | None = None,
     provider_factory: Callable[[Settings], EmbeddingProvider] | None = None,
     session_factory: sessionmaker | None = None,
+    resolve_runtime: bool = True,
 ) -> bool:
-    cfg = settings or get_settings()
-    if not cfg.embedding_enabled:
-        return False
+    """Claim and process one embedding job.
 
+    Operational Settings (poll/lease) come from ``settings`` / ENV.
+    When ``resolve_runtime`` is True (default), effective embedding provider
+    config is loaded from Runtime Integration Config for this iteration.
+    """
+    from app.services.integration_runtime_config import (
+        get_runtime_revision,
+        resolve_embedding_settings,
+    )
+
+    operational = settings or get_settings()
     factory_sf = session_factory or get_session_factory()
 
-    recover_stale_embedding_jobs(db, settings=cfg)
-    job = claim_next_embedding_job(db, worker_id=worker_id, settings=cfg)
+    if resolve_runtime:
+        try:
+            cfg = resolve_embedding_settings(db, base_settings=operational)
+        except AppError as exc:
+            logger.info(
+                "embedding_runtime_resolve_failed code=%s",
+                getattr(exc, "code", "INTEGRATION_RUNTIME_CONFIG_INVALID"),
+            )
+            # Fail closed for this iteration without claiming (avoid permanent RUNNING).
+            recover_stale_embedding_jobs(db, settings=operational)
+            return False
+        claimed_revision = get_runtime_revision(db, IntegrationKey.EMBEDDING)
+    else:
+        cfg = operational
+        claimed_revision = 0
+
+    if not cfg.embedding_enabled:
+        recover_stale_embedding_jobs(db, settings=operational)
+        return False
+
+    recover_stale_embedding_jobs(db, settings=operational)
+    job = claim_next_embedding_job(db, worker_id=worker_id, settings=operational)
     if job is None:
         return False
 
     provider_factory = provider_factory or get_embedding_provider
-    provider = provider_factory(cfg)
+    try:
+        provider = provider_factory(cfg)
+    except Exception as exc:  # noqa: BLE001
+        with factory_sf() as fail_db:
+            _fail_or_retry_job_locked(
+                fail_db,
+                idea_id=job.idea_id,
+                worker_id=worker_id,
+                exc=EmbeddingConfigurationError("Embedding provider configuration error."),
+                settings=operational,
+            )
+        logger.info(
+            "embedding_provider_create_failed idea_id=%s category=%s",
+            job.idea_id,
+            type(exc).__name__,
+        )
+        return True
+
     try:
         process_claimed_embedding_job(
             db,
@@ -389,6 +470,7 @@ def run_once(
             provider=provider,
             settings=cfg,
             session_factory=factory_sf,
+            claimed_revision=claimed_revision,
         )
     finally:
         provider.close()
@@ -396,6 +478,13 @@ def run_once(
 
 
 class EmbeddingWorker:
+    """Daemon thread for embedding jobs.
+
+    EMBEDDING_WORKER_ENABLED (ENV) controls thread existence.
+    Runtime embedding.enabled controls whether jobs are processed (idle when false).
+    Provider config is resolved from DB on each iteration — no restart required.
+    """
+
     def __init__(
         self,
         *,
@@ -417,11 +506,9 @@ class EmbeddingWorker:
         self._thread = threading.Thread(target=self._run_loop, name="embedding-worker", daemon=True)
         self._thread.start()
         logger.info(
-            "Embedding worker started (enabled=%s, provider=%s, model=%s, dimension=%s)",
+            "Embedding worker started (bootstrap_enabled=%s, env_embedding_enabled=%s)",
+            self._settings.embedding_worker_enabled,
             self._settings.embedding_enabled,
-            self._settings.embedding_provider,
-            self._settings.embedding_model_name,
-            self._settings.embedding_dimension,
         )
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -441,6 +528,7 @@ class EmbeddingWorker:
                         settings=self._settings,
                         provider_factory=self._provider_factory,
                         session_factory=self._session_factory,
+                        resolve_runtime=True,
                     )
             except Exception:
                 logger.exception("Embedding worker loop error")

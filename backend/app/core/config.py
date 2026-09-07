@@ -144,6 +144,14 @@ class Settings(BaseSettings):
         default=2.0, alias="EMBEDDING_JOB_RETRY_BASE_SECONDS"
     )
 
+    # Runtime Integration Config secret encryption (Step 17.6)
+    # Fernet urlsafe-base64 32-byte key. Optional for ENV-only deployments.
+    integration_secret_encryption_key: str = Field(
+        default="",
+        alias="INTEGRATION_SECRET_ENCRYPTION_KEY",
+        description="Fernet key for Runtime Integration API Key encryption at rest.",
+    )
+
     @field_validator("llm_enable_thinking", mode="before")
     @classmethod
     def parse_enable_thinking(cls, value: Any) -> bool | None:
