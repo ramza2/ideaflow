@@ -107,6 +107,12 @@ _ACTIVE_RUN_STATUSES = {
     WebResearchRunStatus.REFINING.value,
 }
 
+_EXECUTING_RUN_STATUSES = {
+    WebResearchRunStatus.QUEUED.value,
+    WebResearchRunStatus.SEARCHING.value,
+    WebResearchRunStatus.REFINING.value,
+}
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -127,6 +133,11 @@ def _require_web_search_enabled(db: Session, workspace: Workspace) -> None:
             code="WORKSPACE_WEB_SEARCH_DISABLED",
             status_code=403,
         )
+
+
+def require_web_search_policy(db: Session, workspace: Workspace) -> None:
+    """Public alias used by RESEARCH session creation."""
+    _require_web_search_enabled(db, workspace)
 
 
 def _require_llm_enabled(db: Session, workspace: Workspace) -> None:
@@ -208,6 +219,55 @@ def has_active_research(db: Session, session_id: UUID) -> bool:
             ),
         )
     ).scalar_one_or_none() is not None
+
+
+def has_active_idea_research_run(
+    db: Session,
+    *,
+    idea_id: UUID,
+    exclude_run_id: UUID | None = None,
+) -> bool:
+    """True if another RESEARCH session for this Idea already has an executing run."""
+    from app.models.enums import IdeaAiSessionPurpose
+
+    stmt = (
+        select(WebResearchRun.id)
+        .join(IdeaAiSession, IdeaAiSession.id == WebResearchRun.session_id)
+        .where(
+            IdeaAiSession.purpose == IdeaAiSessionPurpose.RESEARCH.value,
+            IdeaAiSession.source_idea_id == idea_id,
+            WebResearchRun.status.in_(_EXECUTING_RUN_STATUSES),
+        )
+    )
+    if exclude_run_id is not None:
+        stmt = stmt.where(WebResearchRun.id != exclude_run_id)
+    return db.execute(stmt.limit(1)).scalar_one_or_none() is not None
+
+
+def _lock_idea_for_research(db: Session, idea_id: UUID, *, workspace_id: UUID) -> Idea:
+    locked = db.execute(
+        select(Idea)
+        .where(Idea.id == idea_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked is None or locked.deleted_at is not None or locked.workspace_id != workspace_id:
+        raise AppError("Idea not found.", code="IDEA_NOT_FOUND", status_code=404)
+    return locked
+
+
+def _assert_no_active_idea_research(
+    db: Session,
+    *,
+    idea_id: UUID,
+    exclude_run_id: UUID | None = None,
+) -> None:
+    if has_active_idea_research_run(db, idea_id=idea_id, exclude_run_id=exclude_run_id):
+        raise AppError(
+            "이 아이디어에 대한 웹 조사가 이미 진행 중입니다.",
+            code="IDEA_RESEARCH_ALREADY_ACTIVE",
+            status_code=409,
+        )
 
 
 def preview_research_run(
@@ -295,6 +355,20 @@ def approve_research_run(
             "Research run is not awaiting approval.",
             code="AI_RESEARCH_INVALID_STATE",
             status_code=409,
+        )
+
+    from app.models.enums import IdeaAiSessionPurpose
+
+    # RESEARCH approve: serialize on source Idea and block concurrent executing runs.
+    if (
+        session.purpose == IdeaAiSessionPurpose.RESEARCH.value
+        and session.source_idea_id is not None
+    ):
+        _lock_idea_for_research(
+            db, session.source_idea_id, workspace_id=workspace.id
+        )
+        _assert_no_active_idea_research(
+            db, idea_id=session.source_idea_id, exclude_run_id=run.id
         )
 
     now = utcnow()
@@ -385,6 +459,19 @@ def retry_research_run(
             "An active research run already exists for this session.",
             code="AI_RESEARCH_ALREADY_ACTIVE",
             status_code=409,
+        )
+
+    from app.models.enums import IdeaAiSessionPurpose
+
+    if (
+        session.purpose == IdeaAiSessionPurpose.RESEARCH.value
+        and session.source_idea_id is not None
+    ):
+        _lock_idea_for_research(
+            db, session.source_idea_id, workspace_id=workspace.id
+        )
+        _assert_no_active_idea_research(
+            db, idea_id=session.source_idea_id, exclude_run_id=run.id
         )
 
     run.status = WebResearchRunStatus.QUEUED.value
@@ -562,12 +649,22 @@ def get_idea_evidence(
             select(WebEvidence)
             .where(WebEvidence.research_run_id.in_(run_ids))
             .order_by(
-                WebEvidence.fetched_at.asc(),
+                WebEvidence.fetched_at.desc(),
                 WebEvidence.rank.asc(),
-                WebEvidence.created_at.asc(),
+                WebEvidence.created_at.desc(),
             )
         )
     )
+
+    # Preserve DB history across runs; surface one row per URL (newest first).
+    seen_hashes: set[str] = set()
+    deduped: list[WebEvidence] = []
+    for ev in evidence_rows:
+        key = ev.url_hash or ev.url
+        if key in seen_hashes:
+            continue
+        seen_hashes.add(key)
+        deduped.append(ev)
 
     items = [
         IdeaEvidenceItem(
@@ -585,7 +682,7 @@ def get_idea_evidence(
             if isinstance(ev.related_fields, list)
             else [],
         )
-        for ev in evidence_rows
+        for ev in deduped
     ]
     return IdeaEvidenceResponse(items=items)
 

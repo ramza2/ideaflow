@@ -116,9 +116,19 @@ export function AIAnalyzingPage() {
     return () => window.clearInterval(t);
   }, []);
 
-  // Redirect when already confirmed
+  // Redirect RESEARCH away from CREATE/REFINE analyzing UI; redirect when confirmed.
   useEffect(() => {
     if (!session || !workspaceId) return;
+    if (session.purpose === "RESEARCH") {
+      if (session.source_idea_id) {
+        navigate(`/w/${workspaceId}/ideas/${session.source_idea_id}?tab=research`, {
+          replace: true,
+        });
+      } else {
+        navigate(`/w/${workspaceId}/ideas`, { replace: true });
+      }
+      return;
+    }
     if (session.status === "CONFIRMED" && session.result_idea_id) {
       navigate(`/w/${workspaceId}/ideas/${session.result_idea_id}`, {
         replace: true,

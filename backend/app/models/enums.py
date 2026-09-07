@@ -71,7 +71,7 @@ class IdeaSharePermission(StrEnum):
 
 
 class IdeaAiSessionPurpose(StrEnum):
-    """AI session purposes. CREATE and REFINE are executed; RESEARCH reserved."""
+    """AI session purposes. CREATE / REFINE / RESEARCH (registered Idea re-research)."""
 
     CREATE = "CREATE"
     REFINE = "REFINE"
