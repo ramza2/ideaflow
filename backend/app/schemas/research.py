@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models.enums import WebResearchRunStatus
+from app.schemas.ai import AiSessionPublic
 
 
 class WebResearchPreviewRequest(BaseModel):
@@ -78,3 +79,9 @@ class IdeaEvidenceItem(BaseModel):
 
 class IdeaEvidenceResponse(BaseModel):
     items: list[IdeaEvidenceItem] = Field(default_factory=list)
+
+
+class IdeaResearchSessionLatestResponse(BaseModel):
+    """Active/recovery RESEARCH session for the current requester on an Idea."""
+
+    session: AiSessionPublic | None = None

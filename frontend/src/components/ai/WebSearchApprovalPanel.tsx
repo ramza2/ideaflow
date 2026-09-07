@@ -3,6 +3,8 @@ import { X, Globe, ShieldCheck, ChevronDown, ChevronUp, Plus, Trash2, Check, Loa
 import { Button } from "../common/Button";
 import type { WebResearchRun } from "../../types/api";
 
+export type WebSearchApprovalMode = "DRAFT_REFINEMENT" | "REGISTERED_IDEA_RESEARCH";
+
 interface WebSearchApprovalPanelProps {
   open: boolean;
   onClose: () => void;
@@ -16,6 +18,7 @@ interface WebSearchApprovalPanelProps {
   onApprove: () => void;
   onCancel: () => void;
   onEditQueries: () => Promise<void>;
+  mode?: WebSearchApprovalMode;
 }
 
 export function WebSearchApprovalPanel({
@@ -31,10 +34,22 @@ export function WebSearchApprovalPanel({
   onApprove,
   onCancel,
   onEditQueries,
+  mode = "DRAFT_REFINEMENT",
 }: WebSearchApprovalPanelProps) {
   const [queries, setQueries] = useState<string[]>([]);
   const [showPrivacy, setShowPrivacy] = useState(true);
   const [step, setStep] = useState<"edit" | "confirm">("edit");
+
+  const isRegisteredResearch = mode === "REGISTERED_IDEA_RESEARCH";
+  const title = isRegisteredResearch
+    ? "외부 자료를 다시 조사할까요?"
+    : "외부 자료를 검색해 초안을 보완할까요?";
+  const subtitle =
+    step === "edit"
+      ? isRegisteredResearch
+        ? "검색어를 확인한 뒤 검색을 실행합니다."
+        : "검색어를 편집한 뒤 전송 내용을 확인해 주세요."
+      : "아래 검색어만 외부 검색 서비스로 전송됩니다.";
 
   useEffect(() => {
     if (!open) return;
@@ -85,12 +100,14 @@ export function WebSearchApprovalPanel({
               <Globe className="w-4.5 h-4.5 text-[#2563eb]" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-[#111118]">외부 자료를 검색해 초안을 보완할까요?</h2>
-              <p className="text-sm text-[#6b6b80] mt-0.5">
-                {step === "edit"
-                  ? "검색어를 편집한 뒤 전송 내용을 확인해 주세요."
-                  : "아래 검색어만 외부 검색 서비스로 전송됩니다."}
-              </p>
+              <h2 className="text-base font-bold text-[#111118]">{title}</h2>
+              <p className="text-sm text-[#6b6b80] mt-0.5">{subtitle}</p>
+              {isRegisteredResearch && (
+                <p className="text-xs text-[#6b6b80] mt-2 leading-relaxed">
+                  검색 결과는 근거 자료에 추가되며, 등록된 아이디어 내용은 자동으로 변경되지
+                  않습니다.
+                </p>
+              )}
             </div>
           </div>
           <button

@@ -23,6 +23,7 @@ from app.models.enums import (
     IdeaAiSessionStatus,
     IdeaRefineDirection,
     IdeaVisibility,
+    WebResearchRunStatus,
 )
 from app.models.idea import Idea
 from app.models.relations import IdeaTag
@@ -67,6 +68,9 @@ REFINE_SOURCE_CHANGED_MESSAGE = (
     "다시 발전시켜 주세요."
 )
 REFINE_NO_CHANGES_MESSAGE = "변경된 내용이 없습니다. 적용할 내용을 확인해 주세요."
+RESEARCH_SOURCE_CHANGED_MESSAGE = (
+    "아이디어가 변경되었습니다. 최신 내용을 기준으로 다시 조사를 시작해 주세요."
+)
 
 
 def utcnow() -> datetime:
@@ -206,9 +210,243 @@ def build_source_snapshot(db: Session, idea: Idea) -> dict[str, Any]:
 
 
 def _job_type_for_session(session: IdeaAiSession) -> str:
+    if session.purpose == IdeaAiSessionPurpose.RESEARCH.value:
+        raise AppError(
+            "RESEARCH sessions only support WEB_RESEARCH jobs.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
     if session.purpose == IdeaAiSessionPurpose.REFINE.value:
         return AiJobType.REFINE_IDEA.value
     return AiJobType.STRUCTURE_IDEA.value
+
+
+def _reject_if_research_session(session: IdeaAiSession, *, action: str) -> None:
+    if session.purpose == IdeaAiSessionPurpose.RESEARCH.value:
+        raise AppError(
+            f"RESEARCH sessions cannot {action}.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+
+def _default_research_topics(db: Session, idea: Idea) -> list[str]:
+    """Seed queries for registered Idea re-research (max 5)."""
+    from app.models.research import WebResearchRun
+
+    # 1) Latest READY WebResearchRun linked to this Idea (CREATE/REFINE/RESEARCH).
+    linked_session_ids = list(
+        db.scalars(
+            select(IdeaAiSession.id).where(
+                (IdeaAiSession.source_idea_id == idea.id)
+                | (IdeaAiSession.result_idea_id == idea.id)
+            )
+        )
+    )
+    if linked_session_ids:
+        latest_run = db.execute(
+            select(WebResearchRun)
+            .where(
+                WebResearchRun.session_id.in_(linked_session_ids),
+                WebResearchRun.status == WebResearchRunStatus.READY.value,
+            )
+            .order_by(WebResearchRun.completed_at.desc().nullslast(), WebResearchRun.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest_run is not None:
+            queries = latest_run.queries_to_send
+            if isinstance(queries, list):
+                cleaned = [str(q).strip() for q in queries if str(q).strip()]
+                if cleaned:
+                    return cleaned[:5]
+
+    # 2) Latest CONFIRMED CREATE/REFINE session research_topics.
+    prior = db.execute(
+        select(IdeaAiSession)
+        .where(
+            (IdeaAiSession.source_idea_id == idea.id)
+            | (IdeaAiSession.result_idea_id == idea.id),
+            IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+            IdeaAiSession.purpose.in_(
+                {
+                    IdeaAiSessionPurpose.CREATE.value,
+                    IdeaAiSessionPurpose.REFINE.value,
+                }
+            ),
+        )
+        .order_by(IdeaAiSession.confirmed_at.desc().nullslast(), IdeaAiSession.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if prior is not None and isinstance(prior.research_topics, list):
+        topics = [str(t).strip() for t in prior.research_topics if str(t).strip()]
+        if topics:
+            return topics[:5]
+
+    # 3) Fallback: idea title.
+    title = (idea.title or "").strip()
+    return [title] if title else []
+
+
+def _cancel_abandoned_research_sessions(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    requester_id: UUID,
+    source_idea_id: UUID,
+) -> None:
+    """Cancel prior READY_FOR_REVIEW RESEARCH sessions without executing runs."""
+    from app.models.research import WebResearchRun
+
+    candidates = list(
+        db.scalars(
+            select(IdeaAiSession).where(
+                IdeaAiSession.workspace_id == workspace_id,
+                IdeaAiSession.requester_id == requester_id,
+                IdeaAiSession.source_idea_id == source_idea_id,
+                IdeaAiSession.purpose == IdeaAiSessionPurpose.RESEARCH.value,
+                IdeaAiSession.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+            )
+        )
+    )
+    executing = {
+        WebResearchRunStatus.QUEUED.value,
+        WebResearchRunStatus.SEARCHING.value,
+        WebResearchRunStatus.REFINING.value,
+    }
+    for session in candidates:
+        active = db.execute(
+            select(WebResearchRun.id).where(
+                WebResearchRun.session_id == session.id,
+                WebResearchRun.status.in_(executing),
+            )
+        ).scalar_one_or_none()
+        if active is not None:
+            continue
+        # Cancel awaiting-approval previews tied to the abandoned session.
+        preview_runs = list(
+            db.scalars(
+                select(WebResearchRun).where(
+                    WebResearchRun.session_id == session.id,
+                    WebResearchRun.status == WebResearchRunStatus.AWAITING_APPROVAL.value,
+                )
+            )
+        )
+        now = utcnow()
+        for run in preview_runs:
+            run.status = WebResearchRunStatus.CANCELLED.value
+            run.completed_at = now
+        session.status = IdeaAiSessionStatus.CANCELLED.value
+
+
+def create_research_ai_session(
+    db: Session,
+    *,
+    workspace: Workspace,
+    requester: User,
+    idea_id: UUID,
+) -> IdeaAiSession:
+    """Prepare a RESEARCH session for registered Idea re-research (no AiJob yet)."""
+    from app.services import web_research as web_research_service
+
+    web_research_service.require_web_search_policy(db, workspace)
+
+    idea, _share, _access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace.id,
+        idea_id=idea_id,
+        user_id=requester.id,
+    )
+
+    _cancel_abandoned_research_sessions(
+        db,
+        workspace_id=workspace.id,
+        requester_id=requester.id,
+        source_idea_id=idea.id,
+    )
+
+    snapshot = build_source_snapshot(db, idea)
+    topics = _default_research_topics(db, idea)
+    now = utcnow()
+    session = IdeaAiSession(
+        workspace_id=workspace.id,
+        requester_id=requester.id,
+        purpose=IdeaAiSessionPurpose.RESEARCH.value,
+        status=IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+        input_text=f"다시 조사: {idea.title}",
+        source_idea_id=idea.id,
+        source_idea_updated_at=idea.updated_at,
+        source_idea_snapshot=snapshot,
+        result_idea_id=idea.id,
+        draft_payload=dict(snapshot),
+        research_recommended=False,
+        research_topics=topics,
+        refine_direction=None,
+        ready_at=now,
+    )
+    db.add(session)
+    db.flush()
+    return session
+
+
+def get_latest_idea_research_session(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    idea_id: UUID,
+    user_id: UUID,
+) -> IdeaAiSession | None:
+    """Return the current user's recoverable RESEARCH session for an Idea, if any.
+
+    Requires current Idea EDIT ACL. Stale sessions (source_idea_updated_at mismatch)
+    are skipped without mutating the DB.
+    """
+    from app.models.research import WebResearchRun
+
+    idea, _share, _access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace_id,
+        idea_id=idea_id,
+        user_id=user_id,
+    )
+
+    recoverable_run_statuses = {
+        WebResearchRunStatus.AWAITING_APPROVAL.value,
+        WebResearchRunStatus.QUEUED.value,
+        WebResearchRunStatus.SEARCHING.value,
+        WebResearchRunStatus.REFINING.value,
+        WebResearchRunStatus.FAILED.value,
+    }
+
+    sessions = list(
+        db.scalars(
+            select(IdeaAiSession)
+            .where(
+                IdeaAiSession.workspace_id == workspace_id,
+                IdeaAiSession.requester_id == user_id,
+                IdeaAiSession.source_idea_id == idea_id,
+                IdeaAiSession.purpose == IdeaAiSessionPurpose.RESEARCH.value,
+                IdeaAiSession.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value,
+            )
+            .order_by(IdeaAiSession.created_at.desc())
+        )
+    )
+    idea_updated = _as_utc(idea.updated_at)
+    for session in sessions:
+        if _as_utc(session.source_idea_updated_at) != idea_updated:
+            # Stale vs current Idea — do not recover; user must start a new research.
+            continue
+        latest_run = db.execute(
+            select(WebResearchRun)
+            .where(WebResearchRun.session_id == session.id)
+            .order_by(WebResearchRun.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest_run is not None and latest_run.status in recoverable_run_statuses:
+            return session
+        # Session created but not yet previewed — still recoverable for UI.
+        if latest_run is None:
+            return session
+    return None
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -217,6 +455,65 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _require_unchanged_research_source(idea: Idea, session: IdeaAiSession) -> None:
+    if _as_utc(idea.updated_at) != _as_utc(session.source_idea_updated_at):
+        raise AppError(
+            RESEARCH_SOURCE_CHANGED_MESSAGE,
+            code="IDEA_RESEARCH_SOURCE_CHANGED",
+            status_code=409,
+        )
+
+
+def require_current_research_source_edit(
+    db: Session,
+    *,
+    workspace: Workspace,
+    user: User,
+    session: IdeaAiSession,
+    for_update: bool = False,
+) -> Idea:
+    """Re-check current Idea EDIT ACL (+ optional row lock) and source freshness.
+
+    Used by RESEARCH preview / approve / retry so revoked EDIT cannot continue
+    an earlier session, and stale snapshots cannot authorize external search.
+    """
+    if session.purpose != IdeaAiSessionPurpose.RESEARCH.value:
+        raise AppError(
+            "Only purpose=RESEARCH sessions support this operation.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+    if session.source_idea_id is None:
+        raise AppError(
+            "AI session has no source idea.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+    if for_update:
+        locked = db.execute(
+            select(Idea)
+            .where(Idea.id == session.source_idea_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if (
+            locked is None
+            or locked.deleted_at is not None
+            or locked.workspace_id != workspace.id
+        ):
+            raise AppError("Idea not found.", code="IDEA_NOT_FOUND", status_code=404)
+
+    idea, _share, _access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace.id,
+        idea_id=session.source_idea_id,
+        user_id=user.id,
+    )
+    _require_unchanged_research_source(idea, session)
+    return idea
 
 
 def _require_unchanged_source(idea: Idea, session: IdeaAiSession) -> None:
@@ -334,6 +631,7 @@ def submit_clarifications(
         user_id=user_id,
         for_update=True,
     )
+    _reject_if_research_session(session, action="submit clarifications")
     if session.status != IdeaAiSessionStatus.NEEDS_CLARIFICATION.value:
         raise AppError(
             "AI session is not awaiting clarification.",
@@ -394,6 +692,7 @@ def retry_ai_session(
         user_id=user_id,
         for_update=True,
     )
+    _reject_if_research_session(session, action="retry as a structure job")
     if session.status != IdeaAiSessionStatus.FAILED.value:
         raise AppError(
             "Only FAILED sessions can be retried.",
@@ -605,6 +904,7 @@ def save_review_draft(
         user_id=user_id,
         for_update=True,
     )
+    _reject_if_research_session(session, action="save a review draft")
     if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
         raise AppError(
             "AI session is not ready for review draft save.",
@@ -646,6 +946,7 @@ def regenerate_ai_session(
         user_id=requester.id,
         for_update=True,
     )
+    _reject_if_research_session(session, action="be regenerated")
     if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
         raise AppError(
             "Only READY_FOR_REVIEW sessions can be regenerated.",
@@ -732,6 +1033,13 @@ def confirm_ai_session(
         user_id=user.id,
         for_update=True,
     )
+
+    if session.purpose != IdeaAiSessionPurpose.CREATE.value:
+        raise AppError(
+            "Only purpose=CREATE sessions can be confirmed.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=400,
+        )
 
     if session.result_idea_id is not None:
         idea = db.get(Idea, session.result_idea_id)

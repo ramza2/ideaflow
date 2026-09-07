@@ -440,6 +440,29 @@ def _apply_web_research_failure(
     run.completed_at = now
 
 
+def _finalize_registered_research_session(session: IdeaAiSession) -> None:
+    """Auto-confirm RESEARCH sessions after web research completes (evidence only)."""
+    if session.purpose != IdeaAiSessionPurpose.RESEARCH.value:
+        return
+    if session.status != IdeaAiSessionStatus.READY_FOR_REVIEW.value:
+        return
+    now = utcnow()
+    if session.source_idea_id is None:
+        # Source Idea was deleted mid-flight — do not resurrect or attach evidence.
+        session.status = IdeaAiSessionStatus.CANCELLED.value
+        session.result_idea_id = None
+        return
+    session.status = IdeaAiSessionStatus.CONFIRMED.value
+    session.confirmed_at = now
+    session.result_idea_id = session.source_idea_id
+    snapshot = session.source_idea_snapshot or session.draft_payload or {}
+    session.confirmed_payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    # Keep draft at the registered Idea snapshot — never apply LLM revised draft.
+    if isinstance(session.source_idea_snapshot, dict):
+        session.draft_payload = dict(session.source_idea_snapshot)
+    session.research_recommended = False
+
+
 def process_web_research_job(
     db: Session,
     *,
@@ -608,6 +631,7 @@ def process_web_research_job(
             ).scalar_one_or_none()
             if session is not None and session.status == IdeaAiSessionStatus.READY_FOR_REVIEW.value:
                 session.research_recommended = False
+                _finalize_registered_research_session(session)
             job.status = AiJobStatus.SUCCEEDED.value
             job.finished_at = utcnow()
             job.locked_at = None
@@ -725,25 +749,31 @@ def process_web_research_job(
         return
 
     assert refine_result is not None
-    merged_draft = dict(base_draft)
-    for field in RESEARCH_REFINABLE_FIELDS:
-        if field in refine_result.draft:
-            merged_draft[field] = refine_result.draft[field]
+    is_registered_research = session.purpose == IdeaAiSessionPurpose.RESEARCH.value
 
-    merged_provenance = merge_refinement_provenance(
-        base_provenance=base_provenance,
-        base_draft=base_draft,
-        refined_draft=merged_draft,
-        evidence_links=refine_result.evidence_links,
-        user_edited_fields=user_edited,
-    )
     web_research_service.update_evidence_related_fields(
         db, run_id=run.id, evidence_links=refine_result.evidence_links
     )
 
-    session.draft_payload = merged_draft
-    session.field_provenance = merged_provenance
-    session.research_recommended = False
+    if is_registered_research:
+        # Evidence + summary only — never mutate registered Idea content / draft.
+        _finalize_registered_research_session(session)
+    else:
+        merged_draft = dict(base_draft)
+        for field in RESEARCH_REFINABLE_FIELDS:
+            if field in refine_result.draft:
+                merged_draft[field] = refine_result.draft[field]
+
+        merged_provenance = merge_refinement_provenance(
+            base_provenance=base_provenance,
+            base_draft=base_draft,
+            refined_draft=merged_draft,
+            evidence_links=refine_result.evidence_links,
+            user_edited_fields=user_edited,
+        )
+        session.draft_payload = merged_draft
+        session.field_provenance = merged_provenance
+        session.research_recommended = False
 
     run.status = WebResearchRunStatus.READY.value
     run.research_summary = refine_result.research_summary
@@ -763,10 +793,11 @@ def process_web_research_job(
     job.last_error_message = None
     db.commit()
     logger.info(
-        "web_research_job_succeeded job_id=%s run_id=%s result_count=%s",
+        "web_research_job_succeeded job_id=%s run_id=%s result_count=%s purpose=%s",
         job.id,
         run.id,
         run.result_count,
+        session.purpose,
     )
 
 

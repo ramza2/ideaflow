@@ -38,6 +38,28 @@ export async function createIdeaRefineSession(
   );
 }
 
+export async function createIdeaResearchSession(
+  workspaceId: string,
+  ideaId: string,
+): Promise<AiSession> {
+  return apiRequest<AiSession>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/research-sessions`,
+    {
+      method: "POST",
+      csrf: true,
+    },
+  );
+}
+
+export async function getLatestIdeaResearchSession(
+  workspaceId: string,
+  ideaId: string,
+): Promise<{ session: AiSession | null }> {
+  return apiRequest<{ session: AiSession | null }>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/research-sessions/latest`,
+  );
+}
+
 export async function getAiSession(
   workspaceId: string,
   sessionId: string,

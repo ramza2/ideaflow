@@ -227,6 +227,18 @@ export function AIReviewPage() {
   // Status guards
   useEffect(() => {
     if (!session || !workspaceId || !sessionId) return;
+
+    if (session.purpose === "RESEARCH") {
+      if (session.source_idea_id) {
+        navigate(`/w/${workspaceId}/ideas/${session.source_idea_id}?tab=research`, {
+          replace: true,
+        });
+      } else {
+        navigate(`/w/${workspaceId}/ideas`, { replace: true });
+      }
+      return;
+    }
+
     if (session.status === "CONFIRMED" && session.result_idea_id) {
       navigate(`/w/${workspaceId}/ideas/${session.result_idea_id}`, {
         replace: true,

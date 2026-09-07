@@ -21,7 +21,7 @@ from app.schemas.idea import (
     IdeaShareReplace,
     IdeaUpdate,
 )
-from app.schemas.research import IdeaEvidenceResponse
+from app.schemas.research import IdeaEvidenceResponse, IdeaResearchSessionLatestResponse
 from app.services import ai_session as ai_session_service
 from app.services import idea as idea_service
 from app.services import idea_access
@@ -223,6 +223,57 @@ def create_ai_refine_session(
         db.rollback()
         raise
     return ai_session_service.to_public(session)
+
+
+@router.post(
+    "/{idea_id}/research-sessions",
+    response_model=AiSessionPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_idea_research_session(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> AiSessionPublic:
+    """Start a RESEARCH session for registered Idea re-research (no external search yet)."""
+    del auth
+    try:
+        session = ai_session_service.create_research_ai_session(
+            db,
+            workspace=ctx.workspace,
+            requester=ctx.user,
+            idea_id=idea_id,
+        )
+        db.commit()
+        db.refresh(session)
+    except AppError:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    return ai_session_service.to_public(session)
+
+
+@router.get(
+    "/{idea_id}/research-sessions/latest",
+    response_model=IdeaResearchSessionLatestResponse,
+)
+def get_latest_idea_research_session(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> IdeaResearchSessionLatestResponse:
+    session = ai_session_service.get_latest_idea_research_session(
+        db,
+        workspace_id=ctx.workspace.id,
+        idea_id=idea_id,
+        user_id=ctx.user.id,
+    )
+    return IdeaResearchSessionLatestResponse(
+        session=ai_session_service.to_public(session) if session else None
+    )
 
 
 @router.get("/{idea_id}/shares", response_model=list[IdeaSharePublic])

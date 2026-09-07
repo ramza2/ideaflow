@@ -21,9 +21,19 @@ import {
   AtSign,
   Loader2,
 } from "lucide-react";
-import { createIdeaRefineSession } from "../../api/aiSessions";
+import {
+  createIdeaRefineSession,
+  createIdeaResearchSession,
+  getLatestIdeaResearchSession,
+} from "../../api/aiSessions";
 import { deleteIdea, getIdea } from "../../api/ideas";
-import { getIdeaEvidence } from "../../api/webResearch";
+import {
+  approveWebResearch,
+  cancelWebResearch,
+  getIdeaEvidence,
+  previewWebResearch,
+  retryWebResearchRun,
+} from "../../api/webResearch";
 import {
   createComment,
   deleteComment,
@@ -33,6 +43,7 @@ import {
 } from "../../api/comments";
 import { createReviewRequest, listEligibleReviewers } from "../../api/reviews";
 import { ApiError, apiErrorMessage } from "../../api/client";
+import { useWebResearch } from "../../ai/useWebResearch";
 import { Button } from "../../components/common/Button";
 import { toast } from "../../components/common/Toast";
 import {
@@ -44,18 +55,22 @@ import {
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { WebSearchApprovalPanel } from "../../components/ai/WebSearchApprovalPanel";
 import { IdeaValidationPanel } from "../../components/ideas/IdeaValidationPanel";
 import { useAuth } from "../../auth/AuthProvider";
+import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import { toDisplayUser } from "../../utils/avatar";
 import { REVIEW_KIND_OPTIONS, dispatchReviewCountsChanged } from "../../utils/collaboration";
 import { REFINE_DIRECTION_OPTIONS } from "../../utils/refineDirection";
 import type {
+  AiSession,
   IdeaComment,
   IdeaDetail,
   IdeaEvidenceItem,
   IdeaRefineDirection,
   StageRef,
   UserRef,
+  WebResearchRun,
 } from "../../types/api";
 
 type DetailTab = "overview" | "research" | "validation" | "discussion" | "history";
@@ -63,9 +78,38 @@ type DetailTab = "overview" | "research" | "validation" | "discussion" | "histor
 const AI_EVOLVE_OPTIONS: { direction: IdeaRefineDirection; label: string }[] =
   REFINE_DIRECTION_OPTIONS;
 
+function formatFetchedAt(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}.${m}.${day} ${hh}:${mm}`;
+}
+
+function researchStatusLabel(status: string | null | undefined): string | null {
+  switch (status) {
+    case "QUEUED":
+      return "검색 준비 중";
+    case "SEARCHING":
+      return "웹 자료 검색 중";
+    case "REFINING":
+      return "검색 결과를 근거 자료로 정리 중";
+    case "READY":
+      return "조사 완료";
+    case "FAILED":
+      return "조사 실패";
+    default:
+      return null;
+  }
+}
+
 export function IdeaDetailPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { currentWorkspace } = useWorkspace();
   const { workspaceId = "", ideaId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = (searchParams.get("tab") as DetailTab) || "overview";
@@ -81,6 +125,18 @@ export function IdeaDetailPage() {
   const [evidence, setEvidence] = useState<IdeaEvidenceItem[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
+
+  const [researchSessionId, setResearchSessionId] = useState<string | null>(null);
+  const [researchSession, setResearchSession] = useState<AiSession | null>(null);
+  const [researchPanelOpen, setResearchPanelOpen] = useState(false);
+  const [researchQueries, setResearchQueries] = useState<string[]>([]);
+  const [previewRun, setPreviewRun] = useState<WebResearchRun | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [approvingResearch, setApprovingResearch] = useState(false);
+  const [researchError, setResearchError] = useState<string | null>(null);
+  const [startingResearch, setStartingResearch] = useState(false);
+  const [researchNotice, setResearchNotice] = useState<string | null>(null);
+  const [lastCompletedRunId, setLastCompletedRunId] = useState<string | null>(null);
 
   const [comments, setComments] = useState<IdeaComment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(false);
@@ -154,6 +210,68 @@ export function IdeaDetailPage() {
       cancelled = true;
     };
   }, [workspaceId, ideaId, tab]);
+
+  // Recover in-progress / awaiting RESEARCH session after reload.
+  useEffect(() => {
+    if (!workspaceId || !ideaId || tab !== "research") return;
+    let cancelled = false;
+    void getLatestIdeaResearchSession(workspaceId, ideaId)
+      .then(async (data) => {
+        if (cancelled || !data.session) return;
+        setResearchSessionId(data.session.id);
+        setResearchSession(data.session);
+        setResearchQueries(
+          (data.session.research_topics ?? []).filter(Boolean).slice(0, 5),
+        );
+      })
+      .catch(() => {
+        // Ignore recovery errors; user can still start a new research.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, ideaId, tab]);
+
+  const {
+    run: researchRun,
+    inProgress: researchInProgress,
+    refresh: refreshResearch,
+  } = useWebResearch(workspaceId, researchSessionId ?? undefined, {
+    enabled: Boolean(workspaceId && researchSessionId),
+  });
+
+  useEffect(() => {
+    if (!researchRun || !workspaceId || !ideaId) return;
+    if (researchRun.status !== "READY") return;
+    if (lastCompletedRunId === researchRun.id) return;
+    setLastCompletedRunId(researchRun.id);
+    void getIdeaEvidence(workspaceId, ideaId)
+      .then((data) => {
+        setEvidence(data.items);
+        if ((researchRun.result_count ?? 0) === 0) {
+          toast.info("검색은 완료되었지만 새 근거 자료를 찾지 못했습니다.");
+          setResearchNotice("검색은 완료되었지만 새 근거 자료를 찾지 못했습니다.");
+        } else {
+          toast.success("조사가 완료되었습니다.", "새 근거 자료를 확인해 주세요.");
+          setResearchNotice(null);
+        }
+      })
+      .catch(() => {
+        toast.success("조사가 완료되었습니다.");
+      });
+  }, [researchRun, workspaceId, ideaId, lastCompletedRunId]);
+
+  // Re-open approval panel when recovering AWAITING_APPROVAL.
+  useEffect(() => {
+    if (!researchRun || researchPanelOpen || startingResearch) return;
+    if (researchRun.status === "AWAITING_APPROVAL") {
+      setPreviewRun(researchRun);
+      if (researchRun.queries_to_send?.length) {
+        setResearchQueries(researchRun.queries_to_send);
+      }
+      setResearchPanelOpen(true);
+    }
+  }, [researchRun, researchPanelOpen, startingResearch]);
 
   useEffect(() => {
     if (!workspaceId || !ideaId || tab !== "discussion") return;
@@ -335,8 +453,161 @@ export function IdeaDetailPage() {
 
   const canEdit = idea.current_user_access === "OWNER" || idea.current_user_access === "EDIT";
   const canDelete = idea.current_user_access === "OWNER";
+  const allowWebSearch = currentWorkspace?.effective_allow_web_search !== false;
+  const canStartResearch = canEdit && allowWebSearch;
+  const ideaTitle = idea.title;
   const author = toDisplayUser(idea.author);
   const assignee = idea.assignee ? toDisplayUser(idea.assignee) : null;
+
+  async function handleStartResearch() {
+    if (!workspaceId || !ideaId || !canStartResearch || startingResearch) return;
+    if (researchInProgress) {
+      toast.error("이 아이디어에 대한 웹 조사가 이미 진행 중입니다.");
+      return;
+    }
+    setStartingResearch(true);
+    setResearchError(null);
+    setResearchNotice(null);
+    try {
+      // Recover existing awaiting-approval run instead of creating a stuck preview.
+      if (researchSessionId && researchRun?.status === "AWAITING_APPROVAL") {
+        setPreviewRun(researchRun);
+        setResearchQueries(
+          researchRun.queries_to_send?.length
+            ? researchRun.queries_to_send
+            : researchQueries,
+        );
+        setResearchPanelOpen(true);
+        return;
+      }
+      const session = await createIdeaResearchSession(workspaceId, ideaId);
+      setResearchSessionId(session.id);
+      setResearchSession(session);
+      const topics = (session.research_topics ?? []).filter(Boolean).slice(0, 5);
+      setResearchQueries(topics.length > 0 ? topics : ideaTitle ? [ideaTitle] : [""]);
+      setPreviewRun(null);
+      setResearchPanelOpen(true);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "다시 조사를 시작하지 못했습니다."));
+    } finally {
+      setStartingResearch(false);
+    }
+  }
+
+  function clearResearchControlState() {
+    setResearchPanelOpen(false);
+    setPreviewRun(null);
+    setResearchSessionId(null);
+    setResearchSession(null);
+    setResearchError(null);
+    setResearchNotice(null);
+  }
+
+  function handleResearchSourceChanged() {
+    clearResearchControlState();
+    toast.info(
+      "아이디어 내용이 변경되었습니다. 최신 내용으로 다시 조사를 시작해 주세요.",
+    );
+  }
+
+  async function handleResearchPreview() {
+    if (!workspaceId || !researchSessionId || loadingPreview) return;
+    const queries = researchQueries.map((q) => q.trim()).filter(Boolean);
+    if (queries.length === 0) return;
+    setLoadingPreview(true);
+    setResearchError(null);
+    try {
+      const draft =
+        (researchSession?.source_idea_snapshot as Record<string, unknown> | null) ??
+        (researchSession?.draft as Record<string, unknown> | null) ??
+        {};
+      const run = await previewWebResearch(workspaceId, researchSessionId, {
+        queries,
+        current_draft: draft,
+        user_edited_fields: [],
+      });
+      setPreviewRun(run);
+      await refreshResearch();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
+      setResearchError(apiErrorMessage(err, "검색어 미리보기에 실패했습니다."));
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  async function handleResearchApprove() {
+    if (!workspaceId || !researchSessionId || !previewRun || approvingResearch) return;
+    setApprovingResearch(true);
+    setResearchError(null);
+    try {
+      await approveWebResearch(workspaceId, researchSessionId, previewRun.id);
+      setResearchPanelOpen(false);
+      setPreviewRun(null);
+      await refreshResearch();
+      toast.info("웹 검색을 시작합니다", "검색 결과는 근거 자료에 추가됩니다.");
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
+      setResearchError(apiErrorMessage(err, "검색 승인에 실패했습니다."));
+    } finally {
+      setApprovingResearch(false);
+    }
+  }
+
+  async function handleResearchCancel() {
+    if (
+      previewRun?.status === "AWAITING_APPROVAL" &&
+      workspaceId &&
+      researchSessionId
+    ) {
+      try {
+        await cancelWebResearch(workspaceId, researchSessionId, previewRun.id);
+      } catch {
+        // ignore cancel errors on close
+      }
+    }
+    setResearchPanelOpen(false);
+    setPreviewRun(null);
+    setResearchError(null);
+    await refreshResearch();
+  }
+
+  async function handleEditResearchQueries() {
+    if (!previewRun || !workspaceId || !researchSessionId) return;
+    setResearchError(null);
+    try {
+      await cancelWebResearch(workspaceId, researchSessionId, previewRun.id);
+      setPreviewRun(null);
+      await refreshResearch();
+    } catch (err) {
+      setResearchError(
+        apiErrorMessage(err, "검색어 수정을 위해 기존 미리보기를 취소하지 못했습니다."),
+      );
+      throw err;
+    }
+  }
+
+  async function handleResearchRetry() {
+    if (!workspaceId || !researchSessionId || !researchRun) return;
+    try {
+      await retryWebResearchRun(workspaceId, researchSessionId, researchRun.id);
+      setResearchNotice(null);
+      await refreshResearch();
+      toast.info("웹 조사를 다시 시도합니다.");
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
+      toast.error(apiErrorMessage(err, "다시 시도에 실패했습니다."));
+    }
+  }
 
   const TABS: { id: DetailTab; label: string; icon: typeof FileText }[] = [
     { id: "overview", label: "개요", icon: FileText },
@@ -494,16 +765,69 @@ export function IdeaDetailPage() {
             <div className="max-w-2xl space-y-4">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-[#111118]">출처 및 근거</h3>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<RefreshCw className="w-3.5 h-3.5" />}
-                  disabled
-                  title="확정된 아이디어 재조사는 추후 제공됩니다."
-                >
-                  다시 조사
-                </Button>
+                {canEdit && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={
+                      startingResearch ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )
+                    }
+                    disabled={!canStartResearch || startingResearch || researchInProgress}
+                    title={
+                      !allowWebSearch
+                        ? "이 작업공간에서는 웹 검색이 비활성화되어 있습니다."
+                        : researchInProgress
+                          ? "웹 조사가 진행 중입니다."
+                          : undefined
+                    }
+                    onClick={() => void handleStartResearch()}
+                  >
+                    다시 조사
+                  </Button>
+                )}
               </div>
+
+              {(researchInProgress ||
+                researchRun?.status === "FAILED" ||
+                researchRun?.status === "READY" ||
+                researchNotice) && (
+                <div className="rounded-xl border border-[rgba(0,0,0,0.08)] bg-white px-4 py-3 flex items-center gap-3">
+                  {researchInProgress && (
+                    <Loader2 className="w-4 h-4 animate-spin text-[#2563eb] shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-[#111118]">
+                      {researchNotice ??
+                        researchStatusLabel(researchRun?.status) ??
+                        (researchInProgress ? "조사 진행 중" : null)}
+                    </p>
+                    {researchRun?.status === "FAILED" && (
+                      <p className="text-xs text-[#dc2626] mt-1">
+                        {researchRun.failure?.message || "웹 조사에 실패했습니다."}
+                      </p>
+                    )}
+                    {researchRun?.status === "READY" && researchRun.research_summary && (
+                      <p className="text-xs text-[#6b6b80] mt-1 whitespace-pre-wrap">
+                        최근 조사 요약: {researchRun.research_summary}
+                      </p>
+                    )}
+                  </div>
+                  {researchRun?.status === "FAILED" && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void handleResearchRetry()}
+                    >
+                      다시 시도
+                    </Button>
+                  )}
+                </div>
+              )}
+
               {evidenceLoading && (
                 <p className="text-sm text-[#6b6b80]">근거를 불러오는 중...</p>
               )}
@@ -526,8 +850,9 @@ export function IdeaDetailPage() {
                   <p className="text-xs text-[#6b6b80] mb-2">
                     {[ev.source_name, ev.domain].filter(Boolean).join(" · ")}
                     {ev.published_at
-                      ? ` · ${new Date(ev.published_at).toLocaleDateString("ko")}`
+                      ? ` · 게시 ${new Date(ev.published_at).toLocaleDateString("ko")}`
                       : ""}
+                    {ev.fetched_at ? ` · 수집 ${formatFetchedAt(ev.fetched_at)}` : ""}
                   </p>
                   {ev.snippet && (
                     <p className="text-sm text-[#111118] leading-relaxed whitespace-pre-wrap mb-2">
@@ -781,6 +1106,22 @@ export function IdeaDetailPage() {
         description="삭제된 아이디어는 복구할 수 없습니다."
         confirmLabel={deleting ? "삭제 중..." : "삭제"}
         variant="danger"
+      />
+
+      <WebSearchApprovalPanel
+        open={researchPanelOpen}
+        onClose={() => void handleResearchCancel()}
+        initialQueries={researchQueries}
+        previewRun={previewRun}
+        loadingPreview={loadingPreview}
+        approving={approvingResearch}
+        error={researchError}
+        onQueriesChange={setResearchQueries}
+        onPreview={() => void handleResearchPreview()}
+        onApprove={() => void handleResearchApprove()}
+        onCancel={() => void handleResearchCancel()}
+        onEditQueries={handleEditResearchQueries}
+        mode="REGISTERED_IDEA_RESEARCH"
       />
 
       {reviewModalOpen && (
