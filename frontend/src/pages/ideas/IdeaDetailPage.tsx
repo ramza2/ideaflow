@@ -455,6 +455,7 @@ export function IdeaDetailPage() {
   const canDelete = idea.current_user_access === "OWNER";
   const allowWebSearch = currentWorkspace?.effective_allow_web_search !== false;
   const canStartResearch = canEdit && allowWebSearch;
+  const ideaTitle = idea.title;
   const author = toDisplayUser(idea.author);
   const assignee = idea.assignee ? toDisplayUser(idea.assignee) : null;
 
@@ -483,7 +484,7 @@ export function IdeaDetailPage() {
       setResearchSessionId(session.id);
       setResearchSession(session);
       const topics = (session.research_topics ?? []).filter(Boolean).slice(0, 5);
-      setResearchQueries(topics.length > 0 ? topics : idea.title ? [idea.title] : [""]);
+      setResearchQueries(topics.length > 0 ? topics : ideaTitle ? [ideaTitle] : [""]);
       setPreviewRun(null);
       setResearchPanelOpen(true);
     } catch (err) {
