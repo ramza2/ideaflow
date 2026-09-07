@@ -580,10 +580,9 @@ export function IdeaDetailPage() {
       setResearchPanelOpen(false);
       setPreviewRun(null);
       setResearchError(null);
-      // Prefer server status when available; suppression still blocks stale AWAITING reopen.
-      if (approvedRun.status !== "AWAITING_APPROVAL") {
-        // Keep submittedResearchRunIdRef until researchRun catches up, then cleanup effect clears it.
-      }
+      // Server returns QUEUED on success; keep submittedResearchRunIdRef until
+      // researchRun catches up so stale AWAITING cannot reopen the modal.
+      void approvedRun.status;
       await refreshResearch();
       toast.info("웹 검색을 시작합니다", "검색 결과는 근거 자료에 추가됩니다.");
     } catch (err) {
