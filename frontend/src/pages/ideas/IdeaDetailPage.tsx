@@ -494,6 +494,22 @@ export function IdeaDetailPage() {
     }
   }
 
+  function clearResearchControlState() {
+    setResearchPanelOpen(false);
+    setPreviewRun(null);
+    setResearchSessionId(null);
+    setResearchSession(null);
+    setResearchError(null);
+    setResearchNotice(null);
+  }
+
+  function handleResearchSourceChanged() {
+    clearResearchControlState();
+    toast.info(
+      "아이디어 내용이 변경되었습니다. 최신 내용으로 다시 조사를 시작해 주세요.",
+    );
+  }
+
   async function handleResearchPreview() {
     if (!workspaceId || !researchSessionId || loadingPreview) return;
     const queries = researchQueries.map((q) => q.trim()).filter(Boolean);
@@ -513,6 +529,10 @@ export function IdeaDetailPage() {
       setPreviewRun(run);
       await refreshResearch();
     } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
       setResearchError(apiErrorMessage(err, "검색어 미리보기에 실패했습니다."));
     } finally {
       setLoadingPreview(false);
@@ -530,6 +550,10 @@ export function IdeaDetailPage() {
       await refreshResearch();
       toast.info("웹 검색을 시작합니다", "검색 결과는 근거 자료에 추가됩니다.");
     } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
       setResearchError(apiErrorMessage(err, "검색 승인에 실패했습니다."));
     } finally {
       setApprovingResearch(false);
@@ -577,6 +601,10 @@ export function IdeaDetailPage() {
       await refreshResearch();
       toast.info("웹 조사를 다시 시도합니다.");
     } catch (err) {
+      if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
+        handleResearchSourceChanged();
+        return;
+      }
       toast.error(apiErrorMessage(err, "다시 시도에 실패했습니다."));
     }
   }

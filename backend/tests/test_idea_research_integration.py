@@ -1095,8 +1095,9 @@ def test_latest_recovery_endpoint_requester_only(
         f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-sessions/latest",
         headers=_headers(client),
     )
-    assert other_latest.status_code == 200
-    assert other_latest.json()["session"] is None
+    # latest is a research control recovery endpoint — requires current EDIT ACL.
+    assert other_latest.status_code == 403
+    assert other_latest.json()["error"]["code"] == "IDEA_EDIT_FORBIDDEN"
     assert preview["status"] == "AWAITING_APPROVAL"
 
 
@@ -1162,3 +1163,271 @@ def test_web_search_disabled_blocks_create(
     )
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "WORKSPACE_WEB_SEARCH_DISABLED"
+
+
+def _patch_idea(client: TestClient, ws: Workspace, idea_id: str, **fields: Any) -> dict[str, Any]:
+    r = client.patch(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea_id}",
+        json=fields,
+        headers=_headers(client),
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_permission_revoked_blocks_research_controls(
+    client: TestClient,
+    db: Session,
+) -> None:
+    owner, pw = _user(db)
+    editor, editor_pw = _user(db)
+    ws = _team(db, owner)
+    _add_member(db, ws, editor, role=WorkspaceRole.MEMBER.value)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, visibility="PRIVATE", background="REAL_BACKGROUND")
+    _share(client, ws, idea["id"], str(editor.id), permission="EDIT")
+
+    _login(client, editor.email, editor_pw)
+    body = _start_research(client, ws, idea["id"])
+    preview = _preview(
+        client,
+        ws,
+        body["id"],
+        queries=["before revoke"],
+        draft=body["draft"],
+    )
+    assert preview["status"] == "AWAITING_APPROVAL"
+
+    # Owner downgrades editor to READ.
+    _login(client, owner.email, pw)
+    _share(client, ws, idea["id"], str(editor.id), permission="READ")
+
+    _login(client, editor.email, editor_pw)
+    blocked_preview = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/preview",
+        json={
+            "queries": ["after revoke"],
+            "current_draft": body["draft"],
+            "user_edited_fields": [],
+        },
+        headers=_headers(client),
+    )
+    # First preview still AWAITING so new preview hits ALREADY_ACTIVE or EDIT forbidden.
+    # Cancel first then try again to assert EDIT ACL.
+    cancel = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{preview['id']}/cancel",
+        headers=_headers(client),
+    )
+    assert cancel.status_code == 200, cancel.text  # requester-only cancel still allowed
+
+    blocked_preview = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/preview",
+        json={
+            "queries": ["after revoke"],
+            "current_draft": body["draft"],
+            "user_edited_fields": [],
+        },
+        headers=_headers(client),
+    )
+    assert blocked_preview.status_code == 403
+    assert blocked_preview.json()["error"]["code"] == "IDEA_EDIT_FORBIDDEN"
+
+    # Recreate awaiting run as owner for approve-after-revoke check.
+    _login(client, owner.email, pw)
+    _share(client, ws, idea["id"], str(editor.id), permission="EDIT")
+    _login(client, editor.email, editor_pw)
+    body2 = _start_research(client, ws, idea["id"])
+    preview2 = _preview(client, ws, body2["id"], queries=["approve-revoke"], draft=body2["draft"])
+    _login(client, owner.email, pw)
+    _share(client, ws, idea["id"], str(editor.id), permission="READ")
+    _login(client, editor.email, editor_pw)
+    blocked_approve = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body2['id']}/research-runs/{preview2['id']}/approve",
+        headers=_headers(client),
+    )
+    assert blocked_approve.status_code == 403
+    assert blocked_approve.json()["error"]["code"] == "IDEA_EDIT_FORBIDDEN"
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(AiJob)
+            .where(AiJob.research_run_id == uuid.UUID(preview2["id"]))
+        )
+        == 0
+    )
+
+    latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-sessions/latest",
+        headers=_headers(client),
+    )
+    assert latest.status_code == 403
+    assert latest.json()["error"]["code"] == "IDEA_EDIT_FORBIDDEN"
+
+
+def test_research_preview_ignores_tampered_client_draft(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, background="REAL_BACKGROUND", expected_effect="REAL_EFFECT")
+    body = _start_research(client, ws, idea["id"])
+
+    preview = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/preview",
+        json={
+            "queries": ["tamper"],
+            "current_draft": {
+                "background": "MALICIOUS_BACKGROUND",
+                "expected_effect": "MALICIOUS_EFFECT",
+                "title": "MALICIOUS_TITLE",
+            },
+            "user_edited_fields": ["background", "expected_effect"],
+        },
+        headers=_headers(client),
+    )
+    assert preview.status_code == 201, preview.text
+    run_id = uuid.UUID(preview.json()["id"])
+    run = db.get(WebResearchRun, run_id)
+    assert run is not None
+    assert run.base_draft_payload["background"] == "REAL_BACKGROUND"
+    assert run.base_draft_payload.get("expected_effect") == "REAL_EFFECT"
+    assert "MALICIOUS" not in str(run.base_draft_payload)
+    assert run.user_edited_fields == []
+
+    approve = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{run_id}/approve",
+        headers=_headers(client),
+    )
+    assert approve.status_code == 200, approve.text
+    _make_research_job_available(db, run_id)
+
+    seen_background: list[str] = []
+
+    class CaptureLlm(FakeLlmProvider):
+        def refine_idea_with_evidence(self, request):
+            self.calls += 1
+            seen_background.append(str(request.base_draft.get("background")))
+            ev_id = str(request.evidence[0].evidence_id)
+            return EvidenceRefinementResult(
+                draft={"background": "LLM_CHANGED"},
+                evidence_links={"background": [ev_id]},
+                research_summary="ok",
+            )
+
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=CaptureLlm(),
+        search_provider=FakeSearchProvider(url="https://example.com/tamper"),
+    )
+    assert seen_background == ["REAL_BACKGROUND"]
+
+
+def test_source_changed_blocks_preview_approve_retry_and_stale_latest(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    from app.web_search.exceptions import WebSearchTimeoutError
+
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, background="REAL_BACKGROUND")
+
+    # A) source changed before preview
+    body = _start_research(client, ws, idea["id"])
+    _patch_idea(client, ws, idea["id"], background="CHANGED_AFTER_SESSION")
+    blocked = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/preview",
+        json={
+            "queries": ["stale"],
+            "current_draft": body["draft"],
+            "user_edited_fields": [],
+        },
+        headers=_headers(client),
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "IDEA_RESEARCH_SOURCE_CHANGED"
+
+    # B) preview then patch then approve — no AiJob
+    idea2 = _create_idea(client, ws, title="Freshness B", background="B_REAL")
+    body2 = _start_research(client, ws, idea2["id"])
+    preview2 = _preview(client, ws, body2["id"], queries=["approve-stale"], draft=body2["draft"])
+    _patch_idea(client, ws, idea2["id"], background="B_CHANGED")
+    FakeSearchProvider.calls = 0
+    approve2 = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body2['id']}/research-runs/{preview2['id']}/approve",
+        headers=_headers(client),
+    )
+    assert approve2.status_code == 409
+    assert approve2.json()["error"]["code"] == "IDEA_RESEARCH_SOURCE_CHANGED"
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(AiJob)
+            .where(AiJob.research_run_id == uuid.UUID(preview2["id"]))
+        )
+        == 0
+    )
+    assert FakeSearchProvider.calls == 0
+
+    # C) FAILED run then Idea edit then retry — no new AiJob
+    idea3 = _create_idea(client, ws, title="Freshness C", background="C_REAL")
+    body3 = _start_research(client, ws, idea3["id"])
+    preview3 = _preview(client, ws, body3["id"], queries=["retry-stale"], draft=body3["draft"])
+    assert (
+        client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions/{body3['id']}/research-runs/{preview3['id']}/approve",
+            headers=_headers(client),
+        ).status_code
+        == 200
+    )
+    run3 = uuid.UUID(preview3["id"])
+    jobs_before = db.scalar(
+        select(func.count()).select_from(AiJob).where(AiJob.research_run_id == run3)
+    )
+
+    class FailSearch(FakeSearchProvider):
+        def search(self, *, query: str, max_results: int):
+            FakeSearchProvider.calls += 1
+            raise WebSearchTimeoutError("timeout")
+
+    for _ in range(5):
+        _make_research_job_available(db, run3)
+        ai_worker.run_once(
+            session_factory=session_factory,
+            provider=FakeLlmProvider([]),
+            search_provider=FailSearch(),
+        )
+        db.expire_all()
+        run_row = db.get(WebResearchRun, run3)
+        if run_row is not None and run_row.status == WebResearchRunStatus.FAILED.value:
+            break
+    assert db.get(WebResearchRun, run3).status == WebResearchRunStatus.FAILED.value
+
+    _patch_idea(client, ws, idea3["id"], background="C_CHANGED")
+    retry = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body3['id']}/research-runs/{preview3['id']}/retry",
+        headers=_headers(client),
+    )
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "IDEA_RESEARCH_SOURCE_CHANGED"
+    jobs_after = db.scalar(
+        select(func.count()).select_from(AiJob).where(AiJob.research_run_id == run3)
+    )
+    assert jobs_after == jobs_before
+
+    # D) stale latest recovery → session null (EDIT still allowed)
+    idea4 = _create_idea(client, ws, title="Freshness D", background="D_REAL")
+    body4 = _start_research(client, ws, idea4["id"])
+    _preview(client, ws, body4["id"], queries=["latest-stale"], draft=body4["draft"])
+    _patch_idea(client, ws, idea4["id"], background="D_CHANGED")
+    latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea4['id']}/research-sessions/latest",
+        headers=_headers(client),
+    )
+    assert latest.status_code == 200
+    assert latest.json()["session"] is None

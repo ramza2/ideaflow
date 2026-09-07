@@ -292,6 +292,19 @@ def preview_research_run(
     )
     _assert_session_ready(session)
 
+    from app.models.enums import IdeaAiSessionPurpose
+
+    is_research = session.purpose == IdeaAiSessionPurpose.RESEARCH.value
+    if is_research:
+        # Current Idea EDIT ACL + freshness (no Idea mutation on preview).
+        ai_session_service.require_current_research_source_edit(
+            db,
+            workspace=workspace,
+            user=user,
+            session=session,
+            for_update=False,
+        )
+
     if _active_run_exists(db, session.id):
         raise AppError(
             "An active research run already exists for this session.",
@@ -302,6 +315,20 @@ def preview_research_run(
     sanitized = validate_and_sanitize_queries(payload.queries, settings=cfg)
     provider = cfg.web_search_provider.strip() or "http_json"
 
+    if is_research:
+        # Server-owned snapshot only — ignore client current_draft / user_edited_fields.
+        base_draft = sanitize_preview_draft(
+            session.source_idea_snapshot
+            if isinstance(session.source_idea_snapshot, dict)
+            else {}
+        )
+        base_provenance: dict[str, Any] = {}
+        user_edited: list[str] = []
+    else:
+        base_draft = sanitize_preview_draft(payload.current_draft)
+        base_provenance = dict(session.field_provenance or {})
+        user_edited = sanitize_user_edited_fields(payload.user_edited_fields)
+
     run = WebResearchRun(
         session_id=session.id,
         requester_id=user.id,
@@ -310,9 +337,9 @@ def preview_research_run(
         sanitization_notes=[
             {"query_index": n.query_index, "changed": n.changed} for n in sanitized.notes
         ],
-        base_draft_payload=sanitize_preview_draft(payload.current_draft),
-        base_field_provenance=dict(session.field_provenance or {}),
-        user_edited_fields=sanitize_user_edited_fields(payload.user_edited_fields),
+        base_draft_payload=base_draft,
+        base_field_provenance=base_provenance,
+        user_edited_fields=user_edited,
         provider=provider,
     )
     db.add(run)
@@ -359,16 +386,17 @@ def approve_research_run(
 
     from app.models.enums import IdeaAiSessionPurpose
 
-    # RESEARCH approve: serialize on source Idea and block concurrent executing runs.
-    if (
-        session.purpose == IdeaAiSessionPurpose.RESEARCH.value
-        and session.source_idea_id is not None
-    ):
-        _lock_idea_for_research(
-            db, session.source_idea_id, workspace_id=workspace.id
+    # RESEARCH approve: lock Idea → EDIT ACL → freshness → active run check → queue.
+    if session.purpose == IdeaAiSessionPurpose.RESEARCH.value:
+        idea = ai_session_service.require_current_research_source_edit(
+            db,
+            workspace=workspace,
+            user=user,
+            session=session,
+            for_update=True,
         )
         _assert_no_active_idea_research(
-            db, idea_id=session.source_idea_id, exclude_run_id=run.id
+            db, idea_id=idea.id, exclude_run_id=run.id
         )
 
     now = utcnow()
@@ -463,15 +491,16 @@ def retry_research_run(
 
     from app.models.enums import IdeaAiSessionPurpose
 
-    if (
-        session.purpose == IdeaAiSessionPurpose.RESEARCH.value
-        and session.source_idea_id is not None
-    ):
-        _lock_idea_for_research(
-            db, session.source_idea_id, workspace_id=workspace.id
+    if session.purpose == IdeaAiSessionPurpose.RESEARCH.value:
+        idea = ai_session_service.require_current_research_source_edit(
+            db,
+            workspace=workspace,
+            user=user,
+            session=session,
+            for_update=True,
         )
         _assert_no_active_idea_research(
-            db, idea_id=session.source_idea_id, exclude_run_id=run.id
+            db, idea_id=idea.id, exclude_run_id=run.id
         )
 
     run.status = WebResearchRunStatus.QUEUED.value

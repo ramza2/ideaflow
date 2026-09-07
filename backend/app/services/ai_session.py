@@ -68,6 +68,9 @@ REFINE_SOURCE_CHANGED_MESSAGE = (
     "다시 발전시켜 주세요."
 )
 REFINE_NO_CHANGES_MESSAGE = "변경된 내용이 없습니다. 적용할 내용을 확인해 주세요."
+RESEARCH_SOURCE_CHANGED_MESSAGE = (
+    "아이디어가 변경되었습니다. 최신 내용을 기준으로 다시 조사를 시작해 주세요."
+)
 
 
 def utcnow() -> datetime:
@@ -392,10 +395,14 @@ def get_latest_idea_research_session(
     idea_id: UUID,
     user_id: UUID,
 ) -> IdeaAiSession | None:
-    """Return the current user's recoverable RESEARCH session for an Idea, if any."""
+    """Return the current user's recoverable RESEARCH session for an Idea, if any.
+
+    Requires current Idea EDIT ACL. Stale sessions (source_idea_updated_at mismatch)
+    are skipped without mutating the DB.
+    """
     from app.models.research import WebResearchRun
 
-    idea_service.get_readable_idea(
+    idea, _share, _access = idea_service.require_idea_edit(
         db,
         workspace_id=workspace_id,
         idea_id=idea_id,
@@ -423,7 +430,11 @@ def get_latest_idea_research_session(
             .order_by(IdeaAiSession.created_at.desc())
         )
     )
+    idea_updated = _as_utc(idea.updated_at)
     for session in sessions:
+        if _as_utc(session.source_idea_updated_at) != idea_updated:
+            # Stale vs current Idea — do not recover; user must start a new research.
+            continue
         latest_run = db.execute(
             select(WebResearchRun)
             .where(WebResearchRun.session_id == session.id)
@@ -444,6 +455,65 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _require_unchanged_research_source(idea: Idea, session: IdeaAiSession) -> None:
+    if _as_utc(idea.updated_at) != _as_utc(session.source_idea_updated_at):
+        raise AppError(
+            RESEARCH_SOURCE_CHANGED_MESSAGE,
+            code="IDEA_RESEARCH_SOURCE_CHANGED",
+            status_code=409,
+        )
+
+
+def require_current_research_source_edit(
+    db: Session,
+    *,
+    workspace: Workspace,
+    user: User,
+    session: IdeaAiSession,
+    for_update: bool = False,
+) -> Idea:
+    """Re-check current Idea EDIT ACL (+ optional row lock) and source freshness.
+
+    Used by RESEARCH preview / approve / retry so revoked EDIT cannot continue
+    an earlier session, and stale snapshots cannot authorize external search.
+    """
+    if session.purpose != IdeaAiSessionPurpose.RESEARCH.value:
+        raise AppError(
+            "Only purpose=RESEARCH sessions support this operation.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+    if session.source_idea_id is None:
+        raise AppError(
+            "AI session has no source idea.",
+            code="AI_SESSION_INVALID_STATE",
+            status_code=409,
+        )
+
+    if for_update:
+        locked = db.execute(
+            select(Idea)
+            .where(Idea.id == session.source_idea_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if (
+            locked is None
+            or locked.deleted_at is not None
+            or locked.workspace_id != workspace.id
+        ):
+            raise AppError("Idea not found.", code="IDEA_NOT_FOUND", status_code=404)
+
+    idea, _share, _access = idea_service.require_idea_edit(
+        db,
+        workspace_id=workspace.id,
+        idea_id=session.source_idea_id,
+        user_id=user.id,
+    )
+    _require_unchanged_research_source(idea, session)
+    return idea
 
 
 def _require_unchanged_source(idea: Idea, session: IdeaAiSession) -> None:
