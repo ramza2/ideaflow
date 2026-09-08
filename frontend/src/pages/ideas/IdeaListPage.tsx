@@ -121,8 +121,8 @@ function buildListSearchParams(input: {
 }): URLSearchParams {
   const params = new URLSearchParams();
   if (input.q) params.set("q", input.q);
-  // Persist non-default modes so F5 / share links keep the selection.
-  if (input.searchMode !== "keyword") params.set("search_mode", input.searchMode);
+  // Always persist the chosen mode so ENV defaults cannot override after F5.
+  params.set("search_mode", input.searchMode);
   if (input.filters.stage_id) params.set("stage_id", input.filters.stage_id);
   if (input.filters.priority) params.set("priority", input.filters.priority);
   if (input.filters.category_id) params.set("category_id", input.filters.category_id);
@@ -290,8 +290,8 @@ export function IdeaListPage() {
             setItems(fallback.items);
             setTotal(fallback.total);
             setError(null);
+            // Banner only — toast would repeat on every query/filter refetch.
             setSearchNotice("의미 검색을 사용할 수 없어 키워드 결과를 표시합니다.");
-            toast.info("의미 검색을 사용할 수 없어 키워드 결과를 표시합니다.");
             return;
           } catch (fallbackErr) {
             if (cancelled || requestSeq !== requestSeqRef.current) return;
@@ -368,8 +368,16 @@ export function IdeaListPage() {
   }
 
   function setSearchMode(next: IdeaSearchMode) {
-    if (next === searchMode) return;
-    syncSearchParams({ searchMode: next, offset: 0, q: urlQuery, filters: activeFilters });
+    const urlMode = searchParams.get("search_mode");
+    // Re-clicking the active mode still seeds URL when search_mode was omitted
+    // (ENV default only) so F5 cannot snap back to a different VITE default.
+    if (next === searchMode && urlMode === next) return;
+    syncSearchParams({
+      searchMode: next,
+      offset: next === searchMode ? offset : 0,
+      q: urlQuery,
+      filters: activeFilters,
+    });
   }
 
   function goPrev() {

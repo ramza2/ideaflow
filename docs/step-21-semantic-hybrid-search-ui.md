@@ -13,9 +13,9 @@ Idea 목록에서 기존 Backend `search_mode` API(`keyword` / `semantic` / `hyb
 ## Frontend
 
 - Idea 목록 segmented control: 키워드 / 의미 검색 / 하이브리드
-- URL: `q`, `search_mode`(non-keyword), 기존 필터/offset 유지
-- 기본 모드: `keyword` (`VITE_IDEA_SEARCH_MODE`로 override 가능)
-- Hybrid + semantic unavailable → keyword fallback + 안내
+- URL: `q`, `search_mode`(keyword|semantic|hybrid 항상 기록), 기존 필터/offset 유지
+- 기본 모드: URL에 `search_mode` 없을 때만 `VITE_IDEA_SEARCH_MODE`(미설정 시 keyword)
+- Hybrid + semantic unavailable → keyword fallback + persistent banner (toast 반복 없음)
 - Semantic + unavailable → 오류 + 「키워드 검색으로 다시 보기」(위장하지 않음)
 
 ## 범위 밖
