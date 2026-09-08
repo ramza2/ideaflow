@@ -16,6 +16,7 @@ import {
   completionToastCopy,
   failureToastCopy,
   isTerminalAiTaskStatus,
+  shouldEmitAiTaskCompletionToast,
   toAiTaskViewModel,
   type AiTaskViewModel,
 } from "./aiTaskDisplay";
@@ -48,6 +49,10 @@ function notifyTaskTransition(task: AiTask, href: string | null, navigate: (to: 
       icon: <AlertCircle className="w-4 h-4 text-[#dc2626]" />,
       action,
     });
+    return;
+  }
+
+  if (!shouldEmitAiTaskCompletionToast(task)) {
     return;
   }
 

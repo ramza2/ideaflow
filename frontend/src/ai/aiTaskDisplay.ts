@@ -135,9 +135,16 @@ export function isTerminalAiTaskStatus(task: Pick<AiTask, "type" | "status" | "i
   if (task.type === "RESEARCH") {
     return task.status === "READY" || task.status === "FAILED";
   }
-  return (
-    task.status === "READY_FOR_REVIEW" ||
-    task.status === "NEEDS_CLARIFICATION" ||
-    task.status === "FAILED"
-  );
+  // NEEDS_CLARIFICATION needs user input — keep it in the list, but do not
+  // treat it as a completion/failure toast transition.
+  return task.status === "READY_FOR_REVIEW" || task.status === "FAILED";
+}
+
+/** Statuses that should emit a completion toast (not clarification waits). */
+export function shouldEmitAiTaskCompletionToast(
+  task: Pick<AiTask, "type" | "status" | "is_active">,
+): boolean {
+  if (task.is_active || task.status === "FAILED") return false;
+  if (task.type === "RESEARCH") return task.status === "READY";
+  return task.status === "READY_FOR_REVIEW";
 }

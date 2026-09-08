@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { clsx } from "clsx";
-import { Sparkles, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { Sparkles, CheckCircle2, XCircle, Loader2, CircleHelp } from "lucide-react";
 import { useAiTasks } from "../../ai/AiTasksProvider";
 import { formatRelativeTime, type AiTaskViewModel } from "../../ai/aiTaskDisplay";
 
@@ -11,6 +11,9 @@ function StatusIcon({ task }: { task: AiTaskViewModel }) {
   }
   if (task.status === "FAILED") {
     return <XCircle className="w-3.5 h-3.5 text-[#dc2626] shrink-0" />;
+  }
+  if (task.status === "NEEDS_CLARIFICATION") {
+    return <CircleHelp className="w-3.5 h-3.5 text-[#d97706] shrink-0" />;
   }
   return <CheckCircle2 className="w-3.5 h-3.5 text-[#16a34a] shrink-0" />;
 }

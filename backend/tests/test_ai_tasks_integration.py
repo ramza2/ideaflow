@@ -357,3 +357,34 @@ def test_list_ai_tasks_failed_includes_safe_message(
     assert item["status"] == "FAILED"
     assert item["is_active"] is False
     assert item["failure_message"] == "요청 시간이 초과되었습니다."
+
+
+def test_list_ai_tasks_includes_needs_clarification(
+    client: TestClient, db: Session
+) -> None:
+    """Clarification waits stay visible in the list (toast gating is frontend-only)."""
+    user, password = _user(db)
+    ws = _team(db, user)
+    _login(client, user.email, password)
+
+    session = IdeaAiSession(
+        workspace_id=ws.id,
+        requester_id=user.id,
+        purpose=IdeaAiSessionPurpose.CREATE.value,
+        status=IdeaAiSessionStatus.NEEDS_CLARIFICATION.value,
+        input_text="추가 질문이 필요합니다",
+        draft_payload={"title": "질문 대기 초안"},
+        clarifying_questions=[{"id": "q1", "question": "대상 사용자는?"}],
+    )
+    db.add(session)
+    db.commit()
+
+    r = client.get(f"/api/v1/workspaces/{ws.id}/ai-tasks")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["active_count"] == 0
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["status"] == "NEEDS_CLARIFICATION"
+    assert item["is_active"] is False
+    assert item["idea_title"] == "질문 대기 초안"
