@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
 from app.api.ai_sessions import router as ai_sessions_router
+from app.api.ai_tasks import router as ai_tasks_router
 from app.api.auth import router as auth_router
 from app.api.comments import router as comments_router
 from app.api.health import router as health_router
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     application.include_router(notifications_router, prefix=settings.api_v1_prefix)
     application.include_router(admin_router, prefix=settings.api_v1_prefix)
     application.include_router(ai_sessions_router, prefix=settings.api_v1_prefix)
+    application.include_router(ai_tasks_router, prefix=settings.api_v1_prefix)
     application.include_router(web_research_router, prefix=settings.api_v1_prefix)
     application.include_router(validations_router, prefix=settings.api_v1_prefix)
     return application

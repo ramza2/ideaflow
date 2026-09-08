@@ -475,6 +475,29 @@ export interface WebResearchLatestResponse {
   run: WebResearchRun | null;
 }
 
+/* --- Step 19: Global AI task status --- */
+
+export type AiTaskType = "CREATE" | "REFINE" | "RESEARCH";
+
+export interface AiTask {
+  id: string;
+  type: AiTaskType;
+  status: string;
+  is_active: boolean;
+  session_id: string;
+  idea_id?: string | null;
+  idea_title?: string | null;
+  failure_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
+}
+
+export interface AiTaskListResponse {
+  items: AiTask[];
+  active_count: number;
+}
+
 export interface IdeaEvidenceItem {
   id: string;
   title: string;

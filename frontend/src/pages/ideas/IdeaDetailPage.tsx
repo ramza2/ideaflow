@@ -252,15 +252,15 @@ export function IdeaDetailPage() {
       .then((data) => {
         setEvidence(data.items);
         if ((researchRun.result_count ?? 0) === 0) {
+          // Detail-specific nuance; global AI task toast covers generic completion.
           toast.info("검색은 완료되었지만 새 근거 자료를 찾지 못했습니다.");
           setResearchNotice("검색은 완료되었지만 새 근거 자료를 찾지 못했습니다.");
         } else {
-          toast.success("조사가 완료되었습니다.", "새 근거 자료를 확인해 주세요.");
           setResearchNotice(null);
         }
       })
       .catch(() => {
-        toast.success("조사가 완료되었습니다.");
+        // Evidence refresh failure is non-blocking; keep prior list.
       });
   }, [researchRun, workspaceId, ideaId, lastCompletedRunId]);
 
