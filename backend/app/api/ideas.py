@@ -21,7 +21,11 @@ from app.schemas.idea import (
     IdeaShareReplace,
     IdeaUpdate,
 )
-from app.schemas.research import IdeaEvidenceResponse, IdeaResearchSessionLatestResponse
+from app.schemas.research import (
+    IdeaEvidenceResponse,
+    IdeaResearchLatestResponse,
+    IdeaResearchSessionLatestResponse,
+)
 from app.services import ai_session as ai_session_service
 from app.services import idea as idea_service
 from app.services import idea_access
@@ -116,6 +120,21 @@ def get_idea_evidence(
     ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
 ) -> IdeaEvidenceResponse:
     return web_research_service.get_idea_evidence(
+        db,
+        workspace_id=ctx.workspace.id,
+        idea_id=idea_id,
+        user_id=ctx.user.id,
+    )
+
+
+@router.get("/{idea_id}/research-runs/latest", response_model=IdeaResearchLatestResponse)
+def get_latest_idea_research_run(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> IdeaResearchLatestResponse:
+    """Latest READY research run for Idea detail F5 / re-entry restore."""
+    return web_research_service.get_latest_idea_research_run(
         db,
         workspace_id=ctx.workspace.id,
         idea_id=idea_id,

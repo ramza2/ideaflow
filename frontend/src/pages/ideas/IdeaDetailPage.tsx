@@ -31,6 +31,7 @@ import {
   approveWebResearch,
   cancelWebResearch,
   getIdeaEvidence,
+  getLatestIdeaResearchRun,
   previewWebResearch,
   retryWebResearchRun,
 } from "../../api/webResearch";
@@ -137,6 +138,8 @@ export function IdeaDetailPage() {
   const [startingResearch, setStartingResearch] = useState(false);
   const [researchNotice, setResearchNotice] = useState<string | null>(null);
   const [lastCompletedRunId, setLastCompletedRunId] = useState<string | null>(null);
+  // Completed READY run restored from Backend (survives F5 / re-entry).
+  const [persistedResearchRun, setPersistedResearchRun] = useState<WebResearchRun | null>(null);
   const researchApprovalInFlightRef = useRef(false);
   const submittedResearchRunIdRef = useRef<string | null>(null);
 
@@ -213,6 +216,23 @@ export function IdeaDetailPage() {
     };
   }, [workspaceId, ideaId, tab]);
 
+  // Restore latest completed READY research (summary) from Backend — F5 / re-entry.
+  useEffect(() => {
+    if (!workspaceId || !ideaId || tab !== "research") return;
+    let cancelled = false;
+    void getLatestIdeaResearchRun(workspaceId, ideaId)
+      .then((data) => {
+        if (cancelled) return;
+        setPersistedResearchRun(data.run);
+      })
+      .catch(() => {
+        if (!cancelled) setPersistedResearchRun(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, ideaId, tab]);
+
   // Recover in-progress / awaiting RESEARCH session after reload.
   useEffect(() => {
     if (!workspaceId || !ideaId || tab !== "research") return;
@@ -243,11 +263,15 @@ export function IdeaDetailPage() {
     enabled: Boolean(workspaceId && researchSessionId),
   });
 
+  // Prefer live session polling when available; otherwise show persisted READY result.
+  const displayResearchRun = researchRun ?? persistedResearchRun;
+
   useEffect(() => {
     if (!researchRun || !workspaceId || !ideaId) return;
     if (researchRun.status !== "READY") return;
     if (lastCompletedRunId === researchRun.id) return;
     setLastCompletedRunId(researchRun.id);
+    setPersistedResearchRun(researchRun);
     void getIdeaEvidence(workspaceId, ideaId)
       .then((data) => {
         setEvidence(data.items);
@@ -836,7 +860,7 @@ export function IdeaDetailPage() {
 
               {(researchInProgress ||
                 researchRun?.status === "FAILED" ||
-                researchRun?.status === "READY" ||
+                displayResearchRun?.status === "READY" ||
                 researchNotice) && (
                 <div className="rounded-xl border border-[rgba(0,0,0,0.08)] bg-white px-4 py-3 flex items-center gap-3">
                   {researchInProgress && (
@@ -845,7 +869,9 @@ export function IdeaDetailPage() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-[#111118]">
                       {researchNotice ??
-                        researchStatusLabel(researchRun?.status) ??
+                        researchStatusLabel(
+                          researchRun?.status ?? displayResearchRun?.status,
+                        ) ??
                         (researchInProgress ? "조사 진행 중" : null)}
                     </p>
                     {researchRun?.status === "FAILED" && (
@@ -853,11 +879,22 @@ export function IdeaDetailPage() {
                         {researchRun.failure?.message || "웹 조사에 실패했습니다."}
                       </p>
                     )}
-                    {researchRun?.status === "READY" && researchRun.research_summary && (
-                      <p className="text-xs text-[#6b6b80] mt-1 whitespace-pre-wrap">
-                        최근 조사 요약: {researchRun.research_summary}
-                      </p>
-                    )}
+                    {displayResearchRun?.status === "READY" &&
+                      !researchInProgress &&
+                      researchRun?.status !== "FAILED" &&
+                      displayResearchRun.research_summary && (
+                        <p className="text-xs text-[#6b6b80] mt-1 whitespace-pre-wrap">
+                          최근 조사 요약: {displayResearchRun.research_summary}
+                        </p>
+                      )}
+                    {displayResearchRun?.status === "READY" &&
+                      !researchInProgress &&
+                      researchRun?.status !== "FAILED" &&
+                      displayResearchRun.completed_at && (
+                        <p className="text-[11px] text-[#9ca3af] mt-1">
+                          완료 시각 {formatFetchedAt(displayResearchRun.completed_at)}
+                        </p>
+                      )}
                   </div>
                   {researchRun?.status === "FAILED" && (
                     <Button

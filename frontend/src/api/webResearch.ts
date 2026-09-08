@@ -90,3 +90,13 @@ export async function getIdeaEvidence(
     `/workspaces/${workspaceId}/ideas/${ideaId}/evidence`,
   );
 }
+
+/** Latest READY research run for Idea detail F5 / re-entry restore. */
+export async function getLatestIdeaResearchRun(
+  workspaceId: string,
+  ideaId: string,
+): Promise<WebResearchLatestResponse> {
+  return apiRequest<WebResearchLatestResponse>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/research-runs/latest`,
+  );
+}

@@ -42,6 +42,7 @@ from app.models.workspace import Workspace
 from app.schemas.research import (
     IdeaEvidenceItem,
     IdeaEvidenceResponse,
+    IdeaResearchLatestResponse,
     SanitizationNotePublic,
     WebEvidencePublic,
     WebResearchFailurePublic,
@@ -714,6 +715,48 @@ def get_idea_evidence(
         for ev in deduped
     ]
     return IdeaEvidenceResponse(items=items)
+
+
+def get_latest_idea_research_run(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    idea_id: UUID,
+    user_id: UUID,
+) -> IdeaResearchLatestResponse:
+    """Return the newest READY research run linked to an Idea (read ACL).
+
+    Used to restore completed research status/summary after F5 / re-entry.
+    Past READY runs remain in DB; this only selects the latest one.
+    Does not delete or mutate evidence.
+    """
+    from app.services import idea as idea_service
+
+    idea, _share = idea_service.get_readable_idea(
+        db,
+        workspace_id=workspace_id,
+        idea_id=idea_id,
+        user_id=user_id,
+    )
+
+    run = db.execute(
+        select(WebResearchRun)
+        .join(IdeaAiSession, IdeaAiSession.id == WebResearchRun.session_id)
+        .where(
+            IdeaAiSession.result_idea_id == idea.id,
+            IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+            WebResearchRun.status == WebResearchRunStatus.READY.value,
+        )
+        .order_by(
+            WebResearchRun.completed_at.desc().nulls_last(),
+            WebResearchRun.created_at.desc(),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if run is None:
+        return IdeaResearchLatestResponse(run=None)
+    # Evidence is loaded separately via GET .../evidence — keep this payload light.
+    return IdeaResearchLatestResponse(run=to_public(db, run, include_evidence=False))
 
 
 def url_hash(url: str) -> str:
