@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -15,10 +15,11 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  HelpCircle,
 } from "lucide-react";
 import { listIdeas } from "../../api/ideas";
 import { listCategories, listMembers, listStages } from "../../api/workspaces";
-import { apiErrorMessage } from "../../api/client";
+import { ApiError, apiErrorMessage } from "../../api/client";
 import { useAuth } from "../../auth/AuthProvider";
 import { Button } from "../../components/common/Button";
 import { ApiPriorityBadge, StageLabelBadge } from "../../components/common/Badge";
@@ -27,7 +28,13 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { IdeaCreateMenu } from "../../components/ideas/IdeaCreateMenu";
 import { toast } from "../../components/common/Toast";
 import { toDisplayUser } from "../../utils/avatar";
-import type { CategoryPublic, IdeaListItem, IdeaPriority, StagePublic } from "../../types/api";
+import type {
+  CategoryPublic,
+  IdeaListItem,
+  IdeaPriority,
+  IdeaSearchMode,
+  StagePublic,
+} from "../../types/api";
 
 type Tab = "all" | "mine" | "assigned";
 type ViewMode = "list" | "card";
@@ -47,6 +54,28 @@ const PRIORITY_OPTIONS: { value: IdeaPriority | ""; label: string }[] = [
   { value: "LOW", label: "낮음" },
 ];
 
+const SEARCH_MODE_OPTIONS: {
+  value: IdeaSearchMode;
+  label: string;
+  help: string;
+}[] = [
+  {
+    value: "keyword",
+    label: "키워드",
+    help: "입력한 단어가 제목·본문에 포함된 Idea를 찾습니다.",
+  },
+  {
+    value: "semantic",
+    label: "의미 검색",
+    help: "표현이 달라도 의미가 비슷한 Idea를 찾습니다.",
+  },
+  {
+    value: "hybrid",
+    label: "하이브리드",
+    help: "키워드 일치와 의미 유사도를 함께 반영합니다.",
+  },
+];
+
 interface Filters {
   stage_id: string;
   priority: IdeaPriority | "";
@@ -56,6 +85,18 @@ interface Filters {
 
 const PAGE_SIZE = 50;
 const EMPTY_FILTERS: Filters = { stage_id: "", priority: "", category_id: "", author_id: "" };
+
+function envDefaultSearchMode(): IdeaSearchMode {
+  const raw = import.meta.env.VITE_IDEA_SEARCH_MODE;
+  if (raw === "semantic" || raw === "hybrid" || raw === "keyword") return raw;
+  // Embeddings default off in most environments — keep keyword as safe UI default.
+  return "keyword";
+}
+
+function parseSearchMode(raw: string | null): IdeaSearchMode {
+  if (raw === "semantic" || raw === "hybrid" || raw === "keyword") return raw;
+  return envDefaultSearchMode();
+}
 
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
@@ -72,6 +113,24 @@ function offsetFromSearchParams(params: URLSearchParams): number {
   return Math.floor(raw / PAGE_SIZE) * PAGE_SIZE;
 }
 
+function buildListSearchParams(input: {
+  q: string;
+  searchMode: IdeaSearchMode;
+  filters: Filters;
+  offset: number;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  if (input.q) params.set("q", input.q);
+  // Persist non-default modes so F5 / share links keep the selection.
+  if (input.searchMode !== "keyword") params.set("search_mode", input.searchMode);
+  if (input.filters.stage_id) params.set("stage_id", input.filters.stage_id);
+  if (input.filters.priority) params.set("priority", input.filters.priority);
+  if (input.filters.category_id) params.set("category_id", input.filters.category_id);
+  if (input.filters.author_id) params.set("author_id", input.filters.author_id);
+  if (input.offset > 0) params.set("offset", String(input.offset));
+  return params;
+}
+
 export function IdeaListPage() {
   const navigate = useNavigate();
   const { workspaceId = "" } = useParams();
@@ -82,11 +141,14 @@ export function IdeaListPage() {
   const [view, setView] = useState<ViewMode>("list");
   // URL q is the persisted search Source of Truth for API requests.
   const urlQuery = searchParams.get("q") ?? "";
+  const searchMode = parseSearchMode(searchParams.get("search_mode"));
   // Local draft while the user types; debounced writes go back to URL q.
   const [searchInput, setSearchInput] = useState(urlQuery);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
   const [activeFilters, setActiveFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
+  const [searchNotice, setSearchNotice] = useState<string | null>(null);
+  const requestSeqRef = useRef(0);
 
   // URL is source of truth for pagination offset
   const offset = offsetFromSearchParams(searchParams);
@@ -117,18 +179,24 @@ export function IdeaListPage() {
   }, [workspaceId]);
 
   const syncSearchParams = useCallback(
-    (next: { q?: string; filters?: Filters; offset?: number }) => {
-      const params = new URLSearchParams();
+    (next: {
+      q?: string;
+      searchMode?: IdeaSearchMode;
+      filters?: Filters;
+      offset?: number;
+    }) => {
       const q = next.q !== undefined ? next.q : (searchParams.get("q") ?? "");
+      const mode =
+        next.searchMode !== undefined
+          ? next.searchMode
+          : parseSearchMode(searchParams.get("search_mode"));
       const f = next.filters ?? filtersFromSearchParams(searchParams);
-      const nextOffset = next.offset !== undefined ? next.offset : offsetFromSearchParams(searchParams);
-      if (q) params.set("q", q);
-      if (f.stage_id) params.set("stage_id", f.stage_id);
-      if (f.priority) params.set("priority", f.priority);
-      if (f.category_id) params.set("category_id", f.category_id);
-      if (f.author_id) params.set("author_id", f.author_id);
-      if (nextOffset > 0) params.set("offset", String(nextOffset));
-      setSearchParams(params, { replace: true });
+      const nextOffset =
+        next.offset !== undefined ? next.offset : offsetFromSearchParams(searchParams);
+      setSearchParams(
+        buildListSearchParams({ q, searchMode: mode, filters: f, offset: nextOffset }),
+        { replace: true },
+      );
     },
     [searchParams, setSearchParams],
   );
@@ -138,7 +206,7 @@ export function IdeaListPage() {
     setSearchInput((prev) => (prev === urlQuery ? prev : urlQuery));
   }, [urlQuery]);
 
-  // Debounced local input → URL q (resets offset).
+  // Debounced local input → URL q (resets offset), preserves search_mode + filters.
   // Depend only on searchInput so an external URL change cannot re-schedule a
   // push of the previous draft. Compare against the live URL at fire time.
   useEffect(() => {
@@ -146,19 +214,12 @@ export function IdeaListPage() {
       setSearchParams((prev) => {
         const currentQ = prev.get("q") ?? "";
         if (searchInput === currentQ) return prev;
-
-        const params = new URLSearchParams();
-        if (searchInput) params.set("q", searchInput);
-        const stageId = prev.get("stage_id");
-        const priority = prev.get("priority");
-        const categoryId = prev.get("category_id");
-        const authorId = prev.get("author_id");
-        if (stageId) params.set("stage_id", stageId);
-        if (priority) params.set("priority", priority);
-        if (categoryId) params.set("category_id", categoryId);
-        if (authorId) params.set("author_id", authorId);
-        // Omit offset → reset to 0 when q changes from local input.
-        return params;
+        return buildListSearchParams({
+          q: searchInput,
+          searchMode: parseSearchMode(prev.get("search_mode")),
+          filters: filtersFromSearchParams(prev),
+          offset: 0,
+        });
       }, { replace: true });
     }, 300);
     return () => window.clearTimeout(timer);
@@ -180,12 +241,15 @@ export function IdeaListPage() {
     if (!workspaceId || !user) return;
 
     let cancelled = false;
+    const requestSeq = ++requestSeqRef.current;
     setLoading(true);
     setError(null);
+    setSearchNotice(null);
 
     const params: Parameters<typeof listIdeas>[1] = {
       limit: PAGE_SIZE,
       offset,
+      search_mode: searchMode,
     };
     if (urlQuery) params.q = urlQuery;
     if (activeFilters.stage_id) params.stage_id = activeFilters.stage_id;
@@ -200,37 +264,92 @@ export function IdeaListPage() {
       params.author_id = activeFilters.author_id;
     }
 
-    void listIdeas(workspaceId, params)
-      .then((res) => {
-        if (cancelled) return;
+    async function runSearch() {
+      try {
+        const res = await listIdeas(workspaceId, params);
+        if (cancelled || requestSeq !== requestSeqRef.current) return;
         setItems(res.items);
         setTotal(res.total);
-      })
-      .catch((err) => {
-        if (cancelled) return;
+        setSearchNotice(null);
+      } catch (err) {
+        if (cancelled || requestSeq !== requestSeqRef.current) return;
+
+        const isSemanticUnavailable =
+          err instanceof ApiError && err.code === "SEMANTIC_SEARCH_UNAVAILABLE";
+        const isHybridWindow =
+          err instanceof ApiError && err.code === "HYBRID_RESULT_WINDOW_EXCEEDED";
+
+        // HYBRID with empty semantic stack → keyword fallback (explicit notice).
+        if (isSemanticUnavailable && searchMode === "hybrid" && Boolean(urlQuery)) {
+          try {
+            const fallback = await listIdeas(workspaceId, {
+              ...params,
+              search_mode: "keyword",
+            });
+            if (cancelled || requestSeq !== requestSeqRef.current) return;
+            setItems(fallback.items);
+            setTotal(fallback.total);
+            setError(null);
+            setSearchNotice("의미 검색을 사용할 수 없어 키워드 결과를 표시합니다.");
+            toast.info("의미 검색을 사용할 수 없어 키워드 결과를 표시합니다.");
+            return;
+          } catch (fallbackErr) {
+            if (cancelled || requestSeq !== requestSeqRef.current) return;
+            setError(apiErrorMessage(fallbackErr));
+            setItems([]);
+            setTotal(0);
+            return;
+          }
+        }
+
+        if (isSemanticUnavailable && searchMode === "semantic") {
+          setError(
+            "현재 의미 검색을 사용할 수 없습니다. 키워드 또는 하이브리드로 변경해 보세요.",
+          );
+          setItems([]);
+          setTotal(0);
+          return;
+        }
+
+        if (isHybridWindow) {
+          setError(
+            "하이브리드 검색은 한 번에 최대 300건까지 볼 수 있습니다. 앞쪽 페이지로 이동해 주세요.",
+          );
+          setItems([]);
+          setTotal(0);
+          return;
+        }
+
         setError(apiErrorMessage(err));
         setItems([]);
         setTotal(0);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      } finally {
+        if (!cancelled && requestSeq === requestSeqRef.current) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void runSearch();
 
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, user, urlQuery, activeFilters, tab, offset]);
+  }, [workspaceId, user, urlQuery, searchMode, activeFilters, tab, offset]);
 
   const activeFilterCount = Object.values(activeFilters).filter(Boolean).length;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + PAGE_SIZE, total);
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
+  const rankingByRelevance = Boolean(urlQuery) && searchMode !== "keyword";
+  const activeModeHelp =
+    SEARCH_MODE_OPTIONS.find((o) => o.value === searchMode)?.help ?? "";
 
   function applyFilters(next: Filters, nextOffset = 0) {
     setFilters(next);
     setActiveFilters(next);
-    syncSearchParams({ filters: next, offset: nextOffset, q: urlQuery });
+    syncSearchParams({ filters: next, offset: nextOffset, q: urlQuery, searchMode });
   }
 
   function removeFilterKey(key: keyof Filters) {
@@ -248,14 +367,29 @@ export function IdeaListPage() {
     toast.info("필터가 초기화되었습니다");
   }
 
+  function setSearchMode(next: IdeaSearchMode) {
+    if (next === searchMode) return;
+    syncSearchParams({ searchMode: next, offset: 0, q: urlQuery, filters: activeFilters });
+  }
+
   function goPrev() {
     if (!canPrev) return;
-    syncSearchParams({ offset: Math.max(0, offset - PAGE_SIZE), q: urlQuery, filters: activeFilters });
+    syncSearchParams({
+      offset: Math.max(0, offset - PAGE_SIZE),
+      q: urlQuery,
+      filters: activeFilters,
+      searchMode,
+    });
   }
 
   function goNext() {
     if (!canNext) return;
-    syncSearchParams({ offset: offset + PAGE_SIZE, q: urlQuery, filters: activeFilters });
+    syncSearchParams({
+      offset: offset + PAGE_SIZE,
+      q: urlQuery,
+      filters: activeFilters,
+      searchMode,
+    });
   }
 
   function handleDisabledTab(id: string) {
@@ -274,8 +408,11 @@ export function IdeaListPage() {
   const hasSearchOrFilter = Boolean(urlQuery) || activeFilterCount > 0;
   const emptyCopy = hasSearchOrFilter
     ? {
-        title: "검색/필터 결과가 없습니다",
-        description: "검색어나 필터 조건을 변경해 보세요.",
+        title: "검색 결과가 없습니다",
+        description:
+          searchMode === "keyword"
+            ? "다른 검색어를 입력하거나 의미 검색/하이브리드로 변경해 보세요."
+            : "다른 검색어를 입력하거나 검색 방식을 변경해 보세요.",
       }
     : tab === "mine"
       ? {
@@ -340,7 +477,12 @@ export function IdeaListPage() {
                   return;
                 }
                 setTab(t.id as Tab);
-                syncSearchParams({ offset: 0, q: urlQuery, filters: activeFilters });
+                syncSearchParams({
+                  offset: 0,
+                  q: urlQuery,
+                  filters: activeFilters,
+                  searchMode,
+                });
               }}
               className={clsx(
                 "px-3 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
@@ -369,6 +511,36 @@ export function IdeaListPage() {
           />
         </div>
 
+        <div
+          className="inline-flex items-center rounded-lg border border-[rgba(0,0,0,0.1)] bg-[#f4f4f8] p-0.5"
+          role="group"
+          aria-label="검색 방식"
+          title={activeModeHelp}
+        >
+          {SEARCH_MODE_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setSearchMode(opt.value)}
+              title={opt.help}
+              className={clsx(
+                "px-2 sm:px-2.5 h-7 rounded-md text-xs font-medium transition-colors whitespace-nowrap",
+                searchMode === opt.value
+                  ? "bg-white text-[#4f46e5] shadow-sm"
+                  : "text-[#6b6b80] hover:text-[#111118]",
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <span
+            className="hidden sm:inline-flex items-center px-1.5 text-[#9ca3af]"
+            title={activeModeHelp}
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+          </span>
+        </div>
+
         <Button
           variant="ghost"
           size="sm"
@@ -386,10 +558,16 @@ export function IdeaListPage() {
 
         <div
           className="inline-flex items-center gap-1.5 px-2.5 h-8 text-sm text-[#6b6b80]"
-          title="정렬은 최종 수정일 기준입니다"
+          title={
+            rankingByRelevance
+              ? "검색어가 있을 때 관련도 순으로 정렬됩니다"
+              : "정렬은 최종 수정일 기준입니다"
+          }
         >
           <SlidersHorizontal className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">최종 수정일</span>
+          <span className="hidden sm:inline">
+            {rankingByRelevance ? "관련도" : "최종 수정일"}
+          </span>
         </div>
 
         {activeFilterCount > 0 && (
@@ -442,11 +620,29 @@ export function IdeaListPage() {
         </div>
       </div>
 
+      {searchNotice && (
+        <div className="px-4 sm:px-8 py-2 bg-[#fffbeb] border-b border-[#fde68a] text-xs text-[#92400e]">
+          {searchNotice}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-4">
         {loading ? (
-          <div className="py-16 text-center text-sm text-[#6b6b80]">불러오는 중...</div>
+          <div className="py-16 text-center text-sm text-[#6b6b80]">
+            {urlQuery ? "검색 중..." : "불러오는 중..."}
+          </div>
         ) : error ? (
-          <EmptyState title="아이디어를 불러올 수 없습니다" description={error} />
+          <EmptyState
+            title="아이디어를 불러올 수 없습니다"
+            description={error}
+            action={
+              searchMode === "semantic" ? (
+                <Button variant="secondary" size="sm" onClick={() => setSearchMode("keyword")}>
+                  키워드 검색으로 다시 보기
+                </Button>
+              ) : undefined
+            }
+          />
         ) : items.length === 0 ? (
           <EmptyState
             icon={<Sparkles className="w-6 h-6" />}
@@ -455,6 +651,10 @@ export function IdeaListPage() {
             action={
               activeFilterCount > 0 ? (
                 <Button variant="secondary" size="sm" onClick={handleClearFilters}>필터 초기화</Button>
+              ) : hasSearchOrFilter && searchMode !== "keyword" ? (
+                <Button variant="secondary" size="sm" onClick={() => setSearchMode("keyword")}>
+                  키워드 검색으로 다시 보기
+                </Button>
               ) : !urlQuery ? (
                 <IdeaCreateMenu
                   workspaceId={workspaceId}
