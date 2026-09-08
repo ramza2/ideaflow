@@ -1431,3 +1431,207 @@ def test_source_changed_blocks_preview_approve_retry_and_stale_latest(
     )
     assert latest.status_code == 200
     assert latest.json()["session"] is None
+
+
+def test_latest_idea_research_run_restores_summary_and_keeps_history(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """Step 20: Idea-scoped latest READY run restores summary; past runs preserved."""
+    owner, pw = _user(db)
+    other, other_pw = _user(db)
+    stranger, stranger_pw = _user(db)
+    ws = _team(db, owner)
+    _add_member(db, ws, other, role=WorkspaceRole.MEMBER.value)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, visibility="WORKSPACE")
+    other_idea = _create_idea(client, ws, title="다른 아이디어")
+
+    empty = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert empty.status_code == 200
+    assert empty.json()["run"] is None
+
+    def _complete(summary: str, url: str) -> uuid.UUID:
+        body = _start_research(client, ws, idea["id"])
+        preview = _preview(
+            client, ws, body["id"], queries=[summary[:20]], draft=body["draft"]
+        )
+        approve = client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{preview['id']}/approve",
+            headers=_headers(client),
+        )
+        assert approve.status_code == 200
+        run_id = uuid.UUID(preview["id"])
+        _make_research_job_available(db, run_id)
+        FakeSearchProvider.calls = 0
+        search = FakeSearchProvider(url=url)
+
+        class SummaryLlm(FakeLlmProvider):
+            def refine_idea_with_evidence(self, request):
+                self.calls += 1
+                ev0 = str(request.evidence[0].evidence_id)
+                return EvidenceRefinementResult(
+                    draft={},
+                    evidence_links={"background": [ev0]},
+                    research_summary=summary,
+                )
+
+        assert ai_worker.run_once(
+            session_factory=session_factory,
+            provider=SummaryLlm(),
+            search_provider=search,
+        )
+        db.expire_all()
+        run = db.get(WebResearchRun, run_id)
+        assert run is not None
+        assert run.status == WebResearchRunStatus.READY.value
+        assert run.research_summary == summary
+        return run_id
+
+    first_id = _complete("첫 번째 조사 요약", "https://example.com/research-first")
+    second_id = _complete("두 번째 조사 요약", "https://example.com/research-second")
+
+    latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert latest.status_code == 200, latest.text
+    run = latest.json()["run"]
+    assert run is not None
+    assert run["id"] == str(second_id)
+    assert run["status"] == "READY"
+    assert run["research_summary"] == "두 번째 조사 요약"
+    assert run["result_count"] == 2
+    assert run["completed_at"] is not None
+    # Lightweight payload — idea evidence is fetched separately.
+    assert run["evidence"] == []
+
+    # Past READY run still exists (history preserved).
+    assert db.get(WebResearchRun, first_id) is not None
+    assert db.get(WebResearchRun, first_id).status == WebResearchRunStatus.READY.value
+    evidence_count = db.scalar(
+        select(func.count()).select_from(WebEvidence).where(
+            WebEvidence.research_run_id.in_((first_id, second_id))
+        )
+    )
+    assert evidence_count == 4
+
+    # Isolation: other idea must not receive this run.
+    other_latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{other_idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert other_latest.status_code == 200
+    assert other_latest.json()["run"] is None
+
+    # Workspace member with idea read can restore summary (not requester-only).
+    _login(client, other.email, other_pw)
+    member_latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert member_latest.status_code == 200
+    assert member_latest.json()["run"]["research_summary"] == "두 번째 조사 요약"
+
+    # Non-member cannot access.
+    _login(client, stranger.email, stranger_pw)
+    forbidden = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert forbidden.status_code == 404
+
+
+def test_latest_idea_research_run_survives_failed_followup(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """Failed newer run must not hide previous READY summary/evidence."""
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws)
+
+    body = _start_research(client, ws, idea["id"])
+    preview = _preview(client, ws, body["id"], queries=["ok-first"], draft=body["draft"])
+    assert (
+        client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{preview['id']}/approve",
+            headers=_headers(client),
+        ).status_code
+        == 200
+    )
+    run_ok = uuid.UUID(preview["id"])
+    _make_research_job_available(db, run_ok)
+
+    class OkLlm(FakeLlmProvider):
+        def refine_idea_with_evidence(self, request):
+            self.calls += 1
+            ev0 = str(request.evidence[0].evidence_id)
+            return EvidenceRefinementResult(
+                draft={},
+                evidence_links={"background": [ev0]},
+                research_summary="성공 요약",
+            )
+
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=OkLlm(),
+        search_provider=FakeSearchProvider(url="https://example.com/ok-run"),
+    )
+
+    # New research attempt that fails after approve.
+    body2 = _start_research(client, ws, idea["id"])
+    preview2 = _preview(client, ws, body2["id"], queries=["will-fail"], draft=body2["draft"])
+    assert (
+        client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions/{body2['id']}/research-runs/{preview2['id']}/approve",
+            headers=_headers(client),
+        ).status_code
+        == 200
+    )
+    run_fail = uuid.UUID(preview2["id"])
+    _make_research_job_available(db, run_fail)
+
+    class FailSearch(FakeSearchProvider):
+        def search(self, *, query: str, max_results: int):
+            FakeSearchProvider.calls += 1
+            from app.web_search.exceptions import WebSearchTimeoutError
+
+            raise WebSearchTimeoutError("search down")
+
+    for _ in range(5):
+        _make_research_job_available(db, run_fail)
+        ai_worker.run_once(
+            session_factory=session_factory,
+            provider=FakeLlmProvider([]),
+            search_provider=FailSearch(),
+        )
+        db.expire_all()
+        failed_row = db.get(WebResearchRun, run_fail)
+        if failed_row is not None and failed_row.status == WebResearchRunStatus.FAILED.value:
+            break
+    failed = db.get(WebResearchRun, run_fail)
+    assert failed is not None
+    assert failed.status == WebResearchRunStatus.FAILED.value
+
+    latest = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/latest",
+        headers=_headers(client),
+    )
+    assert latest.status_code == 200
+    run = latest.json()["run"]
+    assert run["id"] == str(run_ok)
+    assert run["research_summary"] == "성공 요약"
+
+    evidence = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/evidence",
+        headers=_headers(client),
+    )
+    assert evidence.status_code == 200
+    assert len(evidence.json()["items"]) >= 1

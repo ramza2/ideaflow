@@ -11,11 +11,11 @@
 
 F5/재진입 후에도 조사 결과가 유지되도록 Research 결과 서버 영속 저장 및 Idea 상세 재조회/복원 흐름 구현.
 
-대상:
+→ **Step 20에서 구현됨.** 상세: `docs/step-20-research-persistence.md`
 
-- 조사 요약
-- 상세 조사 결과
-- 근거 자료 / 출처
-- 최신 Research 상태
+남은 확장:
 
-주의: 전역 AI Task 알림과 Research 결과 데이터 책임을 분리할 것.
+- Research history UI
+- 이전 조사 버전 비교
+- source별 상세 provenance UI
+- Semantic / Hybrid Search UI

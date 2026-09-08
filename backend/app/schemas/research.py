@@ -85,3 +85,9 @@ class IdeaResearchSessionLatestResponse(BaseModel):
     """Active/recovery RESEARCH session for the current requester on an Idea."""
 
     session: AiSessionPublic | None = None
+
+
+class IdeaResearchLatestResponse(BaseModel):
+    """Latest completed (READY) research run for an Idea — F5 / re-entry restore."""
+
+    run: WebResearchRunPublic | None = None
