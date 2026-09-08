@@ -39,11 +39,11 @@ tab → F5 restore → AI 작업 indicator → mobile viewport → back navigati
 | Medium | 0 open |
 | Low | 2 noted (below) |
 
-Embedding coverage after smoke:
+Embedding coverage after smoke (then restored after pytest wipe + `--all`):
 
 ```text
-coverage total=1051 with_embedding=1051 without_embedding=0 percent=100.0
-jobs_queued=0 jobs_running=0 jobs_succeeded=1051 jobs_failed=0
+coverage total=1124 with_embedding=1124 without_embedding=0 percent=100.0
+jobs_queued=0 jobs_running=0 jobs_succeeded=1124 jobs_failed=0
 ```
 
 Data integrity (spot SQL): embedding/session/research/evidence orphans = 0;
