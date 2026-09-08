@@ -27,7 +27,6 @@ from app.models.enums import (
     WorkspaceRole,
     WorkspaceType,
 )
-from app.models.idea import Idea
 from app.models.research import WebResearchRun
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember
