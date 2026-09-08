@@ -54,6 +54,7 @@ export function useWebResearch(
   const cancelledRef = useRef(false);
   const timerRef = useRef<number | null>(null);
   const hasRunRef = useRef(false);
+  const responseGenerationRef = useRef(0);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current != null) {
@@ -78,10 +79,18 @@ export function useWebResearch(
       if (!workspaceId || !sessionId || !enabled) return null;
       if (inFlightKeyRef.current === requestKey) return null;
 
+      const generation = responseGenerationRef.current;
       inFlightKeyRef.current = requestKey;
       try {
         const response = await getLatestWebResearchRun(workspaceId, sessionId);
-        if (!shouldApplyResearchResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+        if (
+          generation !== responseGenerationRef.current ||
+          !shouldApplyResearchResponse(
+            activeKeyRef.current,
+            requestKey,
+            cancelledRef.current,
+          )
+        ) {
           return null;
         }
         const next = response.run;
@@ -89,7 +98,14 @@ export function useWebResearch(
         setLoading(false);
         return next;
       } catch (err) {
-        if (!shouldApplyResearchResponse(activeKeyRef.current, requestKey, cancelledRef.current)) {
+        if (
+          generation !== responseGenerationRef.current ||
+          !shouldApplyResearchResponse(
+            activeKeyRef.current,
+            requestKey,
+            cancelledRef.current,
+          )
+        ) {
           return null;
         }
         const message = apiErrorMessage(err, "웹 조사 상태를 불러오지 못했습니다.");
@@ -162,10 +178,42 @@ export function useWebResearch(
     return next;
   }, [workspaceId, sessionId, fetchOnce, startPollingLoop]);
 
+  const adoptRun = useCallback(
+    (next: WebResearchRun) => {
+      const requestKey = researchRequestKey(workspaceId, sessionId);
+      if (!requestKey) return;
+
+      if (
+        !shouldApplyResearchResponse(
+          activeKeyRef.current,
+          requestKey,
+          cancelledRef.current,
+        )
+      ) {
+        return;
+      }
+
+      // Invalidate any GET that started before this mutation response.
+      responseGenerationRef.current += 1;
+
+      applyRun(next, requestKey);
+      setLoading(false);
+
+      if (shouldPollResearch(next.status)) {
+        startPollingLoop(requestKey);
+      } else {
+        clearTimer();
+      }
+    },
+    [workspaceId, sessionId, applyRun, startPollingLoop, clearTimer],
+  );
+
   useEffect(() => {
     const requestKey = researchRequestKey(workspaceId, sessionId);
     activeKeyRef.current = requestKey;
     cancelledRef.current = false;
+    // Drop pending responses from the previous session/key binding.
+    responseGenerationRef.current += 1;
     setLoading(true);
     setError(null);
     setPollError(null);
@@ -206,6 +254,7 @@ export function useWebResearch(
     error,
     pollError,
     refresh,
+    adoptRun,
     inProgress: isResearchInProgress(run?.status),
   };
 }

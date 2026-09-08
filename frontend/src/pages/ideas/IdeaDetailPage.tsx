@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { clsx } from "clsx";
 import {
@@ -137,6 +137,8 @@ export function IdeaDetailPage() {
   const [startingResearch, setStartingResearch] = useState(false);
   const [researchNotice, setResearchNotice] = useState<string | null>(null);
   const [lastCompletedRunId, setLastCompletedRunId] = useState<string | null>(null);
+  const researchApprovalInFlightRef = useRef(false);
+  const submittedResearchRunIdRef = useRef<string | null>(null);
 
   const [comments, setComments] = useState<IdeaComment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(false);
@@ -236,6 +238,7 @@ export function IdeaDetailPage() {
     run: researchRun,
     inProgress: researchInProgress,
     refresh: refreshResearch,
+    adoptRun,
   } = useWebResearch(workspaceId, researchSessionId ?? undefined, {
     enabled: Boolean(workspaceId && researchSessionId),
   });
@@ -261,17 +264,31 @@ export function IdeaDetailPage() {
       });
   }, [researchRun, workspaceId, ideaId, lastCompletedRunId]);
 
-  // Re-open approval panel when recovering AWAITING_APPROVAL.
+  // Re-open approval panel when recovering AWAITING_APPROVAL (reload recovery).
+  // Do not reopen a run that this tab just submitted for approval (stale AWAITING).
   useEffect(() => {
     if (!researchRun || researchPanelOpen || startingResearch) return;
-    if (researchRun.status === "AWAITING_APPROVAL") {
-      setPreviewRun(researchRun);
-      if (researchRun.queries_to_send?.length) {
-        setResearchQueries(researchRun.queries_to_send);
-      }
-      setResearchPanelOpen(true);
+    if (researchRun.status !== "AWAITING_APPROVAL") return;
+    if (submittedResearchRunIdRef.current === researchRun.id) return;
+    setPreviewRun(researchRun);
+    if (researchRun.queries_to_send?.length) {
+      setResearchQueries(researchRun.queries_to_send);
     }
+    setResearchPanelOpen(true);
   }, [researchRun, researchPanelOpen, startingResearch]);
+
+  // Once a run leaves AWAITING_APPROVAL, never keep the approval modal open.
+  useEffect(() => {
+    if (!researchRun || researchRun.status === "AWAITING_APPROVAL") return;
+    if (submittedResearchRunIdRef.current === researchRun.id) {
+      submittedResearchRunIdRef.current = null;
+    }
+    if (researchPanelOpen) {
+      setResearchPanelOpen(false);
+    }
+    setPreviewRun((current) => (current?.id === researchRun.id ? null : current));
+    setResearchError(null);
+  }, [researchRun, researchPanelOpen]);
 
   useEffect(() => {
     if (!workspaceId || !ideaId || tab !== "discussion") return;
@@ -465,6 +482,8 @@ export function IdeaDetailPage() {
       toast.error("이 아이디어에 대한 웹 조사가 이미 진행 중입니다.");
       return;
     }
+    submittedResearchRunIdRef.current = null;
+    researchApprovalInFlightRef.current = false;
     setStartingResearch(true);
     setResearchError(null);
     setResearchNotice(null);
@@ -495,6 +514,8 @@ export function IdeaDetailPage() {
   }
 
   function clearResearchControlState() {
+    submittedResearchRunIdRef.current = null;
+    researchApprovalInFlightRef.current = false;
     setResearchPanelOpen(false);
     setPreviewRun(null);
     setResearchSessionId(null);
@@ -540,22 +561,38 @@ export function IdeaDetailPage() {
   }
 
   async function handleResearchApprove() {
-    if (!workspaceId || !researchSessionId || !previewRun || approvingResearch) return;
+    if (
+      !workspaceId ||
+      !researchSessionId ||
+      !previewRun ||
+      approvingResearch ||
+      researchApprovalInFlightRef.current
+    ) {
+      return;
+    }
+
+    const runId = previewRun.id;
+    researchApprovalInFlightRef.current = true;
+    submittedResearchRunIdRef.current = runId;
     setApprovingResearch(true);
     setResearchError(null);
     try {
-      await approveWebResearch(workspaceId, researchSessionId, previewRun.id);
+      const approvedRun = await approveWebResearch(workspaceId, researchSessionId, runId);
+      adoptRun(approvedRun);
       setResearchPanelOpen(false);
       setPreviewRun(null);
-      await refreshResearch();
+      setResearchError(null);
       toast.info("웹 검색을 시작합니다", "검색 결과는 근거 자료에 추가됩니다.");
     } catch (err) {
+      // Approval did not succeed — allow retry / recovery of this run.
+      submittedResearchRunIdRef.current = null;
       if (err instanceof ApiError && err.code === "IDEA_RESEARCH_SOURCE_CHANGED") {
         handleResearchSourceChanged();
         return;
       }
       setResearchError(apiErrorMessage(err, "검색 승인에 실패했습니다."));
     } finally {
+      researchApprovalInFlightRef.current = false;
       setApprovingResearch(false);
     }
   }
@@ -572,6 +609,9 @@ export function IdeaDetailPage() {
         // ignore cancel errors on close
       }
     }
+    if (previewRun && submittedResearchRunIdRef.current === previewRun.id) {
+      submittedResearchRunIdRef.current = null;
+    }
     setResearchPanelOpen(false);
     setPreviewRun(null);
     setResearchError(null);
@@ -583,6 +623,9 @@ export function IdeaDetailPage() {
     setResearchError(null);
     try {
       await cancelWebResearch(workspaceId, researchSessionId, previewRun.id);
+      if (submittedResearchRunIdRef.current === previewRun.id) {
+        submittedResearchRunIdRef.current = null;
+      }
       setPreviewRun(null);
       await refreshResearch();
     } catch (err) {
