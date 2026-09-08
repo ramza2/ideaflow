@@ -198,6 +198,8 @@ export type IdeaUpdateRequest = Partial<
   Omit<IdeaCreateRequest, "shares">
 >;
 
+export type IdeaSearchMode = "keyword" | "semantic" | "hybrid";
+
 export interface IdeaListParams {
   q?: string;
   stage_id?: string;
@@ -209,7 +211,7 @@ export interface IdeaListParams {
   assignee_id?: string;
   limit?: number;
   offset?: number;
-  search_mode?: "keyword" | "semantic" | "hybrid";
+  search_mode?: IdeaSearchMode;
 }
 
 /* --- Step 8: AI Session --- */
