@@ -363,6 +363,16 @@ docker compose \
   python -m app.cli.enqueue_embeddings --all
 ```
 
+Useful CLI flags:
+
+```bash
+python -m app.cli.enqueue_embeddings --coverage
+python -m app.cli.enqueue_embeddings --all --dry-run
+python -m app.cli.enqueue_embeddings --all --limit 100
+python -m app.cli.enqueue_embeddings --workspace-id <UUID>
+```
+
+See `docs/step-22-embedding-enablement.md` for local smoke setup and ENV details.
 Optional frontend build-time search mode (default `keyword`):
 
 ```text

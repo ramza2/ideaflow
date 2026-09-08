@@ -91,6 +91,52 @@ def _reset_job_for_hash(
     job.last_error_message = None
 
 
+def _is_current_embedding(
+    *,
+    existing: IdeaEmbedding | None,
+    content_hash: str,
+    settings: Settings,
+    force: bool,
+) -> bool:
+    return (
+        not force
+        and existing is not None
+        and is_embedding_current(
+            stored_hash=existing.content_hash,
+            stored_model=existing.model_name,
+            stored_dimension=existing.dimension,
+            current_hash=content_hash,
+            settings=settings,
+        )
+    )
+
+
+def _should_enqueue_or_reset_job(
+    *,
+    force: bool,
+    content_hash: str,
+    had_embedding: bool,
+    job: IdeaEmbeddingJob | None,
+    embedding_enabled: bool,
+) -> bool:
+    """Mirror ``sync_embedding_desired_state`` enqueue/reset decision (no DB writes).
+
+    Call only after the current-embedding short-circuit has been ruled out.
+    """
+    if job is not None:
+        if (
+            not force
+            and not had_embedding
+            and job.content_hash == content_hash
+            and job.status in _ACTIVE_JOB_STATUSES
+        ):
+            return False
+        return True
+    if embedding_enabled:
+        return True
+    return had_embedding
+
+
 def sync_embedding_desired_state(
     db: Session,
     idea: Idea,
@@ -111,16 +157,11 @@ def sync_embedding_desired_state(
     content_hash = compute_idea_content_hash(db, idea)
     existing = db.get(IdeaEmbedding, idea.id)
 
-    if (
-        not force
-        and existing is not None
-        and is_embedding_current(
-            stored_hash=existing.content_hash,
-            stored_model=existing.model_name,
-            stored_dimension=existing.dimension,
-            current_hash=content_hash,
-            settings=cfg,
-        )
+    if _is_current_embedding(
+        existing=existing,
+        content_hash=content_hash,
+        settings=cfg,
+        force=force,
     ):
         return False
 
@@ -128,14 +169,16 @@ def sync_embedding_desired_state(
     invalidate_embedding(db, idea.id)
 
     job = db.get(IdeaEmbeddingJob, idea.id)
+    if not _should_enqueue_or_reset_job(
+        force=force,
+        content_hash=content_hash,
+        had_embedding=had_embedding,
+        job=job,
+        embedding_enabled=cfg.embedding_enabled,
+    ):
+        return False
+
     if job is not None:
-        if (
-            not force
-            and not had_embedding
-            and job.content_hash == content_hash
-            and job.status in _ACTIVE_JOB_STATUSES
-        ):
-            return False
         _reset_job_for_hash(job, content_hash=content_hash, max_attempts=cfg.embedding_job_max_attempts)
         db.add(job)
         db.flush()
@@ -218,14 +261,60 @@ def enqueue_embedding_if_needed(
     return sync_embedding_desired_state(db, idea, settings=cfg, force=force)
 
 
+def embedding_coverage_counts(
+    db: Session,
+    *,
+    workspace_id: UUID | None = None,
+) -> dict[str, int]:
+    """Return active Idea embedding coverage counters."""
+    idea_filter = [Idea.deleted_at.is_(None)]
+    if workspace_id is not None:
+        idea_filter.append(Idea.workspace_id == workspace_id)
+
+    total = int(db.scalar(select(func.count()).select_from(Idea).where(*idea_filter)) or 0)
+    with_embedding_stmt = (
+        select(func.count())
+        .select_from(Idea)
+        .join(IdeaEmbedding, IdeaEmbedding.idea_id == Idea.id)
+        .where(*idea_filter)
+    )
+    with_embedding = int(db.scalar(with_embedding_stmt) or 0)
+    job_counts = embedding_job_counts(db) if workspace_id is None else _workspace_job_counts(db, workspace_id)
+    return {
+        "total": total,
+        "with_embedding": with_embedding,
+        "without_embedding": max(0, total - with_embedding),
+        "jobs_queued": job_counts.get(IdeaEmbeddingJobStatus.QUEUED.value, 0),
+        "jobs_running": job_counts.get(IdeaEmbeddingJobStatus.RUNNING.value, 0),
+        "jobs_succeeded": job_counts.get(IdeaEmbeddingJobStatus.SUCCEEDED.value, 0),
+        "jobs_failed": job_counts.get(IdeaEmbeddingJobStatus.FAILED.value, 0),
+    }
+
+
+def _workspace_job_counts(db: Session, workspace_id: UUID) -> dict[str, int]:
+    rows = db.execute(
+        select(IdeaEmbeddingJob.status, func.count())
+        .join(Idea, Idea.id == IdeaEmbeddingJob.idea_id)
+        .where(Idea.workspace_id == workspace_id, Idea.deleted_at.is_(None))
+        .group_by(IdeaEmbeddingJob.status)
+    ).all()
+    return {status: int(count) for status, count in rows}
+
+
 def scan_ideas_for_enqueue(
     db: Session,
     *,
     workspace_id: UUID | None = None,
     force: bool = False,
     settings: Settings | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
 ) -> tuple[int, int, int]:
-    """Return (scanned, already_current, queued)."""
+    """Return (scanned, already_current, queued).
+
+    When ``dry_run`` is true, count ideas that would be queued without writing.
+    ``limit`` caps how many non-deleted ideas are considered (stable by id).
+    """
     from app.services.integration_runtime_config import resolve_embedding_settings
 
     if settings is None:
@@ -238,9 +327,13 @@ def scan_ideas_for_enqueue(
     if not cfg.embedding_enabled:
         return 0, 0, 0
 
-    stmt = select(Idea).where(Idea.deleted_at.is_(None))
+    stmt = select(Idea).where(Idea.deleted_at.is_(None)).order_by(Idea.id)
     if workspace_id is not None:
         stmt = stmt.where(Idea.workspace_id == workspace_id)
+    if limit is not None:
+        if limit < 1:
+            return 0, 0, 0
+        stmt = stmt.limit(limit)
     ideas = list(db.scalars(stmt))
     scanned = len(ideas)
     already_current = 0
@@ -248,18 +341,24 @@ def scan_ideas_for_enqueue(
     for idea in ideas:
         content_hash = compute_idea_content_hash(db, idea)
         existing = db.get(IdeaEmbedding, idea.id)
-        if (
-            not force
-            and existing is not None
-            and is_embedding_current(
-                stored_hash=existing.content_hash,
-                stored_model=existing.model_name,
-                stored_dimension=existing.dimension,
-                current_hash=content_hash,
-                settings=cfg,
-            )
+        if _is_current_embedding(
+            existing=existing,
+            content_hash=content_hash,
+            settings=cfg,
+            force=force,
         ):
             already_current += 1
+            continue
+        if dry_run:
+            job = db.get(IdeaEmbeddingJob, idea.id)
+            if _should_enqueue_or_reset_job(
+                force=force,
+                content_hash=content_hash,
+                had_embedding=existing is not None,
+                job=job,
+                embedding_enabled=cfg.embedding_enabled,
+            ):
+                queued += 1
             continue
         if sync_embedding_desired_state(db, idea, settings=cfg, force=force):
             queued += 1
