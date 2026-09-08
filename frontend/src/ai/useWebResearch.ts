@@ -162,6 +162,23 @@ export function useWebResearch(
     return next;
   }, [workspaceId, sessionId, fetchOnce, startPollingLoop]);
 
+  const adoptRun = useCallback(
+    (next: WebResearchRun) => {
+      const requestKey = researchRequestKey(workspaceId, sessionId);
+      if (!requestKey) return;
+
+      applyRun(next, requestKey);
+      setLoading(false);
+
+      if (shouldPollResearch(next.status)) {
+        startPollingLoop(requestKey);
+      } else {
+        clearTimer();
+      }
+    },
+    [workspaceId, sessionId, applyRun, startPollingLoop, clearTimer],
+  );
+
   useEffect(() => {
     const requestKey = researchRequestKey(workspaceId, sessionId);
     activeKeyRef.current = requestKey;
@@ -206,6 +223,7 @@ export function useWebResearch(
     error,
     pollError,
     refresh,
+    adoptRun,
     inProgress: isResearchInProgress(run?.status),
   };
 }

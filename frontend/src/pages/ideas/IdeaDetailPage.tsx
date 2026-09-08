@@ -238,6 +238,7 @@ export function IdeaDetailPage() {
     run: researchRun,
     inProgress: researchInProgress,
     refresh: refreshResearch,
+    adoptRun,
   } = useWebResearch(workspaceId, researchSessionId ?? undefined, {
     enabled: Boolean(workspaceId && researchSessionId),
   });
@@ -577,13 +578,10 @@ export function IdeaDetailPage() {
     setResearchError(null);
     try {
       const approvedRun = await approveWebResearch(workspaceId, researchSessionId, runId);
+      adoptRun(approvedRun);
       setResearchPanelOpen(false);
       setPreviewRun(null);
       setResearchError(null);
-      // Server returns QUEUED on success; keep submittedResearchRunIdRef until
-      // researchRun catches up so stale AWAITING cannot reopen the modal.
-      void approvedRun.status;
-      await refreshResearch();
       toast.info("웹 검색을 시작합니다", "검색 결과는 근거 자료에 추가됩니다.");
     } catch (err) {
       // Approval did not succeed — allow retry / recovery of this run.
