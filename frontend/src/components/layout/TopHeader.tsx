@@ -15,6 +15,7 @@ import {
 import { Avatar } from "../common/Avatar";
 import { Button } from "../common/Button";
 import { IdeaCreateMenu } from "../ideas/IdeaCreateMenu";
+import { AiTasksIndicator } from "./AiTasksIndicator";
 import { toast } from "../common/Toast";
 import { useAuth } from "../../auth/AuthProvider";
 import { useWorkspace } from "../../workspace/WorkspaceProvider";
@@ -315,6 +316,8 @@ export function TopHeader({ workspaceId, onWorkspaceChange, onMobileMenuToggle }
             </Button>
           )}
         />
+
+        <AiTasksIndicator />
 
         {/* Notifications */}
         <div ref={notifRef} className="relative">

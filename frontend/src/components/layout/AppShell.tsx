@@ -4,6 +4,7 @@ import { clsx } from "clsx";
 import { TopHeader } from "./TopHeader";
 import { Sidebar } from "./Sidebar";
 import { ToastContainer } from "../common/Toast";
+import { AiTasksProvider } from "../../ai/AiTasksProvider";
 import { useWorkspace, WorkspaceEmptyState } from "../../workspace/WorkspaceProvider";
 
 export function AppShell() {
@@ -37,38 +38,40 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-[#f8f8f9]">
-      <TopHeader
-        workspaceId={effectiveWorkspaceId}
-        onWorkspaceChange={handleWorkspaceChange}
-        onMobileMenuToggle={() => setMobileOpen(!mobileOpen)}
-      />
-      <div className="flex flex-1 overflow-hidden relative">
-        {mobileOpen && (
-          <div
-            className="fixed inset-0 bg-black/30 z-30 md:hidden"
-            onClick={() => setMobileOpen(false)}
-          />
-        )}
-        <div
-          className={clsx(
-            "md:relative fixed inset-y-0 left-0 z-40 md:z-auto transition-transform duration-200",
-            "md:translate-x-0",
-            mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
+    <AiTasksProvider workspaceId={effectiveWorkspaceId}>
+      <div className="flex flex-col h-screen overflow-hidden bg-[#f8f8f9]">
+        <TopHeader
+          workspaceId={effectiveWorkspaceId}
+          onWorkspaceChange={handleWorkspaceChange}
+          onMobileMenuToggle={() => setMobileOpen(!mobileOpen)}
+        />
+        <div className="flex flex-1 overflow-hidden relative">
+          {mobileOpen && (
+            <div
+              className="fixed inset-0 bg-black/30 z-30 md:hidden"
+              onClick={() => setMobileOpen(false)}
+            />
           )}
-        >
-          <Sidebar
-            workspaceId={effectiveWorkspaceId}
-            collapsed={collapsed}
-            onToggle={() => setCollapsed(!collapsed)}
-          />
-        </div>
+          <div
+            className={clsx(
+              "md:relative fixed inset-y-0 left-0 z-40 md:z-auto transition-transform duration-200",
+              "md:translate-x-0",
+              mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
+            )}
+          >
+            <Sidebar
+              workspaceId={effectiveWorkspaceId}
+              collapsed={collapsed}
+              onToggle={() => setCollapsed(!collapsed)}
+            />
+          </div>
 
-        <main className="flex-1 overflow-y-auto">
-          <Outlet />
-        </main>
+          <main className="flex-1 overflow-y-auto">
+            <Outlet />
+          </main>
+        </div>
+        <ToastContainer />
       </div>
-      <ToastContainer />
-    </div>
+    </AiTasksProvider>
   );
 }
