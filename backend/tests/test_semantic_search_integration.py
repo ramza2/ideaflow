@@ -42,7 +42,12 @@ from app.services.embedding_worker import (
     run_once,
 )
 from app.services.workspace import seed_workspace_defaults
-from tests.pgvector_helpers import DATABASE_URL, requires_database, requires_pgvector
+from tests.pgvector_helpers import (
+    DATABASE_URL,
+    requires_database,
+    requires_pgvector,
+    wipe_embedding_tables,
+)
 
 pytestmark = [requires_database, requires_pgvector]
 
@@ -62,12 +67,7 @@ def engine():
     cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
     command.upgrade(cfg, "head")
     with eng.begin() as conn:
-        conn.execute(
-            text(
-                "TRUNCATE idea_embedding_jobs, idea_embeddings, "
-                "integration_config_audits, integration_runtime_configs CASCADE"
-            )
-        )
+        wipe_embedding_tables(conn)
     yield eng
     eng.dispose()
     reset_engine()
@@ -79,12 +79,7 @@ def db(engine) -> Session:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
     try:
-        session.execute(
-            text(
-                "TRUNCATE idea_embedding_jobs, idea_embeddings, "
-                "integration_config_audits, integration_runtime_configs CASCADE"
-            )
-        )
+        wipe_embedding_tables(session)
         session.commit()
         yield session
     finally:
