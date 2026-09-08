@@ -218,14 +218,60 @@ def enqueue_embedding_if_needed(
     return sync_embedding_desired_state(db, idea, settings=cfg, force=force)
 
 
+def embedding_coverage_counts(
+    db: Session,
+    *,
+    workspace_id: UUID | None = None,
+) -> dict[str, int]:
+    """Return active Idea embedding coverage counters."""
+    idea_filter = [Idea.deleted_at.is_(None)]
+    if workspace_id is not None:
+        idea_filter.append(Idea.workspace_id == workspace_id)
+
+    total = int(db.scalar(select(func.count()).select_from(Idea).where(*idea_filter)) or 0)
+    with_embedding_stmt = (
+        select(func.count())
+        .select_from(Idea)
+        .join(IdeaEmbedding, IdeaEmbedding.idea_id == Idea.id)
+        .where(*idea_filter)
+    )
+    with_embedding = int(db.scalar(with_embedding_stmt) or 0)
+    job_counts = embedding_job_counts(db) if workspace_id is None else _workspace_job_counts(db, workspace_id)
+    return {
+        "total": total,
+        "with_embedding": with_embedding,
+        "without_embedding": max(0, total - with_embedding),
+        "jobs_queued": job_counts.get(IdeaEmbeddingJobStatus.QUEUED.value, 0),
+        "jobs_running": job_counts.get(IdeaEmbeddingJobStatus.RUNNING.value, 0),
+        "jobs_succeeded": job_counts.get(IdeaEmbeddingJobStatus.SUCCEEDED.value, 0),
+        "jobs_failed": job_counts.get(IdeaEmbeddingJobStatus.FAILED.value, 0),
+    }
+
+
+def _workspace_job_counts(db: Session, workspace_id: UUID) -> dict[str, int]:
+    rows = db.execute(
+        select(IdeaEmbeddingJob.status, func.count())
+        .join(Idea, Idea.id == IdeaEmbeddingJob.idea_id)
+        .where(Idea.workspace_id == workspace_id, Idea.deleted_at.is_(None))
+        .group_by(IdeaEmbeddingJob.status)
+    ).all()
+    return {status: int(count) for status, count in rows}
+
+
 def scan_ideas_for_enqueue(
     db: Session,
     *,
     workspace_id: UUID | None = None,
     force: bool = False,
     settings: Settings | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
 ) -> tuple[int, int, int]:
-    """Return (scanned, already_current, queued)."""
+    """Return (scanned, already_current, queued).
+
+    When ``dry_run`` is true, count ideas that would be queued without writing.
+    ``limit`` caps how many non-deleted ideas are considered (stable by id).
+    """
     from app.services.integration_runtime_config import resolve_embedding_settings
 
     if settings is None:
@@ -238,9 +284,13 @@ def scan_ideas_for_enqueue(
     if not cfg.embedding_enabled:
         return 0, 0, 0
 
-    stmt = select(Idea).where(Idea.deleted_at.is_(None))
+    stmt = select(Idea).where(Idea.deleted_at.is_(None)).order_by(Idea.id)
     if workspace_id is not None:
         stmt = stmt.where(Idea.workspace_id == workspace_id)
+    if limit is not None:
+        if limit < 1:
+            return 0, 0, 0
+        stmt = stmt.limit(limit)
     ideas = list(db.scalars(stmt))
     scanned = len(ideas)
     already_current = 0
@@ -260,6 +310,9 @@ def scan_ideas_for_enqueue(
             )
         ):
             already_current += 1
+            continue
+        if dry_run:
+            queued += 1
             continue
         if sync_embedding_desired_state(db, idea, settings=cfg, force=force):
             queued += 1
