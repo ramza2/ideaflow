@@ -129,12 +129,18 @@ Step 7 adds revision `0003_ai_sessions_jobs` (`idea_ai_sessions`, `ai_jobs`).
 
 ## Tests
 
+Integration tests require a **dedicated** database via `TEST_DATABASE_URL`.
+They never fall back to `DATABASE_URL` (shared/dev DB protection — Step 24).
+
 ```bash
 cd backend
 export DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
+export TEST_DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow_test
 export AI_WORKER_ENABLED=false
 pytest
 ```
+
+Unit tests run without `TEST_DATABASE_URL`. See `docs/testing.md`.
 
 Optional real LLM integration (not required for CI):
 

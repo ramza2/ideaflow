@@ -54,12 +54,11 @@ from app.web_search.exceptions import (
     WebSearchTimeoutError,
 )
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping admin integration tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 
 class FakeLlmProvider:
@@ -120,6 +119,7 @@ class FakeWebSearchProvider:
 @pytest.fixture(autouse=True)
 def _clean_system_settings(engine):
     with engine.begin() as conn:
+        assert_test_database_safe(conn)
         conn.execute(text("DELETE FROM system_settings"))
         conn.execute(text("DELETE FROM integration_config_audits"))
         conn.execute(text("DELETE FROM integration_runtime_configs"))
@@ -131,6 +131,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     yield eng
     eng.dispose()
     reset_engine()

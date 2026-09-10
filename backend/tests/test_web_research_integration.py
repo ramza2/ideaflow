@@ -48,12 +48,11 @@ from app.web_search.base import WebSearchResult
 from app.web_search.exceptions import WebSearchTimeoutError
 from app.web_search.http_json import HttpJsonWebSearchProvider
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping web research integration tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 PRIVATE_MARKER = "PRIVATE_SECRET_IDEA_MARKER_987654"
 
@@ -143,6 +142,7 @@ def _refine_result(evidence_id: str) -> EvidenceRefinementResult:
 @pytest.fixture(autouse=True)
 def _clean_tables(engine):
     with engine.begin() as conn:
+        assert_test_database_safe(conn)
         conn.execute(text("DELETE FROM web_evidence"))
         conn.execute(text("DELETE FROM web_research_runs"))
         conn.execute(text("DELETE FROM ai_jobs"))
@@ -155,6 +155,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     yield eng
     eng.dispose()
     reset_engine()

@@ -29,17 +29,17 @@ from app.models.enums import (
     WorkspaceType,
 )
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping PostgreSQL integration tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 
 @pytest.fixture(scope="module")
 def engine():
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     yield eng
     eng.dispose()
 

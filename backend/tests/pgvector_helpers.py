@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import os
-import warnings
-
 import pytest
 from sqlalchemy import create_engine, text
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-
-requires_database = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping PostgreSQL integration tests",
+from tests.db_test_safety import (
+    TEST_DATABASE_URL,
+    assert_test_database_safe,
+    require_test_database_url,
+    requires_test_database,
 )
+
+# Backwards-compatible alias used by older imports in this suite.
+# Integration tests must use TEST_DATABASE_URL — never fall back to DATABASE_URL.
+DATABASE_URL = TEST_DATABASE_URL
+
+requires_database = requires_test_database
 
 _EMBEDDING_TRUNCATE_SQL = (
     "TRUNCATE idea_embedding_jobs, idea_embeddings, "
@@ -24,25 +27,19 @@ _EMBEDDING_TRUNCATE_SQL = (
 def wipe_embedding_tables(execute_target) -> None:
     """Truncate embedding tables for integration-test isolation.
 
-    Integration suites historically wipe *all* embedding rows. When
-    ``DATABASE_URL`` points at a shared/dev DB used by a live app/worker,
-    coverage drops to ~0% until ``python -m app.cli.enqueue_embeddings --all``
-    re-queues missing ideas. Prefer a dedicated test database in CI.
+    Refuses to run unless the bound engine/URL is a dedicated test database.
     """
-    warnings.warn(
-        "Wiping idea_embeddings / idea_embedding_jobs on DATABASE_URL "
-        "(shared DB will need enqueue_embeddings --all afterwards)",
-        UserWarning,
-        stacklevel=2,
-    )
-    # Session.execute or Connection.execute
+    assert_test_database_safe(execute_target)
     execute_target.execute(text(_EMBEDDING_TRUNCATE_SQL))
 
 
 def pgvector_available() -> bool:
-    if not DATABASE_URL:
+    if not TEST_DATABASE_URL:
         return False
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # Unsafe TEST_DATABASE_URL must fail loudly via session fixture / callers —
+    # do not hide it behind a skip by returning False here.
+    assert_test_database_safe(TEST_DATABASE_URL)
+    engine = create_engine(TEST_DATABASE_URL, pool_pre_ping=True)
     try:
         with engine.connect() as conn:
             version = conn.execute(
@@ -56,6 +53,11 @@ def pgvector_available() -> bool:
 
 
 requires_pgvector = pytest.mark.skipif(
-    not pgvector_available(),
-    reason="pgvector extension not available in DATABASE_URL PostgreSQL",
+    not TEST_DATABASE_URL or not pgvector_available(),
+    reason="pgvector extension not available in TEST_DATABASE_URL PostgreSQL",
 )
+
+
+def integration_database_url() -> str:
+    """Resolved TEST_DATABASE_URL after safety checks (skips when unset)."""
+    return require_test_database_url()

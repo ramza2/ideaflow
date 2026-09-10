@@ -29,17 +29,17 @@ from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceStage
 from app.services.workspace import seed_workspace_defaults
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping collaboration integration tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 
 @pytest.fixture(autouse=True)
 def _clean_collaboration_tables(engine):
     with engine.begin() as conn:
+        assert_test_database_safe(conn)
         conn.execute(text("DELETE FROM notifications"))
         conn.execute(text("DELETE FROM idea_comment_mentions"))
         conn.execute(text("DELETE FROM idea_comments"))
@@ -52,6 +52,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     yield eng
     eng.dispose()
     reset_engine()

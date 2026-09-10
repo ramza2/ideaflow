@@ -12,7 +12,9 @@ from app.main import app
 
 client = TestClient(app)
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
+
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
 
 
 def test_health_returns_ok() -> None:
@@ -50,13 +52,11 @@ def test_health_ready_returns_503_when_db_unavailable() -> None:
     assert "database_url" not in str(body).lower()
 
 
-@pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping health readiness integration test",
-)
+@requires_test_database
 def test_health_ready_returns_ready_with_configured_postgresql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert_test_database_safe(DATABASE_URL)
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
     get_settings.cache_clear()
     reset_engine()
