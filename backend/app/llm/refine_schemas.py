@@ -93,6 +93,38 @@ class IdeaRefinementPatch(BaseModel):
     feasibility: IdeaFeasibility | None = None
     tags: list[str] | None = None
 
+    @field_validator(
+        "background",
+        "problem",
+        "core_concept",
+        "major_features",
+        "expected_effect",
+        "target_users",
+        "scenarios",
+        "challenges",
+        "minimum_validation",
+        "related_project",
+        mode="before",
+    )
+    @classmethod
+    def coerce_text_list_fields(cls, value: Any) -> Any:
+        """Accept LLM bullet arrays as multiline text (common Qwen/JSON drift)."""
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                elif item is None:
+                    continue
+                else:
+                    raise ValueError("text fields must be strings or string lists")
+            return "\n".join(parts) if parts else None
+        raise ValueError("text fields must be strings or string lists")
+
     @field_validator("title")
     @classmethod
     def title_nonempty_when_set(cls, value: str | None) -> str | None:

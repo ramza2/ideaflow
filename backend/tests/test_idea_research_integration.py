@@ -126,6 +126,14 @@ def _clean_tables(engine):
         conn.execute(text("DELETE FROM web_research_runs"))
         conn.execute(text("DELETE FROM ai_jobs"))
         conn.execute(text("DELETE FROM idea_ai_sessions"))
+        # Shared-DB hazard: clears all embeddings (re-enqueue with CLI afterwards).
+        import warnings
+
+        warnings.warn(
+            "Research integration fixture deletes idea_embeddings / jobs on shared DATABASE_URL",
+            UserWarning,
+            stacklevel=1,
+        )
         conn.execute(text("DELETE FROM idea_embedding_jobs"))
         conn.execute(text("DELETE FROM idea_embeddings"))
     yield

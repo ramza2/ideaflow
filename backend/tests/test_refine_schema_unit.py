@@ -63,6 +63,30 @@ def test_tags_object_rejected() -> None:
         )
 
 
+def test_text_list_fields_coerced_to_multiline_string() -> None:
+    """Qwen often returns bullet arrays for text fields; coerce to multiline str."""
+    result = parse_refinement_result(
+        """
+        {
+          "decision": "READY_FOR_REVIEW",
+          "draft_patch": {
+            "title": "진료기록 자동화",
+            "one_line_definition": "초안 생성",
+            "problem": "반복 작성 부담",
+            "major_features": ["음성 인식", "템플릿 활용"],
+            "target_users": ["의사", "간호 기록 담당"],
+            "scenarios": ["외래 진료 후 기록"],
+            "challenges": ["정확도 검증"]
+          }
+        }
+        """
+    )
+    assert result.draft_patch["major_features"] == "음성 인식\n템플릿 활용"
+    assert result.draft_patch["target_users"] == "의사\n간호 기록 담당"
+    assert result.draft_patch["scenarios"] == "외래 진료 후 기록"
+    assert result.draft_patch["challenges"] == "정확도 검증"
+
+
 def test_overlong_title_rejected() -> None:
     with pytest.raises(LlmResponseValidationError):
         parse_refinement_result(
