@@ -26,7 +26,7 @@ Both can live in the same PostgreSQL instance (Compose `db` service).
 ## Create the test database
 
 Same Postgres instance as development (Compose `db` service publishes
-`${POSTGRES_PORT:-5432}:5432` for host-side pytest):
+`127.0.0.1:${POSTGRES_PORT:-5432}:5432` for host-side pytest only):
 
 ```bash
 # Docker Compose

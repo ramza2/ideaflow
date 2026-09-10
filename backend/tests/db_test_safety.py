@@ -126,20 +126,6 @@ def _render_url(url_obj: Any) -> str | None:
     return None
 
 
-def _render_url(url_obj: Any) -> str | None:
-    if isinstance(url_obj, str):
-        return url_obj.strip()
-    if isinstance(url_obj, URL):
-        return url_obj.render_as_string(hide_password=False)
-    render = getattr(url_obj, "render_as_string", None)
-    if callable(render):
-        try:
-            return str(render(hide_password=False))
-        except TypeError:
-            return str(render())
-    return None
-
-
 def _url_from_target(target: Any, *, _seen: set[int] | None = None) -> str:
     if target is None:
         raise UnsafeTestDatabaseError("No database target provided for safety check")
@@ -152,7 +138,7 @@ def _url_from_target(target: Any, *, _seen: set[int] | None = None) -> str:
     if isinstance(target, str):
         return target.strip()
     if isinstance(target, URL):
-        return target.url.render_as_string(hide_password=False) if False else target.render_as_string(hide_password=False)
+        return target.render_as_string(hide_password=False)
     if isinstance(target, Engine):
         rendered = _render_url(target.url)
         if rendered:
