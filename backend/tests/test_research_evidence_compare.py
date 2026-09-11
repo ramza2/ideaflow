@@ -86,3 +86,37 @@ def test_compare_ignores_duplicate_urls_keeps_first() -> None:
     assert result["added"] == []
     assert result["removed"] == []
     assert result["unchanged"] == ["https://example.com/a"]
+
+
+def assign_research_versions(
+    items_newest_first: list[dict],
+    total: int,
+    offset: int = 0,
+) -> list[dict]:
+    """Mirrors frontend assignResearchVersions(items, total, offset)."""
+    safe_total = max(0, total)
+    safe_offset = max(0, offset)
+    out = []
+    for index, item in enumerate(items_newest_first):
+        out.append({**item, "version": safe_total - safe_offset - index})
+    return out
+
+
+def test_assign_research_versions_first_page_uses_absolute_total() -> None:
+    items = [{"id": f"r{i}"} for i in range(20)]  # newest-first page
+    versioned = assign_research_versions(items, total=25, offset=0)
+    assert versioned[0]["version"] == 25
+    assert versioned[-1]["version"] == 6
+    assert [v["version"] for v in versioned] == list(range(25, 5, -1))
+
+
+def test_assign_research_versions_second_page() -> None:
+    items = [{"id": f"r{i}"} for i in range(5)]
+    versioned = assign_research_versions(items, total=25, offset=20)
+    assert [v["version"] for v in versioned] == [5, 4, 3, 2, 1]
+
+
+def test_assign_research_versions_small_history() -> None:
+    items = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    versioned = assign_research_versions(items, total=3, offset=0)
+    assert [v["version"] for v in versioned] == [3, 2, 1]

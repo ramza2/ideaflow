@@ -125,17 +125,22 @@ export function compareQueryLists(
   return { added, removed, common };
 }
 
-/** Oldest READY → v1. itemsNewestFirst from API → reverse for numbering. */
+/**
+ * Absolute Research version across the full READY history.
+ *
+ * API returns newest-first pages; oldest READY is always v1 and newest is v{total}.
+ * For a page: version = total - offset - index
+ * (no DB version column).
+ */
 export function assignResearchVersions<T extends { id: string }>(
   itemsNewestFirst: T[],
+  total: number,
+  offset = 0,
 ): Array<T & { version: number }> {
-  const oldestFirst = [...itemsNewestFirst].reverse();
-  const versionById = new Map<string, number>();
-  oldestFirst.forEach((item, idx) => {
-    versionById.set(item.id, idx + 1);
-  });
-  return itemsNewestFirst.map((item) => ({
+  const safeTotal = Math.max(0, total);
+  const safeOffset = Math.max(0, offset);
+  return itemsNewestFirst.map((item, index) => ({
     ...item,
-    version: versionById.get(item.id) ?? 0,
+    version: safeTotal - safeOffset - index,
   }));
 }

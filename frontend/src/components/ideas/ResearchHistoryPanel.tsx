@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, X } from "lucide-react";
 import {
   getIdeaResearchRun,
@@ -80,7 +80,11 @@ export function ResearchHistoryPanel({
   ideaId,
   refreshKey = 0,
 }: Props) {
+  const HISTORY_LIMIT = 20;
+  const HISTORY_OFFSET = 0;
+
   const [items, setItems] = useState<WebResearchRunHistoryItem[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -98,39 +102,67 @@ export function ResearchHistoryPanel({
   const [leftVersion, setLeftVersion] = useState<number | null>(null);
   const [rightVersion, setRightVersion] = useState<number | null>(null);
 
+  // Request sequence guards (same pattern as IdeaListPage) — drop stale responses.
+  const historyReqSeqRef = useRef(0);
+  const detailReqSeqRef = useRef(0);
+  const compareReqSeqRef = useRef(0);
+
   const fetchHistory = useCallback(async () => {
     if (!workspaceId || !ideaId) return;
+    const seq = ++historyReqSeqRef.current;
     setLoading(true);
     setError(null);
     try {
-      const data = await listIdeaResearchRuns(workspaceId, ideaId, { limit: 20 });
+      const data = await listIdeaResearchRuns(workspaceId, ideaId, {
+        limit: HISTORY_LIMIT,
+        offset: HISTORY_OFFSET,
+      });
+      if (seq !== historyReqSeqRef.current) return;
       setItems(data.items);
+      setTotal(data.total);
     } catch (err) {
+      if (seq !== historyReqSeqRef.current) return;
       setError(apiErrorMessage(err, "조사 이력을 불러오지 못했습니다."));
       setItems([]);
+      setTotal(0);
     } finally {
-      setLoading(false);
+      if (seq === historyReqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [workspaceId, ideaId]);
 
   useEffect(() => {
+    // Invalidate in-flight history/detail/compare when Idea/workspace changes.
+    historyReqSeqRef.current += 1;
+    detailReqSeqRef.current += 1;
+    compareReqSeqRef.current += 1;
+
     setItems([]);
+    setTotal(0);
     setError(null);
+    setLoading(false);
     setDetailOpen(false);
     setDetailRun(null);
+    setDetailError(null);
+    setDetailLoading(false);
     setCompareOpen(false);
     setLeftRun(null);
     setRightRun(null);
+    setCompareError(null);
+    setCompareLoading(false);
     void fetchHistory();
   }, [workspaceId, ideaId, refreshKey, fetchHistory]);
 
   const versioned = useMemo(
-    () => assignResearchVersions(items) as VersionedItem[],
-    [items],
+    () =>
+      assignResearchVersions(items, total, HISTORY_OFFSET) as VersionedItem[],
+    [items, total],
   );
   const latestItem = versioned.find((i) => i.is_latest) ?? versioned[0] ?? null;
 
   async function openDetail(item: VersionedItem) {
+    const seq = ++detailReqSeqRef.current;
     setDetailOpen(true);
     setDetailVersion(item.version);
     setDetailRun(null);
@@ -138,16 +170,21 @@ export function ResearchHistoryPanel({
     setDetailLoading(true);
     try {
       const data = await getIdeaResearchRun(workspaceId, ideaId, item.id);
+      if (seq !== detailReqSeqRef.current) return;
       setDetailRun(data.run);
     } catch (err) {
+      if (seq !== detailReqSeqRef.current) return;
       setDetailError(apiErrorMessage(err, "이 조사 결과를 불러올 수 없습니다."));
     } finally {
-      setDetailLoading(false);
+      if (seq === detailReqSeqRef.current) {
+        setDetailLoading(false);
+      }
     }
   }
 
   async function openCompare(item: VersionedItem) {
     if (!latestItem || latestItem.id === item.id) return;
+    const seq = ++compareReqSeqRef.current;
     setCompareOpen(true);
     setLeftRun(null);
     setRightRun(null);
@@ -160,12 +197,16 @@ export function ResearchHistoryPanel({
         getIdeaResearchRun(workspaceId, ideaId, item.id),
         getIdeaResearchRun(workspaceId, ideaId, latestItem.id),
       ]);
+      if (seq !== compareReqSeqRef.current) return;
       setLeftRun(left.run);
       setRightRun(right.run);
     } catch (err) {
+      if (seq !== compareReqSeqRef.current) return;
       setCompareError(apiErrorMessage(err, "비교 데이터를 불러오지 못했습니다."));
     } finally {
-      setCompareLoading(false);
+      if (seq === compareReqSeqRef.current) {
+        setCompareLoading(false);
+      }
     }
   }
 

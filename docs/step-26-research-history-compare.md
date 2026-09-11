@@ -65,3 +65,10 @@ version 계산: UI에서 oldest READY = v1 … newest = vN (DB version 컬럼 �
 ```text
 Migration: none
 ```
+
+
+## Frontend stale-response guard
+
+`ResearchHistoryPanel` uses request-sequence refs (same pattern as Idea list) for
+history / detail / compare fetches. Idea or workspace change invalidates in-flight
+requests so late responses cannot overwrite the current Idea's state.
