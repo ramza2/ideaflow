@@ -29,8 +29,9 @@ Use before first go-live and after major updates.
 - [ ] `pgvector` extension available
 - [ ] `alembic current` == `alembic heads`
 - [ ] Backup script succeeds: `./scripts/backup-postgres.sh`
-- [ ] Restore verified to `ideaflow_restore_test`
+- [ ] Restore verified to fresh `ideaflow_restore_test` (default clean path)
 - [ ] Know **not** to run `docker compose down -v` in production
+- [ ] Know production restore leaves app stopped until compatible deploy
 
 ## Application
 
@@ -66,4 +67,19 @@ Use before first go-live and after major updates.
 ## Rollback readiness
 
 - [ ] Recent dump exists under `backups/`
-- [ ] Operator knows app-only rollback vs backup restore path
+- [ ] Operator knows app-only rollback vs backup restore + compatible revision deploy
+- [ ] Operator knows migration failure is fail-closed (app stays stopped)
+
+## Mini PC go-live (required before trusting production)
+
+Do **not** force a real production DB overwrite test against live data.
+
+- [ ] Current stack running
+- [ ] Run `./scripts/deploy.sh` on an already-up stack
+- [ ] Confirm frontend/backend **stop before** migration
+- [ ] Confirm migration success then normal backend/frontend start
+- [ ] `./scripts/backup-postgres.sh` succeeds
+- [ ] Fresh `ideaflow_restore_test` restore succeeds
+- [ ] `./scripts/smoke-production.sh` passes
+- [ ] Host reboot → containers auto-start
+- [ ] Smoke again after reboot

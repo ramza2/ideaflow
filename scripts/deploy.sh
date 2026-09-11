@@ -46,7 +46,7 @@ Options:
   --build            Build images (default)
   --no-build         Skip image build; use existing images
   --force-recreate   Recreate backend and frontend containers
-  --migrate-only     Start DB, wait for health, run migrations, then exit
+  --migrate-only     Quiesce app, migrate, exit (backend/frontend may remain stopped)
   --configure        Re-run interactive configuration (existing .env as defaults)
   --help             Show this help message
 
@@ -353,10 +353,38 @@ wait_for_service_healthy() {
   fail "${service} did not become healthy. Run: docker compose $(compose_files_display) ps && docker compose $(compose_files_display) logs ${service}"
 }
 
+quiesce_app_traffic() {
+  # Stop web + in-process workers before schema changes. Safe when containers
+  # do not exist yet (first deploy). Never stops db.
+  log "Quiescing frontend/backend before migration (stop timeout 15s)..."
+  compose stop -t 15 frontend backend
+  log "App traffic stopped (or was not running)."
+}
+
 run_migration() {
   log "Running database migrations..."
-  compose run --rm migrate
-  log "Migration completed."
+  if compose run --rm migrate; then
+    log "Migration completed."
+    return 0
+  fi
+
+  cat >&2 <<EOF
+Error: Migration failed. Application remains stopped (frontend/backend were not restarted).
+
+Fail-closed policy: do not serve traffic on a partially migrated schema.
+
+Inspect:
+  docker compose $(compose_files_display) logs migrate
+  docker compose $(compose_files_display) ps
+
+Recovery (operator-driven):
+  1. Inspect DB / fix migration, or restore a pre-update backup
+  2. Redeploy a compatible revision: ./scripts/deploy.sh
+  3. ./scripts/smoke-production.sh
+
+Do not manually start backend/frontend until migration succeeds.
+EOF
+  exit 1
 }
 
 bootstrap_system_admin() {
@@ -555,10 +583,12 @@ main() {
   fi
 
   start_db
+  quiesce_app_traffic
   run_migration
 
   if [[ "${MIGRATE_ONLY}" -eq 1 ]]; then
     log "Migrate-only mode complete."
+    log "Note: --migrate-only leaves backend/frontend stopped. Start them with a full ./scripts/deploy.sh when ready."
     exit 0
   fi
 

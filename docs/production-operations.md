@@ -32,7 +32,7 @@ is a Future TODO.
 
 ## Restore
 
-Safe verification (default — separate DB):
+Safe verification (default — separate DB, **fresh drop/create** each run):
 
 ```bash
 ./scripts/restore-postgres.sh --dump backups/ideaflow_YYYYMMDD_HHMMSS.dump
@@ -42,12 +42,19 @@ Safe verification (default — separate DB):
 Production overwrite (dangerous):
 
 ```bash
-./scripts/backup-postgres.sh   # safety net
+./scripts/backup-postgres.sh   # safety net of current state
 ./scripts/restore-postgres.sh --dump backups/...dump \
   --target-db ideaflow --confirm-production
-docker compose -f compose.yaml -f compose.direct.yaml restart backend frontend
+# Stops frontend/backend first; leaves them stopped after restore
+# Then deploy a dump-compatible app revision — do not merely restart
+git checkout <compatible-revision>
+./scripts/deploy.sh
 ./scripts/smoke-production.sh
 ```
+
+`pg_restore` uses `--clean --if-exists --exit-on-error --single-transaction`.
+System DBs (`postgres`, `template0`, `template1`) are rejected. Invalid DB names
+are rejected.
 
 ## Workers
 
@@ -59,7 +66,8 @@ docker compose -f compose.yaml -f compose.direct.yaml restart backend frontend
 Operational notes:
 
 - `uvicorn --workers 1` is required so a single process owns the queues.
-- Worker down ≠ web down: list/search/history still work; AI tasks show failure /
+- Deploy/migrate **stops** backend (and therefore workers) before schema changes.
+- Worker down ≠ web down during normal ops: list/search/history still work; AI tasks show failure /
   stalled states via existing Global AI Task UX.
 - Research LLM/search failure converges to `FAILED` and preserves previous READY
   (Step 18/20/26 behavior).
@@ -139,9 +147,10 @@ dedicated `TEST_DATABASE_URL` (Step 24 guards).
 
 ### Migration failure
 
-- Symptom: `migrate` service exits non-zero; backend never becomes healthy
-- Recover: inspect `logs migrate`; restore backup if schema half-applied; fix
-  migration; re-run `./scripts/deploy.sh --migrate-only` then app
+- Symptom: `migrate` exits non-zero; **frontend/backend remain stopped** (fail-closed)
+- Recover: inspect migrate logs / DB; restore pre-update backup if needed; fix
+  migration; redeploy compatible revision with `./scripts/deploy.sh` (not a blind
+  container restart). `--migrate-only` also leaves the app stopped until a full deploy.
 
 ## Embedding coverage (ops)
 

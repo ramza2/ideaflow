@@ -198,11 +198,11 @@ Options:
 
 | Option | Behavior |
 |--------|----------|
-| (default) | Build images, start DB, run migration, start app, health checks |
+| (default) | Build → DB healthy → stop app → migrate → start app → health |
 | `--build` | Same as default (explicit rebuild) |
-| `--no-build` | Use existing images; DB → migrate → up → health |
+| `--no-build` | Use existing images; same quiesce → migrate → up flow |
 | `--force-recreate` | Recreate backend and frontend containers |
-| `--migrate-only` | DB healthy → migration → exit (minimal app impact) |
+| `--migrate-only` | DB healthy → stop frontend/backend → migration → exit (app may remain stopped) |
 | `--configure` | Interactive reconfiguration using current `.env` as defaults, then deploy |
 
 The script uses `set -Eeuo pipefail`, validates `.env` via Docker Compose's resolved environment (not Bash `source .env`), refuses placeholder passwords in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and does not print secrets.
@@ -483,6 +483,7 @@ Production overwrite requires an explicit flag:
 ```bash
 ./scripts/restore-postgres.sh --dump backups/ideaflow_YYYYMMDD_HHMMSS.dump \
   --target-db ideaflow --confirm-production
+# Stops frontend/backend; leaves them stopped. Deploy a compatible revision next.
 ```
 
 Legacy plain SQL example (current DB):

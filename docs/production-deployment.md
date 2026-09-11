@@ -47,24 +47,43 @@ chmod +x scripts/deploy.sh scripts/backup-postgres.sh scripts/restore-postgres.s
 ./scripts/deploy.sh
 ```
 
-Wizard creates `.env` (mode 600), builds images, starts DB, migrates, bootstraps
-`SYSTEM_ADMIN` (interactive), starts app, smoke-checks health.
+Wizard creates `.env` (mode 600), builds images, starts DB, quiesces app (no-op if
+absent), migrates, bootstraps `SYSTEM_ADMIN` (interactive), starts app, smoke-checks health.
 
 Manual path: `cp deploy/.env.example .env` → edit → `./scripts/deploy.sh`.
 
 ## Regular update
 
+Short maintenance downtime is expected (web + workers stop during migration).
+
+```text
+backup
+→ git pull
+→ ./scripts/deploy.sh
+   → build (default)
+   → db healthy
+   → frontend/backend stop
+   → migration
+   → admin bootstrap (if needed)
+   → backend start
+   → frontend start
+→ ./scripts/smoke-production.sh
+```
+
 ```bash
 ./scripts/backup-postgres.sh
 git pull --ff-only
-./scripts/deploy.sh          # build + migrate + recreate app
+./scripts/deploy.sh
 ./scripts/smoke-production.sh
 ```
 
-Migration runs via the `migrate` one-shot service **before** backend becomes healthy.
-If migration fails, stop — do not treat the new app version as live.
+If migration fails, **fail-closed**: frontend/backend stay stopped. Do not treat the
+new app version as live. Inspect migrate logs / DB, then restore or fix and redeploy.
 
-Check migration state:
+`--migrate-only` also quiesces frontend/backend before migrating and **may exit with
+backend/frontend still stopped**. Start the app later with a full `./scripts/deploy.sh`.
+
+Check migration state (when backend is running):
 
 ```bash
 docker compose -f compose.yaml -f compose.direct.yaml exec backend alembic current
@@ -74,19 +93,32 @@ docker compose -f compose.yaml -f compose.direct.yaml exec backend alembic heads
 ## Rollback
 
 **App-only regression (no schema change):** redeploy previous git revision /
-images and restart backend/frontend.
+images (deploy will quiesce → migrate no-op or compatible → start app).
 
 **Schema / data migration problem:** do **not** assume `alembic downgrade` is
-safe. Prefer restore from the pre-update backup:
+safe. Prefer:
+
+```text
+current-state backup (if still possible)
+→ app traffic stop (restore script does this for production target)
+→ restore pre-update DB dump into production (--confirm-production)
+→ checkout previous compatible app revision
+→ ./scripts/deploy.sh
+→ smoke
+```
 
 ```bash
 ./scripts/backup-postgres.sh   # current state before restore, if still possible
 ./scripts/restore-postgres.sh --dump backups/ideaflow_YYYYMMDD_HHMMSS.dump \
   --target-db ideaflow --confirm-production
-# then redeploy previous app revision
+# Application remains stopped — do not simply restart old containers
+git checkout <previous-compatible-revision>
+./scripts/deploy.sh
+./scripts/smoke-production.sh
 ```
 
-Validate backups on `ideaflow_restore_test` first (default restore target).
+Validate backups on `ideaflow_restore_test` first (default restore target; fresh
+drop/create each run).
 
 ## Host reboot
 
