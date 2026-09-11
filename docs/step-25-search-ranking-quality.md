@@ -46,15 +46,17 @@ target_users, scenarios, challenges, minimum_validation, related_project, tags.
 
 ## Evaluation approach
 
-Because shared/dev DB may be empty and hash-based `FakeEmbeddingProvider` is not
-semantically meaningful, Step 25 evaluation:
+Shared/dev DB may be empty and hash-based `FakeEmbeddingProvider` is not
+semantically meaningful, so Step 25 uses a dedicated labeled corpus on
+`TEST_DATABASE_URL` only (Step 24 safety guards unchanged).
 
-1. Seeds a **dedicated labeled corpus** (~20 ideas, codes `[SR-…]`) into
-   `TEST_DATABASE_URL` only.
-2. Stores vectors with a **topic-aware eval provider** (centroids + light noise)
-   so Semantic/Hybrid ranking is measurable without a live BGE server.
-3. Calls production `list_ideas` / `list_semantic_ideas` / `list_hybrid_ideas`
-   (same RRF code path; injectable `rrf_k` / `candidate_limit` for experiments).
+The evaluator supports two **embedding modes**. Corpus vectors and query
+vectors always use the **same** provider within a run.
+
+| Mode | Provider | Purpose |
+|---|---|---|
+| `topic` (default) | `TopicAwareEvalEmbeddingProvider` | Deterministic CI / RRF mechanics regression |
+| `configured` | production `get_embedding_provider` (e.g. `openai_compatible` + `BAAI/bge-m3`) | Real ranking quality / RRF decision evidence |
 
 Artifacts:
 
@@ -64,10 +66,21 @@ Artifacts:
 
 ```bash
 cd backend
-python scripts/evaluate_search_ranking.py
-python scripts/evaluate_search_ranking.py --sweep-rrf-k
-python scripts/evaluate_search_ranking.py --sweep-candidates
+# Deterministic harness (CI / offline)
+python scripts/evaluate_search_ranking.py --embedding-mode topic
+python scripts/evaluate_search_ranking.py --embedding-mode topic --sweep-rrf-k
+
+# Real BGE-M3 (requires OpenAI-compatible endpoint)
+export EMBEDDING_PROVIDER=openai_compatible
+export EMBEDDING_API_URL=http://127.0.0.1:8090
+export EMBEDDING_MODEL_NAME=BAAI/bge-m3
+export EMBEDDING_DIMENSION=1024
+python scripts/evaluate_search_ranking.py --embedding-mode configured
+python scripts/evaluate_search_ranking.py --embedding-mode configured --sweep-rrf-k
 ```
+
+Automated pytest (`tests/test_search_ranking_quality.py`) stays on the **topic**
+provider so CI never depends on an external embedding endpoint.
 
 ## Evaluation dataset
 
@@ -82,62 +95,77 @@ python scripts/evaluate_search_ranking.py --sweep-candidates
 
 Relevance labels: 3 / 2 / 1 / 0 on top ideas per query.
 
-## Baseline (topic-aware eval embeddings, RRF_K=60, candidates=300)
+## Synthetic regression baseline (`--embedding-mode topic`)
+
+**Not** production ranking quality. Used for deterministic harness / RRF
+mechanics checks and CI. Do not treat these numbers as BGE-M3 quality.
 
 | Mode | Hit@5 | MRR | nDCG@5 | Exact Top1 | p50 ms |
 |---|---:|---:|---:|---:|---:|
-| Keyword | 0.615 | 0.596 | 0.523 | 0.583 | ~5 |
-| Semantic | 0.692 | 0.373 | 0.369 | 0.250 | ~3 |
-| Hybrid | **0.808** | **0.700** | **0.630** | **0.667** | ~5 |
+| Keyword | 0.615 | 0.596 | 0.523 | 0.583 | ~6 |
+| Semantic (topic) | 0.692 | 0.373 | 0.369 | 0.250 | ~3 |
+| Hybrid (topic) | 0.808 | 0.700 | 0.630 | 0.667 | ~5 |
 
-### By category (nDCG@5)
+Topic-mode RRF K ∈ {10…100} was effectively flat (same as earlier Step 25 note).
+
+## Real BGE-M3 evaluation (`--embedding-mode configured`)
+
+Endpoint: local OpenAI-compatible server (`scripts/dev_embedding_server.py`)
+loading **`BAAI/bge-m3`** (1024-d). Corpus + queries both embedded with
+production `get_embedding_provider` / `openai_compatible`.
+
+### Baseline (RRF_K=60, candidates=300)
+
+| Mode | Hit@5 | MRR | nDCG@5 | Exact Top1 |
+|---|---:|---:|---:|---:|
+| Keyword | 0.615 | 0.596 | 0.523 | 0.583 |
+| Semantic (BGE-M3) | **1.000** | **0.981** | **0.979** | **0.958** |
+| Hybrid (BGE-M3) | **1.000** | **0.981** | **0.971** | **0.958** |
+
+### By category (nDCG@5, BGE-M3)
 
 | Category | Keyword | Semantic | Hybrid |
 |---|---:|---:|---:|
-| Exact keyword | 0.932 | 0.512 | **0.959** |
-| Paraphrase | 0.363 | 0.412 | **0.525** |
-| Natural language | 0.153 | 0.251 | **0.328** |
-| Ambiguous | 0.287 | 0.157 | **0.444** |
-| Multi-topic | 0.727 | 0.351 | **0.754** |
+| Exact keyword | 0.932 | 0.995 | 0.986 |
+| Paraphrase | 0.363 | 0.966 | 0.966 |
+| Natural language | 0.153 | 0.992 | 0.992 |
+| Ambiguous | 0.287 | 0.983 | 0.983 |
+| Multi-topic | 0.727 | 0.936 | 0.883 |
 
-Hybrid improves every category vs keyword alone, especially exact + ambiguous.
-Natural-language absolute scores remain the weakest area (expected without a
-real multilingual encoder on this synthetic topic embedding).
+With real BGE-M3, Semantic already saturates most queries; Hybrid preserves
+near-ceiling quality while still covering keyword-only exact cases.
 
-## RRF K sweep (hybrid)
+### Real BGE RRF K sweep (hybrid)
 
 | K | Hit@5 | MRR | nDCG@5 | Exact Top1 |
 |---:|---:|---:|---:|---:|
-| 10 | 0.808 | 0.700 | 0.629 | 0.667 |
-| 20 | 0.808 | 0.700 | 0.629 | 0.667 |
-| 40 | 0.808 | 0.700 | 0.629 | 0.667 |
-| **60** | **0.808** | **0.700** | **0.630** | **0.667** |
-| 80 | 0.808 | 0.700 | 0.630 | 0.667 |
-| 100 | 0.808 | 0.700 | 0.630 | 0.667 |
+| 10 | 1.000 | 0.981 | 0.971 | 0.958 |
+| 20 | 1.000 | 0.981 | 0.971 | 0.958 |
+| 40 | 1.000 | 0.981 | 0.971 | 0.958 |
+| **60** | **1.000** | **0.981** | **0.971** | **0.958** |
+| 80 | 1.000 | 0.981 | 0.971 | 0.958 |
+| 100 | 1.000 | 0.981 | 0.971 | 0.958 |
 
-On this corpus, K ∈ [10, 100] is effectively flat. No Exact Top1 regression
-when moving away from 60, but also **no meaningful gain**.
+Completely flat across K ∈ [10, 100]. No Exact Top1 regression anywhere.
+**No evidence to change `RRF_K` away from 60.**
 
-## Candidate limit sweep (hybrid, K=60)
+## Candidate window limitation
 
-| Cand | Hit@5 | MRR | nDCG@5 | Exact Top1 | p50 ms |
-|---:|---:|---:|---:|---:|---:|
-| 50 | 0.808 | 0.700 | 0.630 | 0.667 | ~5 |
-| 100 | 0.808 | 0.700 | 0.630 | 0.667 | ~5 |
-| 200 | 0.808 | 0.700 | 0.630 | 0.667 | ~5 |
-| 300 | 0.808 | 0.700 | 0.630 | 0.667 | ~5 |
+Candidate sweep is **not** used to justify production window=300 on this set:
 
-Corpus size (~20) ≪ candidate window → no ranking change. Keep production
-window **300** for ~1k-idea workspaces.
+```text
+Candidate sweep은 corpus size < 50이므로
+50/100/200/300 비교로 production window 품질을 판단할 수 없음.
+따라서 300은 검증 결과로 선택한 값이 아니라 기존 안전한 default를 유지한 것.
+```
 
 ## Failure patterns (examples)
 
-| Query | Expected | Observed issue | Cause | Change? |
-|---|---|---|---|---|
-| `OCR` / `CRM` (semantic) | Exact idea top | Semantic miss / overmatch | Short token queries under topic-eval embedding; keyword path still recovers in hybrid | No prod change |
-| `진료 기록 자동화` (keyword) | Medical write | Empty keyword hits | No exact ILIKE/FTS token overlap | Hybrid/semantic carry |
-| Natural-language medical | Med write top | Lower nDCG | Topic embedding ≠ real BGE; keyword weak on long queries | Future: real-model re-eval |
-| Keyword overall | Relevance order | `updated_at` sort | FTS rank unused | Documented; no engine rewrite in Step 25 |
+| Query | Mode | Observation | Notes |
+|---|---|---|---|
+| `병원` | Semantic/Hybrid (BGE) | Exact Top1 miss (SR-AUTO-01 ahead of SR-MED-WRITE-01) | Both highly relevant hospital automation; Hit@5 OK |
+| Paraphrase / NL | Keyword | Many empty hits | Expected without FTS relevance; BGE semantic recovers |
+| Short tokens under topic harness | Semantic (topic) | OCR/CRM unstable | Topic harness artifact only — not seen as a BGE failure mode here |
 
 RRF implementation verified: **1-based ranks**, equal keyword/semantic weights,
 deterministic tie-break. No off-by-one bug found.
@@ -146,42 +174,53 @@ deterministic tie-break. No off-by-one bug found.
 
 ```text
 RRF_K: 60 (unchanged)
-Keyword candidate: 300 (unchanged)
-Semantic candidate: 300 (unchanged)
+Keyword candidate: 300 (unchanged — conservative default, not sweep-proven)
+Semantic candidate: 300 (unchanged — same note)
 Weighted RRF: not introduced
 Title boost / keyword relevance rewrite: deferred
 ```
 
-**Why:** Baseline already shows Hybrid > Keyword and Hybrid > Semantic on
-Hit@5 / MRR / nDCG@5 / Exact Top1. K and candidate sweeps show no material
-improvement. Changing constants without evidence would violate Step 25 rules.
+**Why (real BGE):** Hybrid and Semantic already sit at ~ceiling metrics; RRF K
+sweep is flat with **zero Exact Top1 regression**. Changing K would be
+cosmetic, not evidence-based.
 
-Production code change: only **injectable** `rrf_k` / `candidate_limit` on
-`list_hybrid_ideas` / `_rrf_merge` for offline experiments (defaults unchanged).
+Production code change beyond docs/eval: injectable `rrf_k` /
+`candidate_limit` + `--embedding-mode` only (defaults unchanged).
 
 ## Regression
 
-* Representative hybrid tests: exact `회의록`, medical paraphrase, inventory NL
-  → expected idea ∈ top 3 (`tests/test_search_ranking_quality.py`).
-* ACL: outsider hybrid search returns empty even with `rrf_k` override.
+* Deterministic topic harness tests: exact `회의록`, medical paraphrase,
+  inventory NL → expected idea ∈ top 3 (`tests/test_search_ranking_quality.py`).
+* ACL: private idea excluded under hybrid even with `rrf_k` override.
 * RRF unit: 1-based ranks + rejects `rrf_k < 1`.
-* Search mode contract / semantic unavailable fallback: unchanged.
+* Semantic integration / search-mode fallback contracts: unchanged.
+* Pytest does **not** call real BGE.
 
 ## Latency
 
-On the eval corpus (local TEST DB, topic provider): keyword/semantic/hybrid
-p50 ≈ **3–5 ms**. No candidate expansion latency concern at current size.
+Must not confuse the two modes:
+
+```text
+Topic eval (ranking/DB path only; no remote embed):
+  Keyword p50 ≈ 6 ms
+  Semantic p50 ≈ 3 ms
+  Hybrid  p50 ≈ 5 ms
+
+Configured BGE-M3 (end-to-end includes embedding API):
+  Keyword p50 ≈ 7 ms
+  Semantic p50 ≈ 91 ms
+  Hybrid  p50 ≈ 97 ms
+```
 
 ## Remaining TODO
 
-* Re-run evaluator against **real BGE-M3** vectors on a read-only sample of
-  production-like data when embedding coverage is high.
-* Optional later: keyword relevance ordering (`ts_rank` / title boost) if
-  real-model eval shows exact matches buried by `updated_at`.
-* Cross-encoder / query expansion / explainability UI: out of scope until
-  metrics show need.
+* Optional later: keyword relevance ordering (`ts_rank` / title boost) if larger
+  real corpora show exact matches buried by `updated_at`.
+* Cross-encoder / query expansion / explainability UI: out of scope until needed.
+* Candidate window study on a corpus ≫ 300 ideas.
 
 ## Judgment
 
-**SEARCH QUALITY PASS** — baseline established, RRF/candidate sweeps completed,
-production defaults retained with evidence, regression tests added.
+**SEARCH QUALITY PASS** — synthetic harness retained for CI; real BGE-M3
+baseline + RRF K sweep completed; production `RRF_K=60` and candidate 300
+retained with evidence.

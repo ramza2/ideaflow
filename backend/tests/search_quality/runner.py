@@ -14,6 +14,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.embeddings.factory import get_embedding_provider
 from app.core.security import hash_password
 from app.embeddings.canonical import build_idea_embedding_text, compute_content_hash
 from app.models.collaboration import IdeaComment, IdeaReviewRequest, Notification
@@ -47,6 +48,25 @@ EVAL_OWNER_EMAIL = "search-ranking-eval@example.com"
 DEFAULT_CASES_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "search_ranking_cases.json"
 )
+
+
+EmbeddingMode = str  # "topic" | "configured"
+
+
+def resolve_provider_factory(embedding_mode: EmbeddingMode = "topic"):
+    """Return a Settings -> EmbeddingProvider factory for eval.
+
+    topic: deterministic TopicAwareEvalEmbeddingProvider (CI / regression)
+    configured: production get_embedding_provider path (real BGE-M3 etc.)
+    """
+    mode = (embedding_mode or "topic").strip().lower()
+    if mode == "topic":
+        return lambda settings: TopicAwareEvalEmbeddingProvider(settings)
+    if mode == "configured":
+        return get_embedding_provider
+    raise ValueError(f"Unknown embedding_mode: {embedding_mode!r} (use topic|configured)")
+
+
 
 
 @dataclass
@@ -153,13 +173,20 @@ def wipe_eval_workspace_ideas(db: Session, workspace_id: UUID) -> None:
     db.commit()
 
 
-def seed_eval_corpus(db: Session, *, settings: Settings | None = None) -> EvalContext:
+def seed_eval_corpus(
+    db: Session,
+    *,
+    settings: Settings | None = None,
+    embedding_mode: EmbeddingMode = "topic",
+    provider_factory=None,
+) -> EvalContext:
     cfg = settings or get_settings()
     owner = _get_or_create_owner(db)
     ws = _get_or_create_workspace(db, owner)
     wipe_eval_workspace_ideas(db, ws.id)
     stage = _default_stage(db, ws.id)
-    provider = TopicAwareEvalEmbeddingProvider(cfg)
+    factory = provider_factory or resolve_provider_factory(embedding_mode)
+    provider = factory(cfg)
 
     code_to_id: dict[str, UUID] = {}
     id_to_code: dict[UUID, str] = {}
@@ -197,6 +224,10 @@ def seed_eval_corpus(db: Session, *, settings: Settings | None = None) -> EvalCo
         )
         code_to_id[item["code"]] = idea.id
         id_to_code[idea.id] = item["code"]
+    try:
+        provider.close()
+    except Exception:
+        pass
     db.commit()
 
     bump_codes = [
@@ -311,9 +342,11 @@ def evaluate_cases(
     settings: Settings | None = None,
     rrf_k: int | None = None,
     candidate_limit: int | None = None,
+    embedding_mode: EmbeddingMode = "topic",
+    provider_factory=None,
 ) -> list[CaseModeResult]:
     cfg = settings or get_settings()
-    provider_factory = lambda s: TopicAwareEvalEmbeddingProvider(s)
+    factory = provider_factory or resolve_provider_factory(embedding_mode)
     modes = modes or ["keyword", "semantic", "hybrid"]
     results: list[CaseModeResult] = []
     for case in cases:
@@ -327,7 +360,7 @@ def evaluate_cases(
                 mode=mode,
                 top_k=top_k,
                 settings=cfg,
-                provider_factory=provider_factory,
+                provider_factory=factory,
                 rrf_k=rrf_k if mode == "hybrid" else None,
                 candidate_limit=candidate_limit if mode == "hybrid" else None,
             )
