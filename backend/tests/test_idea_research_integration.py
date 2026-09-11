@@ -40,12 +40,11 @@ from app.services import ai_worker
 from app.services.workspace import seed_workspace_defaults
 from app.web_search.base import WebSearchResult
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping idea research integration tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 
 class FakeSearchProvider:
@@ -122,18 +121,11 @@ class FakeLlmProvider:
 @pytest.fixture(autouse=True)
 def _clean_tables(engine):
     with engine.begin() as conn:
+        assert_test_database_safe(conn)
         conn.execute(text("DELETE FROM web_evidence"))
         conn.execute(text("DELETE FROM web_research_runs"))
         conn.execute(text("DELETE FROM ai_jobs"))
         conn.execute(text("DELETE FROM idea_ai_sessions"))
-        # Shared-DB hazard: clears all embeddings (re-enqueue with CLI afterwards).
-        import warnings
-
-        warnings.warn(
-            "Research integration fixture deletes idea_embeddings / jobs on shared DATABASE_URL",
-            UserWarning,
-            stacklevel=1,
-        )
         conn.execute(text("DELETE FROM idea_embedding_jobs"))
         conn.execute(text("DELETE FROM idea_embeddings"))
     yield
@@ -144,6 +136,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     yield eng
     eng.dispose()
     reset_engine()

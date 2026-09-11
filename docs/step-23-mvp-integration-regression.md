@@ -106,25 +106,22 @@ targeted refine-schema unit test was added for the High bug.
 - No evidence of stuck Research/AI polling after navigation in API smoke.
 - Backend workers started cleanly with app process.
 
-## Shared-DB pytest hazard (confirmed)
+## Shared-DB pytest hazard (confirmed → resolved in Step 24)
 
 Running `test_semantic_search_integration` / `test_idea_research_integration`
-against the live `DATABASE_URL` **deletes all `idea_embeddings` rows**. After the
+against the live `DATABASE_URL` **deleted all `idea_embeddings` rows**. After the
 Step 23 pytest pass, coverage dropped from 100% → ~2% until
 `python -m app.cli.enqueue_embeddings --all` + worker catch-up.
 
-Mitigation this Step:
-
-- Document the hazard here and emit `UserWarning` from wipe helpers.
-- Prefer a dedicated test database for CI (follow-up).
+**Resolved in Step 24:** integration tests require `TEST_DATABASE_URL` pointing at
+a dedicated `*_test` database, with fail-fast guards before destructive SQL.
+See `docs/testing.md` and `docs/step-24-test-db-isolation.md`.
 
 ## Remaining TODO (Medium/Low only)
 
-1. **Medium — Dedicated test DB:** stop sharing the live Postgres with
-   embedding-wiping integration fixtures.
-2. **Low — Keyword fixture gap:** smoke query `회의록` returned `total=0` in this
+1. **Low — Keyword fixture gap:** smoke query `회의록` returned `total=0` in this
    workspace (no matching ideas). Product path OK; optional seed for demos.
-3. **Low — Dual search inputs:** header global search vs list `목록 검색...` can
+2. **Low — Dual search inputs:** header global search vs list `목록 검색...` can
    confuse automation/users; document or unify later (not MVP blocker).
 
 ## MVP judgment

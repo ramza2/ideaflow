@@ -42,6 +42,7 @@ from app.services.embedding_worker import (
     run_once,
 )
 from app.services.workspace import seed_workspace_defaults
+from tests.db_test_safety import assert_test_database_safe
 from tests.pgvector_helpers import (
     DATABASE_URL,
     requires_database,
@@ -57,6 +58,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     with eng.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
@@ -107,12 +109,14 @@ def client(engine, monkeypatch: pytest.MonkeyPatch):
 
 
 def _enable_embedding_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
     monkeypatch.setenv("EMBEDDING_ENABLED", "true")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
     monkeypatch.setenv("EMBEDDING_API_URL", "http://embed.test")
     monkeypatch.setenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
     monkeypatch.setenv("APP_ENV", "development")
     get_settings.cache_clear()
+    reset_engine()
 
 
 def _user(db: Session, *, email: str | None = None, password: str = "password-ok-1") -> tuple[User, str]:

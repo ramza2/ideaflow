@@ -62,12 +62,11 @@ from app.services.workspace import seed_workspace_defaults
 from app.web_search.base import WebSearchResult
 from tests.pgvector_helpers import requires_pgvector
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+from tests.db_test_safety import TEST_DATABASE_URL, assert_test_database_safe, requires_test_database
 
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason="DATABASE_URL not set — skipping runtime integration config tests",
-)
+DATABASE_URL = TEST_DATABASE_URL  # integration tests use dedicated test DB only
+
+pytestmark = requires_test_database
 
 
 class FakeLlmProvider:
@@ -154,6 +153,7 @@ def engine():
     reset_engine()
     get_settings.cache_clear()
     eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+    assert_test_database_safe(eng)
     with eng.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
@@ -172,6 +172,7 @@ def engine():
 @pytest.fixture(autouse=True)
 def _clean_runtime_tables(engine):
     with engine.begin() as conn:
+        assert_test_database_safe(conn)
         conn.execute(text("DELETE FROM integration_config_audits"))
         conn.execute(text("DELETE FROM integration_runtime_configs"))
     yield
