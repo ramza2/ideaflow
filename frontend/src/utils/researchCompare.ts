@@ -144,3 +144,148 @@ export function assignResearchVersions<T extends { id: string }>(
     version: safeTotal - safeOffset - index,
   }));
 }
+
+/* --- Step 28: deterministic Change Summary (no LLM) --- */
+
+export type ResearchChangeSummary = {
+  evidence: {
+    added: number;
+    removed: number;
+    updated: number;
+    unchanged: number;
+  };
+  queries: {
+    added: number;
+    removed: number;
+    unchanged: number;
+  };
+  summaryChanged: boolean;
+  noStructuralChanges: boolean;
+};
+
+/**
+ * Normalize research_summary for equality checks.
+ * trim + CRLF→LF + collapse consecutive whitespace.
+ */
+export function normalizeResearchSummary(text: string | null | undefined): string {
+  return (text ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim()
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+/**
+ * Build UX change summary from existing Step 26 diffs.
+ * `updated` = unchanged items with metadataChanged=true (not double-counted).
+ */
+export function buildResearchChangeSummary(input: {
+  evidenceDiff: EvidenceDiffResult;
+  queryDiff: { added: string[]; removed: string[]; common: string[] };
+  leftSummary: string | null | undefined;
+  rightSummary: string | null | undefined;
+}): ResearchChangeSummary {
+  const updated = input.evidenceDiff.unchanged.filter((i) => i.metadataChanged).length;
+  const unchanged = input.evidenceDiff.unchanged.length - updated;
+  const evidence = {
+    added: input.evidenceDiff.added.length,
+    removed: input.evidenceDiff.removed.length,
+    updated,
+    unchanged,
+  };
+  const queries = {
+    added: input.queryDiff.added.length,
+    removed: input.queryDiff.removed.length,
+    unchanged: input.queryDiff.common.length,
+  };
+  const summaryChanged =
+    normalizeResearchSummary(input.leftSummary) !==
+    normalizeResearchSummary(input.rightSummary);
+  const evidenceStructural =
+    evidence.added + evidence.removed + evidence.updated > 0;
+  const queryStructural = queries.added + queries.removed > 0;
+  const noStructuralChanges =
+    !evidenceStructural && !queryStructural && !summaryChanged;
+  return {
+    evidence,
+    queries,
+    summaryChanged,
+    noStructuralChanges,
+  };
+}
+
+/** Deterministic Korean narrative sentences from counts (no LLM). */
+export function buildResearchChangeSentences(
+  summary: ResearchChangeSummary,
+): string[] {
+  if (summary.noStructuralChanges) {
+    return ["검색어, 근거 및 조사 요약에 변화가 없습니다."];
+  }
+
+  const { evidence: ev, queries: q, summaryChanged } = summary;
+  const evidenceStructural = ev.added + ev.removed + ev.updated > 0;
+  const queryStructural = q.added + q.removed > 0;
+  const sentences: string[] = [];
+
+  if (!evidenceStructural && !queryStructural && summaryChanged) {
+    return ["근거와 검색어는 동일하지만 조사 요약 내용이 변경되었습니다."];
+  }
+
+  if (!evidenceStructural && queryStructural) {
+    const parts: string[] = [];
+    if (q.added > 0) parts.push(`검색어 ${q.added}개가 추가`);
+    if (q.removed > 0) parts.push(`${q.removed}개가 제거`);
+    sentences.push(`근거 목록은 동일하며, ${parts.join("되고 ")}되었습니다.`);
+  } else if (evidenceStructural && !queryStructural) {
+    if (ev.added === 0 && ev.removed === 0 && ev.updated > 0) {
+      sentences.push(
+        `근거 출처 구성은 동일하지만 기존 근거 ${ev.updated}개의 내용이 업데이트되었습니다.`,
+      );
+    } else {
+      const parts: string[] = [];
+      if (ev.added > 0) parts.push(`새로운 근거 ${ev.added}개가 추가`);
+      if (ev.removed > 0) parts.push(`${ev.removed}개가 제외`);
+      if (parts.length > 0) {
+        const prefix = q.added + q.removed === 0 ? "검색어는 동일하며, " : "";
+        sentences.push(`${prefix}${parts.join("되고 ")}되었습니다.`);
+      }
+      if (ev.updated > 0) {
+        sentences.push(
+          `기존 근거 ${ev.updated}개는 내용이 업데이트되었습니다.`,
+        );
+      }
+    }
+  } else {
+    // Both evidence and query changed (and/or summary).
+    if (ev.added > 0 || ev.removed > 0) {
+      const parts: string[] = [];
+      if (ev.added > 0) parts.push(`새로운 근거 ${ev.added}개가 추가`);
+      if (ev.removed > 0) parts.push(`${ev.removed}개가 제외`);
+      sentences.push(
+        `최신 조사에서는 ${parts.join("되고 ")}되었습니다.`,
+      );
+    }
+    if (ev.updated > 0) {
+      sentences.push(
+        `기존 근거 ${ev.updated}개는 내용이 업데이트되었습니다.`,
+      );
+    }
+    if (q.added > 0 || q.removed > 0) {
+      const parts: string[] = [];
+      if (q.added > 0) parts.push(`${q.added}개가 추가`);
+      if (q.removed > 0) parts.push(`${q.removed}개가 제거`);
+      sentences.push(`검색어는 ${parts.join("되고 ")}되었습니다.`);
+    }
+  }
+
+  if (summaryChanged) {
+    sentences.push("조사 요약 내용이 변경되었습니다.");
+  }
+
+  return sentences.length > 0
+    ? sentences
+    : ["검색어, 근거 및 조사 요약에 변화가 없습니다."];
+}

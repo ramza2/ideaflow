@@ -9,6 +9,8 @@ import { Button } from "../common/Button";
 import type { WebResearchRun, WebResearchRunHistoryItem } from "../../types/api";
 import {
   assignResearchVersions,
+  buildResearchChangeSentences,
+  buildResearchChangeSummary,
   compareEvidenceByUrl,
   compareQueryLists,
 } from "../../utils/researchCompare";
@@ -40,18 +42,21 @@ function DiffRow({
   url,
   note,
 }: {
-  tone: "added" | "removed" | "unchanged";
+  tone: "added" | "removed" | "updated" | "unchanged";
   title: string;
   url?: string;
   note?: string;
 }) {
-  const prefix = tone === "added" ? "+" : tone === "removed" ? "-" : "=";
+  const prefix =
+    tone === "added" ? "+" : tone === "removed" ? "-" : tone === "updated" ? "~" : "=";
   const color =
     tone === "added"
       ? "border-[#bbf7d0] bg-[#f0fdf4] text-[#166534]"
       : tone === "removed"
         ? "border-[#fecaca] bg-[#fef2f2] text-[#991b1b]"
-        : "border-[rgba(0,0,0,0.07)] bg-white text-[#374151]";
+        : tone === "updated"
+          ? "border-[#fde68a] bg-[#fffbeb] text-[#92400e]"
+          : "border-[rgba(0,0,0,0.07)] bg-white text-[#374151]";
 
   return (
     <div className={`rounded-lg border px-3 py-2 ${color}`}>
@@ -72,6 +77,26 @@ function DiffRow({
         </a>
       ) : null}
     </div>
+  );
+}
+
+function CountChip({
+  symbol,
+  label,
+  count,
+  className,
+}: {
+  symbol: string;
+  label: string;
+  count: number;
+  className: string;
+}) {
+  if (count <= 0) return null;
+  return (
+    <span className={`inline-flex items-center gap-1 text-sm ${className}`}>
+      <span aria-hidden="true">{symbol}</span>
+      {label} {count}
+    </span>
   );
 }
 
@@ -106,6 +131,10 @@ export function ResearchHistoryPanel({
   const historyReqSeqRef = useRef(0);
   const detailReqSeqRef = useRef(0);
   const compareReqSeqRef = useRef(0);
+  // Tracks last-seen READY refreshKey so history-only refresh does not close Compare.
+  const prevRefreshKeyRef = useRef(refreshKey);
+  const refreshKeyRef = useRef(refreshKey);
+  refreshKeyRef.current = refreshKey;
 
   const fetchHistory = useCallback(async () => {
     if (!workspaceId || !ideaId) return;
@@ -132,8 +161,8 @@ export function ResearchHistoryPanel({
     }
   }, [workspaceId, ideaId]);
 
+  // Idea/workspace identity change → full reset (history/detail/compare).
   useEffect(() => {
-    // Invalidate in-flight history/detail/compare when Idea/workspace changes.
     historyReqSeqRef.current += 1;
     detailReqSeqRef.current += 1;
     compareReqSeqRef.current += 1;
@@ -146,13 +175,26 @@ export function ResearchHistoryPanel({
     setDetailRun(null);
     setDetailError(null);
     setDetailLoading(false);
+    setDetailVersion(null);
     setCompareOpen(false);
     setLeftRun(null);
     setRightRun(null);
+    setLeftVersion(null);
+    setRightVersion(null);
     setCompareError(null);
     setCompareLoading(false);
+    // Absorb current refreshKey so the READY-refresh effect does not double-fetch
+    // when idea switch and refreshKey update land in the same commit.
+    prevRefreshKeyRef.current = refreshKeyRef.current;
     void fetchHistory();
-  }, [workspaceId, ideaId, refreshKey, fetchHistory]);
+  }, [workspaceId, ideaId, fetchHistory]);
+
+  // New READY (refreshKey) → history refetch only; keep Compare/detail snapshot open.
+  useEffect(() => {
+    if (prevRefreshKeyRef.current === refreshKey) return;
+    prevRefreshKeyRef.current = refreshKey;
+    void fetchHistory();
+  }, [refreshKey, fetchHistory]);
 
   const versioned = useMemo(
     () =>
@@ -222,6 +264,21 @@ export function ResearchHistoryPanel({
       rightRun.queries_to_send ?? [],
     );
   }, [leftRun, rightRun]);
+
+  const changeSummary = useMemo(() => {
+    if (!leftRun || !rightRun || !evidenceDiff || !queryDiff) return null;
+    return buildResearchChangeSummary({
+      evidenceDiff,
+      queryDiff,
+      leftSummary: leftRun.research_summary,
+      rightSummary: rightRun.research_summary,
+    });
+  }, [leftRun, rightRun, evidenceDiff, queryDiff]);
+
+  const changeSentences = useMemo(
+    () => (changeSummary ? buildResearchChangeSentences(changeSummary) : []),
+    [changeSummary],
+  );
 
   if (!loading && !error && items.length === 0) {
     return null;
@@ -444,13 +501,110 @@ export function ResearchHistoryPanel({
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-[#4f46e5]">
-                        v{rightVersion} 최신
+                        v{rightVersion} · 비교 기준
                       </p>
                       <p className="text-xs text-[#9ca3af]">
-                        {formatCompletedAt(rightRun.completed_at)} 완료 · 최신
+                        {formatCompletedAt(rightRun.completed_at)} 완료
                       </p>
                     </div>
                   </div>
+
+                  {changeSummary && (
+                    <div className="rounded-xl border border-[rgba(0,0,0,0.08)] bg-[#f8f8fb] p-4">
+                      <h4 className="text-sm font-semibold text-[#111118] mb-3">
+                        변경 요약
+                        {leftVersion != null && rightVersion != null
+                          ? ` · v${leftVersion} → v${rightVersion}`
+                          : ""}
+                      </h4>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                        <div>
+                          <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-1.5">
+                            근거
+                          </p>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            <CountChip
+                              symbol="+"
+                              label="신규"
+                              count={changeSummary.evidence.added}
+                              className="text-[#16a34a]"
+                            />
+                            <CountChip
+                              symbol="-"
+                              label="제거"
+                              count={changeSummary.evidence.removed}
+                              className="text-[#dc2626]"
+                            />
+                            <CountChip
+                              symbol="~"
+                              label="업데이트"
+                              count={changeSummary.evidence.updated}
+                              className="text-[#d97706]"
+                            />
+                            <CountChip
+                              symbol="="
+                              label="유지"
+                              count={changeSummary.evidence.unchanged}
+                              className="text-[#6b6b80]"
+                            />
+                            {changeSummary.evidence.added === 0 &&
+                            changeSummary.evidence.removed === 0 &&
+                            changeSummary.evidence.updated === 0 &&
+                            changeSummary.evidence.unchanged === 0 ? (
+                              <span className="text-sm text-[#6b6b80]">근거 없음</span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-1.5">
+                            검색어
+                          </p>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            <CountChip
+                              symbol="+"
+                              label="추가"
+                              count={changeSummary.queries.added}
+                              className="text-[#16a34a]"
+                            />
+                            <CountChip
+                              symbol="-"
+                              label="제거"
+                              count={changeSummary.queries.removed}
+                              className="text-[#dc2626]"
+                            />
+                            <CountChip
+                              symbol="="
+                              label="유지"
+                              count={changeSummary.queries.unchanged}
+                              className="text-[#6b6b80]"
+                            />
+                            {changeSummary.queries.added === 0 &&
+                            changeSummary.queries.removed === 0 &&
+                            changeSummary.queries.unchanged === 0 ? (
+                              <span className="text-sm text-[#6b6b80]">검색어 없음</span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-1.5">
+                            조사 요약
+                          </p>
+                          <p className="text-sm text-[#111118]">
+                            {changeSummary.summaryChanged
+                              ? "내용 변경됨"
+                              : "변경 없음"}
+                          </p>
+                        </div>
+                      </div>
+                      <ul className="space-y-1">
+                        {changeSentences.map((line) => (
+                          <li key={line} className="text-sm text-[#374151] leading-relaxed">
+                            {line}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   <div>
                     <h4 className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-2">
@@ -488,26 +642,29 @@ export function ResearchHistoryPanel({
                         </ul>
                       </div>
                       <p className="text-xs text-[#6b6b80] mt-2">
-                        +{queryDiff.added.length} / -{queryDiff.removed.length} / =
+                        + 추가 {queryDiff.added.length} · - 제거 {queryDiff.removed.length} · = 유지{" "}
                         {queryDiff.common.length}
                       </p>
                     </div>
                   )}
 
-                  {evidenceDiff && (
+                  {evidenceDiff && changeSummary && (
                     <div>
                       <h4 className="text-xs font-semibold text-[#6b6b80] uppercase tracking-wider mb-2">
                         근거 변화
                       </h4>
                       <div className="flex flex-wrap gap-3 text-sm mb-3">
                         <span className="text-[#16a34a]">
-                          + 신규 {evidenceDiff.added.length}
+                          + 신규 {changeSummary.evidence.added}
                         </span>
                         <span className="text-[#dc2626]">
-                          - 제거 {evidenceDiff.removed.length}
+                          - 제거 {changeSummary.evidence.removed}
+                        </span>
+                        <span className="text-[#d97706]">
+                          ~ 업데이트 {changeSummary.evidence.updated}
                         </span>
                         <span className="text-[#6b6b80]">
-                          = 유지 {evidenceDiff.unchanged.length}
+                          = 유지 {changeSummary.evidence.unchanged}
                         </span>
                       </div>
                       <div className="space-y-2">
@@ -527,17 +684,31 @@ export function ResearchHistoryPanel({
                             url={item.left?.url}
                           />
                         ))}
-                        {evidenceDiff.unchanged.map((item) => (
-                          <DiffRow
-                            key={`u-${item.key}`}
-                            tone="unchanged"
-                            title={
-                              item.right?.title || item.left?.title || item.key
-                            }
-                            url={item.right?.url || item.left?.url}
-                            note={item.metadataChanged ? "업데이트됨" : undefined}
-                          />
-                        ))}
+                        {evidenceDiff.unchanged
+                          .filter((item) => item.metadataChanged)
+                          .map((item) => (
+                            <DiffRow
+                              key={`up-${item.key}`}
+                              tone="updated"
+                              title={
+                                item.right?.title || item.left?.title || item.key
+                              }
+                              url={item.right?.url || item.left?.url}
+                              note="업데이트됨"
+                            />
+                          ))}
+                        {evidenceDiff.unchanged
+                          .filter((item) => !item.metadataChanged)
+                          .map((item) => (
+                            <DiffRow
+                              key={`u-${item.key}`}
+                              tone="unchanged"
+                              title={
+                                item.right?.title || item.left?.title || item.key
+                              }
+                              url={item.right?.url || item.left?.url}
+                            />
+                          ))}
                       </div>
                     </div>
                   )}
