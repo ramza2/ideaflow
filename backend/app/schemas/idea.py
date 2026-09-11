@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import IdeaFeasibility, IdeaPriority, IdeaSharePermission, IdeaVisibility
+from app.schemas.search_explain import SearchExplanation
 
 
 class IdeaShareInput(BaseModel):
@@ -173,6 +174,8 @@ class IdeaListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     current_user_access: str
+    # Present only for active search (q set). Omitted/null on plain list/detail.
+    search_explanation: SearchExplanation | None = None
 
 
 class IdeaDetail(IdeaListItem):

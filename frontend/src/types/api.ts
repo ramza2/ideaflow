@@ -134,6 +134,35 @@ export interface IdeaListItem {
   created_at: string;
   updated_at: string;
   current_user_access: IdeaAccess;
+  /** Present only when an active search query is used. */
+  search_explanation?: SearchExplanation | null;
+}
+
+export type SearchExplainMode = "keyword" | "semantic" | "hybrid";
+
+export interface KeywordSearchExplanation {
+  matched_fields: string[];
+  fts_match: boolean;
+  rank?: number | null;
+}
+
+export interface SemanticSearchExplanation {
+  distance?: number | null;
+  similarity?: number | null;
+  rank?: number | null;
+}
+
+export interface HybridSearchExplanation {
+  keyword_rank?: number | null;
+  semantic_rank?: number | null;
+  rrf_score?: number | null;
+}
+
+export interface SearchExplanation {
+  mode: SearchExplainMode;
+  keyword?: KeywordSearchExplanation | null;
+  semantic?: SemanticSearchExplanation | null;
+  hybrid?: HybridSearchExplanation | null;
 }
 
 export interface IdeaDetail extends IdeaListItem {

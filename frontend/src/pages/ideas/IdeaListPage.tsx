@@ -26,6 +26,7 @@ import { ApiPriorityBadge, StageLabelBadge } from "../../components/common/Badge
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
 import { IdeaCreateMenu } from "../../components/ideas/IdeaCreateMenu";
+import { SearchExplanationBadges } from "../../components/ideas/SearchExplanationBadges";
 import { toast } from "../../components/common/Toast";
 import { toDisplayUser } from "../../utils/avatar";
 import type {
@@ -715,6 +716,9 @@ export function IdeaListPage() {
                         <p className="text-sm font-medium text-[#111118] truncate">{idea.title}</p>
                       </div>
                       <p className="text-xs text-[#6b6b80] truncate">{idea.one_line_definition ?? ""}</p>
+                      {urlQuery.trim() ? (
+                        <SearchExplanationBadges explanation={idea.search_explanation} />
+                      ) : null}
                     </div>
                     <span className="text-xs text-[#6b6b80] truncate">{idea.category?.name ?? "—"}</span>
                     <StageLabelBadge label={idea.stage.label} />
@@ -743,6 +747,11 @@ export function IdeaListPage() {
                   <StageLabelBadge label={idea.stage.label} />
                   <p className="text-sm font-semibold text-[#111118] mb-1 line-clamp-2 mt-2">{idea.title}</p>
                   <p className="text-xs text-[#6b6b80] mb-3 line-clamp-2">{idea.one_line_definition ?? ""}</p>
+                  {urlQuery.trim() ? (
+                    <div className="mb-3">
+                      <SearchExplanationBadges explanation={idea.search_explanation} />
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap gap-1 mb-3">
                     {idea.tags.slice(0, 3).map((tag) => (
                       <span key={tag.id} className="px-1.5 py-0.5 rounded-md bg-[#f0f0f5] text-[10px] text-[#6b6b80]">{tag.name}</span>

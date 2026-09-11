@@ -120,7 +120,7 @@ def list_semantic_ideas(
     offset: int = 0,
     settings: Settings | None = None,
     provider_factory=None,
-) -> tuple[list[Idea], int]:
+) -> tuple[list[Idea], int, dict[UUID, float]]:
     cfg = _require_semantic_enabled(db, settings)
     factory = provider_factory or get_embedding_provider
     query_vector = _embed_query(q, settings=cfg, provider_factory=factory)
@@ -150,7 +150,8 @@ def list_semantic_ideas(
         db.execute(base.order_by(distance.asc(), Idea.updated_at.desc(), Idea.id.desc()).offset(offset).limit(limit))
     )
     ideas = [row[0] for row in rows]
-    return ideas, int(total)
+    distance_by_id = {row[0].id: float(row[1]) for row in rows}
+    return ideas, int(total), distance_by_id
 
 
 def _keyword_ranked_ids(
@@ -205,7 +206,7 @@ def _semantic_ranked_ids(
     assignee_id: UUID | None,
     candidate_limit: int,
     settings: Settings,
-) -> list[UUID]:
+) -> list[tuple[UUID, float]]:
     distance = IdeaEmbedding.embedding.cosine_distance(query_vector)
     base = (
         select(Idea.id, distance.label("distance"))
@@ -225,20 +226,22 @@ def _semantic_ranked_ids(
         assignee_id=assignee_id,
     )
     rows = list(db.execute(base.order_by(distance.asc(), Idea.id.asc()).limit(candidate_limit)))
-    return [row[0] for row in rows]
+    return [(row[0], float(row[1])) for row in rows]
 
 
-def _rrf_merge(
+def _rrf_merge_with_scores(
     keyword_ids: list[UUID],
     semantic_ids: list[UUID],
     *,
     ideas_by_id: dict[UUID, Idea],
     rrf_k: int = RRF_K,
-) -> list[Idea]:
+) -> tuple[list[Idea], dict[UUID, float]]:
     """Reciprocal Rank Fusion with 1-based ranks.
 
     score(d) = Σ 1 / (rrf_k + rank_list(d)) over keyword and semantic lists.
     Tie-break: higher updated_at, then stable UUID string order.
+
+    Ranking order is identical to the previous `_rrf_merge` implementation.
     """
     if rrf_k < 1:
         raise ValueError("rrf_k must be >= 1")
@@ -260,7 +263,23 @@ def _rrf_merge(
             str(iid),
         ),
     )
-    return [ideas_by_id[iid] for iid in ranked]
+    return [ideas_by_id[iid] for iid in ranked], scores
+
+
+def _rrf_merge(
+    keyword_ids: list[UUID],
+    semantic_ids: list[UUID],
+    *,
+    ideas_by_id: dict[UUID, Idea],
+    rrf_k: int = RRF_K,
+) -> list[Idea]:
+    ideas, _scores = _rrf_merge_with_scores(
+        keyword_ids,
+        semantic_ids,
+        ideas_by_id=ideas_by_id,
+        rrf_k=rrf_k,
+    )
+    return ideas
 
 
 def list_hybrid_ideas(
@@ -282,7 +301,7 @@ def list_hybrid_ideas(
     provider_factory=None,
     rrf_k: int | None = None,
     candidate_limit: int | None = None,
-) -> tuple[list[Idea], int]:
+) -> tuple[list[Idea], int, dict]:
     cfg = _require_semantic_enabled(db, settings)
     limit, offset = _normalize_list_pagination(limit, offset)
     _validate_hybrid_result_window(offset, limit)
@@ -307,7 +326,7 @@ def list_hybrid_ideas(
         assignee_id=assignee_id,
         candidate_limit=pool,
     )
-    semantic_ids = _semantic_ranked_ids(
+    semantic_entries = _semantic_ranked_ids(
         db,
         workspace_id=workspace_id,
         user_id=user_id,
@@ -323,10 +342,12 @@ def list_hybrid_ideas(
         candidate_limit=pool,
         settings=cfg,
     )
+    semantic_ids = [idea_id for idea_id, _distance in semantic_entries]
+    distance_by_id = {idea_id: distance for idea_id, distance in semantic_entries}
 
     all_ids = list(dict.fromkeys(keyword_ids + semantic_ids))
     if not all_ids:
-        return [], 0
+        return [], 0, {}
 
     final_stmt = select(Idea).where(
         Idea.id.in_(all_ids),
@@ -348,10 +369,19 @@ def list_hybrid_ideas(
     valid_ids = set(ideas_by_id)
     keyword_ids = [idea_id for idea_id in keyword_ids if idea_id in valid_ids]
     semantic_ids = [idea_id for idea_id in semantic_ids if idea_id in valid_ids]
-    merged = _rrf_merge(keyword_ids, semantic_ids, ideas_by_id=ideas_by_id, rrf_k=fusion_k)
+    distance_by_id = {idea_id: distance for idea_id, distance in distance_by_id.items() if idea_id in valid_ids}
+    merged, rrf_scores = _rrf_merge_with_scores(
+        keyword_ids, semantic_ids, ideas_by_id=ideas_by_id, rrf_k=fusion_k
+    )
     total = len(merged)
     page = merged[offset : offset + limit]
-    return page, total
+    meta = {
+        "keyword_ids": keyword_ids,
+        "semantic_ids": semantic_ids,
+        "distance_by_id": distance_by_id,
+        "rrf_score_by_id": rrf_scores,
+    }
+    return page, total, meta
 
 
 def list_ideas_with_search_mode(
@@ -404,7 +434,9 @@ def list_ideas_with_search_mode(
         )
 
     if mode == SearchMode.SEMANTIC.value:
-        rows, total = list_semantic_ideas(
+        from app.services.search_explain import explain_semantic_page
+
+        rows, total, distance_by_id = list_semantic_ideas(
             db,
             workspace_id=workspace_id,
             user_id=user_id,
@@ -421,9 +453,22 @@ def list_ideas_with_search_mode(
             settings=settings,
             provider_factory=provider_factory,
         )
-        return _finalize_list_response(db, rows, user_id=user_id, total=total, limit=limit, offset=offset)
+        explanations = explain_semantic_page(
+            rows, distance_by_id=distance_by_id, offset=offset
+        )
+        return _finalize_list_response(
+            db,
+            rows,
+            user_id=user_id,
+            total=total,
+            limit=limit,
+            offset=offset,
+            explanations=explanations,
+        )
 
-    rows, total = list_hybrid_ideas(
+    from app.services.search_explain import explain_hybrid_page
+
+    rows, total, meta = list_hybrid_ideas(
         db,
         workspace_id=workspace_id,
         user_id=user_id,
@@ -440,4 +485,20 @@ def list_ideas_with_search_mode(
         settings=settings,
         provider_factory=provider_factory,
     )
-    return _finalize_list_response(db, rows, user_id=user_id, total=total, limit=limit, offset=offset)
+    explanations = explain_hybrid_page(
+        rows,
+        query,
+        keyword_ids=meta.get("keyword_ids", []),
+        semantic_ids=meta.get("semantic_ids", []),
+        distance_by_id=meta.get("distance_by_id", {}),
+        rrf_score_by_id=meta.get("rrf_score_by_id", {}),
+    )
+    return _finalize_list_response(
+        db,
+        rows,
+        user_id=user_id,
+        total=total,
+        limit=limit,
+        offset=offset,
+        explanations=explanations,
+    )
