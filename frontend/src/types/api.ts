@@ -477,6 +477,26 @@ export interface WebResearchLatestResponse {
   run: WebResearchRun | null;
 }
 
+/** Lightweight READY research run for Idea history list (Step 26). */
+export interface WebResearchRunHistoryItem {
+  id: string;
+  status: WebResearchRunStatus;
+  created_at: string;
+  completed_at?: string | null;
+  evidence_count: number;
+  query_count: number;
+  is_latest: boolean;
+}
+
+export interface IdeaResearchRunHistoryResponse {
+  items: WebResearchRunHistoryItem[];
+  total: number;
+}
+
+export interface IdeaResearchRunDetailResponse {
+  run: WebResearchRun;
+}
+
 /* --- Step 19: Global AI task status --- */
 
 export type AiTaskType = "CREATE" | "REFINE" | "RESEARCH";

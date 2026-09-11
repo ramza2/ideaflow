@@ -24,6 +24,8 @@ from app.schemas.idea import (
 from app.schemas.research import (
     IdeaEvidenceResponse,
     IdeaResearchLatestResponse,
+    IdeaResearchRunDetailResponse,
+    IdeaResearchRunHistoryResponse,
     IdeaResearchSessionLatestResponse,
 )
 from app.services import ai_session as ai_session_service
@@ -127,6 +129,25 @@ def get_idea_evidence(
     )
 
 
+@router.get("/{idea_id}/research-runs", response_model=IdeaResearchRunHistoryResponse)
+def list_idea_research_runs(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> IdeaResearchRunHistoryResponse:
+    """READY research history for an Idea (lightweight; Idea read ACL)."""
+    return web_research_service.list_idea_research_runs(
+        db,
+        workspace_id=ctx.workspace.id,
+        idea_id=idea_id,
+        user_id=ctx.user.id,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/{idea_id}/research-runs/latest", response_model=IdeaResearchLatestResponse)
 def get_latest_idea_research_run(
     idea_id: UUID,
@@ -138,6 +159,26 @@ def get_latest_idea_research_run(
         db,
         workspace_id=ctx.workspace.id,
         idea_id=idea_id,
+        user_id=ctx.user.id,
+    )
+
+
+@router.get(
+    "/{idea_id}/research-runs/{run_id}",
+    response_model=IdeaResearchRunDetailResponse,
+)
+def get_idea_research_run(
+    idea_id: UUID,
+    run_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> IdeaResearchRunDetailResponse:
+    """One READY research run with summary/queries/evidence (Idea read ACL)."""
+    return web_research_service.get_idea_research_run(
+        db,
+        workspace_id=ctx.workspace.id,
+        idea_id=idea_id,
+        run_id=run_id,
         user_id=ctx.user.id,
     )
 
