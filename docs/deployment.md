@@ -1,5 +1,9 @@
 # IdeaFlow Deployment Guide
 
+> Step 29 production runbooks: [`production-deployment.md`](./production-deployment.md),
+> [`production-operations.md`](./production-operations.md),
+> [`production-checklist.md`](./production-checklist.md).
+
 ## Overview
 
 IdeaFlow can be deployed on a single Linux host with Docker Engine and Docker Compose v2. The stack serves the React SPA through Nginx and proxies API requests to FastAPI on the same Docker network.
@@ -64,9 +68,9 @@ Compose files:
 
 | Service | Image / build | Purpose |
 |---------|---------------|---------|
-| `db` | `postgres:16-alpine` | PostgreSQL database |
+| `db` | `pgvector/pgvector:pg16` | PostgreSQL 16 + pgvector |
 | `migrate` | backend image (one-shot) | `alembic upgrade head` |
-| `backend` | backend image | FastAPI + in-process AI worker (`--workers 1`) |
+| `backend` | backend image | FastAPI + in-process AI/Embedding workers (`--workers 1`) |
 | `frontend` | frontend image | Nginx serving built SPA + `/api/` proxy |
 
 In **direct** mode, only the frontend publishes a host port (default `8080`). In **traefik** mode, no IdeaFlow host ports are published; browsers reach the app through the existing Traefik reverse proxy.
@@ -194,11 +198,11 @@ Options:
 
 | Option | Behavior |
 |--------|----------|
-| (default) | Build images, start DB, run migration, start app, health checks |
+| (default) | Build → DB healthy → stop app → migrate → start app → health |
 | `--build` | Same as default (explicit rebuild) |
-| `--no-build` | Use existing images; DB → migrate → up → health |
+| `--no-build` | Use existing images; same quiesce → migrate → up flow |
 | `--force-recreate` | Recreate backend and frontend containers |
-| `--migrate-only` | DB healthy → migration → exit (minimal app impact) |
+| `--migrate-only` | DB healthy → stop frontend/backend → migration → exit (app may remain stopped) |
 | `--configure` | Interactive reconfiguration using current `.env` as defaults, then deploy |
 
 The script uses `set -Eeuo pipefail`, validates `.env` via Docker Compose's resolved environment (not Bash `source .env`), refuses placeholder passwords in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and does not print secrets.
@@ -442,6 +446,17 @@ Take a database backup before production updates (see below).
 
 ## Database backup
 
+Preferred (custom format + no password on the host CLI):
+
+```bash
+./scripts/backup-postgres.sh
+./scripts/backup-postgres.sh --prune --keep-days 7
+```
+
+Files land in `backups/ideaflow_YYYYMMDD_HHMMSS.dump` (`pg_dump -Fc`).
+
+Legacy plain SQL example:
+
 ```bash
 mkdir -p backups
 
@@ -452,9 +467,26 @@ docker compose exec -T db sh -c \
 
 The password is not passed on the command line; it is read from the container environment.
 
+See also [`production-operations.md`](./production-operations.md).
+
 ## Database restore
 
-Back up the current database before restoring.
+Prefer verifying on a separate database first:
+
+```bash
+./scripts/restore-postgres.sh --dump backups/ideaflow_YYYYMMDD_HHMMSS.dump
+# → ideaflow_restore_test
+```
+
+Production overwrite requires an explicit flag:
+
+```bash
+./scripts/restore-postgres.sh --dump backups/ideaflow_YYYYMMDD_HHMMSS.dump \
+  --target-db ideaflow --confirm-production
+# Stops frontend/backend; leaves them stopped. Deploy a compatible revision next.
+```
+
+Legacy plain SQL example (current DB):
 
 ```bash
 cat backups/ideaflow_backup.sql | \

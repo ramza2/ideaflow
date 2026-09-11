@@ -24,6 +24,18 @@ def test_health_returns_ok() -> None:
     assert body["status"] == "ok"
     assert body["service"] == "ideaflow-backend"
     assert body["version"] == "0.1.0"
+    assert "env" in body
+
+
+def test_health_includes_git_sha_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUILD_GIT_SHA", "abc1234")
+    get_settings.cache_clear()
+    try:
+        response = client.get("/api/v1/health")
+    finally:
+        get_settings.cache_clear()
+    assert response.status_code == 200
+    assert response.json().get("git_sha") == "abc1234"
 
 
 def test_health_ready_returns_ready_when_db_available() -> None:
@@ -36,7 +48,8 @@ def test_health_ready_returns_ready_when_db_available() -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"status": "ready", "service": "ideaflow-backend"}
+    assert body["status"] == "ready"
+    assert body["service"] == "ideaflow-backend"
     mock_conn.execute.assert_called_once()
 
 
@@ -68,4 +81,5 @@ def test_health_ready_returns_ready_with_configured_postgresql(
         get_settings.cache_clear()
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "service": "ideaflow-backend"}
+    assert response.json()["status"] == "ready"
+    assert response.json()["service"] == "ideaflow-backend"
