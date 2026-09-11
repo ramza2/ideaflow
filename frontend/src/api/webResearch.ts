@@ -1,6 +1,8 @@
 import { apiRequest } from "./client";
 import type {
   IdeaEvidenceResponse,
+  IdeaResearchRunDetailResponse,
+  IdeaResearchRunHistoryResponse,
   WebResearchLatestResponse,
   WebResearchPreviewRequest,
   WebResearchRun,
@@ -98,5 +100,31 @@ export async function getLatestIdeaResearchRun(
 ): Promise<WebResearchLatestResponse> {
   return apiRequest<WebResearchLatestResponse>(
     `/workspaces/${workspaceId}/ideas/${ideaId}/research-runs/latest`,
+  );
+}
+
+/** READY research history for an Idea (lightweight; no evidence payload). */
+export async function listIdeaResearchRuns(
+  workspaceId: string,
+  ideaId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<IdeaResearchRunHistoryResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  return apiRequest<IdeaResearchRunHistoryResponse>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/research-runs${qs ? `?${qs}` : ""}`,
+  );
+}
+
+/** One READY research run with summary / queries / per-run evidence. */
+export async function getIdeaResearchRun(
+  workspaceId: string,
+  ideaId: string,
+  runId: string,
+): Promise<IdeaResearchRunDetailResponse> {
+  return apiRequest<IdeaResearchRunDetailResponse>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/research-runs/${runId}`,
   );
 }

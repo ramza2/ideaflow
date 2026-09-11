@@ -91,3 +91,26 @@ class IdeaResearchLatestResponse(BaseModel):
     """Latest completed (READY) research run for an Idea — F5 / re-entry restore."""
 
     run: WebResearchRunPublic | None = None
+
+
+class WebResearchRunHistoryItem(BaseModel):
+    """Lightweight READY research run for Idea history list (no evidence payload)."""
+
+    id: UUID
+    status: WebResearchRunStatus
+    created_at: datetime
+    completed_at: datetime | None = None
+    evidence_count: int = 0
+    query_count: int = 0
+    is_latest: bool = False
+
+
+class IdeaResearchRunHistoryResponse(BaseModel):
+    items: list[WebResearchRunHistoryItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class IdeaResearchRunDetailResponse(BaseModel):
+    """Single READY research run with summary, queries, and per-run evidence."""
+
+    run: WebResearchRunPublic

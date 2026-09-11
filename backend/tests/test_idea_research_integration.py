@@ -1636,3 +1636,272 @@ def test_latest_idea_research_run_survives_failed_followup(
     )
     assert evidence.status_code == 200
     assert len(evidence.json()["items"]) >= 1
+
+
+def _complete_ready_research(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+    ws: Workspace,
+    idea_id: str,
+    *,
+    summary: str,
+    url: str,
+    queries: list[str] | None = None,
+) -> uuid.UUID:
+    """Helper: start → preview → approve → worker → READY."""
+    body = _start_research(client, ws, idea_id)
+    preview = _preview(
+        client,
+        ws,
+        body["id"],
+        queries=queries or [summary[:20]],
+        draft=body["draft"],
+    )
+    approve = client.post(
+        f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{preview['id']}/approve",
+        headers=_headers(client),
+    )
+    assert approve.status_code == 200, approve.text
+    run_id = uuid.UUID(preview["id"])
+    _make_research_job_available(db, run_id)
+    FakeSearchProvider.calls = 0
+
+    class SummaryLlm(FakeLlmProvider):
+        def refine_idea_with_evidence(self, request):
+            self.calls += 1
+            ev0 = str(request.evidence[0].evidence_id)
+            return EvidenceRefinementResult(
+                draft={},
+                evidence_links={"background": [ev0]},
+                research_summary=summary,
+            )
+
+    assert ai_worker.run_once(
+        session_factory=session_factory,
+        provider=SummaryLlm(),
+        search_provider=FakeSearchProvider(url=url),
+    )
+    db.expire_all()
+    run = db.get(WebResearchRun, run_id)
+    assert run is not None
+    assert run.status == WebResearchRunStatus.READY.value
+    assert run.research_summary == summary
+    return run_id
+
+
+def test_idea_research_run_history_ordering_and_latest_flag(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """READY history returns newest-first with is_latest on first item; FAILED excluded."""
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws)
+    other_idea = _create_idea(client, ws, title="다른 아이디어")
+
+    empty = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+    assert empty.json()["total"] == 0
+
+    v1 = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="조사 v1",
+        url="https://example.com/hist-v1",
+    )
+    v2 = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="조사 v2",
+        url="https://example.com/hist-v2",
+    )
+    v3 = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="조사 v3",
+        url="https://example.com/hist-v3",
+    )
+
+    # Failed follow-up must not appear in history.
+    body = _start_research(client, ws, idea["id"])
+    preview = _preview(client, ws, body["id"], queries=["will-fail"], draft=body["draft"])
+    assert (
+        client.post(
+            f"/api/v1/workspaces/{ws.id}/ai-sessions/{body['id']}/research-runs/{preview['id']}/approve",
+            headers=_headers(client),
+        ).status_code
+        == 200
+    )
+    run_fail = uuid.UUID(preview["id"])
+    _make_research_job_available(db, run_fail)
+
+    class FailSearch(FakeSearchProvider):
+        def search(self, *, query: str, max_results: int):
+            FakeSearchProvider.calls += 1
+            from app.web_search.exceptions import WebSearchTimeoutError
+
+            raise WebSearchTimeoutError("search down")
+
+    for _ in range(5):
+        _make_research_job_available(db, run_fail)
+        ai_worker.run_once(
+            session_factory=session_factory,
+            provider=FakeLlmProvider([]),
+            search_provider=FailSearch(),
+        )
+        db.expire_all()
+        failed_row = db.get(WebResearchRun, run_fail)
+        if failed_row is not None and failed_row.status == WebResearchRunStatus.FAILED.value:
+            break
+    assert db.get(WebResearchRun, run_fail).status == WebResearchRunStatus.FAILED.value
+
+    history = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert history.status_code == 200, history.text
+    payload = history.json()
+    assert payload["total"] == 3
+    items = payload["items"]
+    assert [i["id"] for i in items] == [str(v3), str(v2), str(v1)]
+    assert items[0]["is_latest"] is True
+    assert items[1]["is_latest"] is False
+    assert items[2]["is_latest"] is False
+    assert all(i["status"] == "READY" for i in items)
+    assert all(i["evidence_count"] >= 1 for i in items)
+    assert all(i["query_count"] >= 1 for i in items)
+    # Lightweight — no evidence payload on list items.
+    assert all("evidence" not in i for i in items)
+
+    # Idea isolation
+    other_hist = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{other_idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert other_hist.status_code == 200
+    assert other_hist.json()["items"] == []
+
+
+def test_idea_research_run_detail_and_acl(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """Detail returns per-run evidence; ACL + cross-idea leak prevented."""
+    owner, pw = _user(db)
+    member, member_pw = _user(db)
+    stranger, stranger_pw = _user(db)
+    ws = _team(db, owner)
+    _add_member(db, ws, member, role=WorkspaceRole.MEMBER.value)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, visibility="WORKSPACE")
+    other_idea = _create_idea(client, ws, title="격리 아이디어")
+
+    run_a = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="상세 A",
+        url="https://example.com/detail-a",
+        queries=["query-a"],
+    )
+    run_b = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="상세 B",
+        url="https://example.com/detail-b",
+        queries=["query-b"],
+    )
+
+    detail_a = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/{run_a}",
+        headers=_headers(client),
+    )
+    assert detail_a.status_code == 200, detail_a.text
+    run_payload = detail_a.json()["run"]
+    assert run_payload["id"] == str(run_a)
+    assert run_payload["research_summary"] == "상세 A"
+    assert "query-a" in run_payload["queries_to_send"]
+    assert len(run_payload["evidence"]) >= 1
+    assert all(
+        "detail-a" in (ev["url"] or "") or ev["url"]
+        for ev in run_payload["evidence"]
+    )
+    # Evidence must belong to this run only (no mix with B).
+    for ev in run_payload["evidence"]:
+        assert "detail-b" not in (ev["url"] or "")
+
+    detail_b = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/{run_b}",
+        headers=_headers(client),
+    )
+    assert detail_b.status_code == 200
+    assert detail_b.json()["run"]["research_summary"] == "상세 B"
+    for ev in detail_b.json()["run"]["evidence"]:
+        assert "detail-a" not in (ev["url"] or "")
+
+    # Cross-idea: run_a under other idea → 404
+    leak = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{other_idea['id']}/research-runs/{run_a}",
+        headers=_headers(client),
+    )
+    assert leak.status_code == 404
+
+    # Workspace member with idea read can access
+    _login(client, member.email, member_pw)
+    member_hist = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert member_hist.status_code == 200
+    assert member_hist.json()["total"] == 2
+    member_detail = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/{run_b}",
+        headers=_headers(client),
+    )
+    assert member_detail.status_code == 200
+
+    # Outsider denied
+    _login(client, stranger.email, stranger_pw)
+    forbidden = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert forbidden.status_code == 404
+    forbidden_detail = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/{run_b}",
+        headers=_headers(client),
+    )
+    assert forbidden_detail.status_code == 404
+
+
+def test_idea_research_history_private_acl(
+    client: TestClient,
+    db: Session,
+    session_factory: sessionmaker,
+) -> None:
+    """PRIVATE idea history/detail denied for non-owner workspace members."""
+    owner, pw = _user(db)
+    member, member_pw = _user(db)
+    ws = _team(db, owner)
+    _add_member(db, ws, member, role=WorkspaceRole.MEMBER.value)
+    _login(client, owner.email, pw)
+    idea = _create_idea(client, ws, visibility="PRIVATE")
+    run_id = _complete_ready_research(
+        client, db, session_factory, ws, idea["id"],
+        summary="비공개 조사",
+        url="https://example.com/private-hist",
+    )
+
+    _login(client, member.email, member_pw)
+    hist = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs",
+        headers=_headers(client),
+    )
+    assert hist.status_code == 404
+    detail = client.get(
+        f"/api/v1/workspaces/{ws.id}/ideas/{idea['id']}/research-runs/{run_id}",
+        headers=_headers(client),
+    )
+    assert detail.status_code == 404

@@ -58,6 +58,7 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { WebSearchApprovalPanel } from "../../components/ai/WebSearchApprovalPanel";
 import { IdeaValidationPanel } from "../../components/ideas/IdeaValidationPanel";
+import { ResearchHistoryPanel } from "../../components/ideas/ResearchHistoryPanel";
 import { useAuth } from "../../auth/AuthProvider";
 import { useWorkspace } from "../../workspace/WorkspaceProvider";
 import { toDisplayUser } from "../../utils/avatar";
@@ -140,6 +141,7 @@ export function IdeaDetailPage() {
   const [lastCompletedRunId, setLastCompletedRunId] = useState<string | null>(null);
   // Completed READY run restored from Backend (survives F5 / re-entry).
   const [persistedResearchRun, setPersistedResearchRun] = useState<WebResearchRun | null>(null);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const researchApprovalInFlightRef = useRef(false);
   const submittedResearchRunIdRef = useRef<string | null>(null);
 
@@ -272,6 +274,7 @@ export function IdeaDetailPage() {
     if (lastCompletedRunId === researchRun.id) return;
     setLastCompletedRunId(researchRun.id);
     setPersistedResearchRun(researchRun);
+    setHistoryRefreshKey((k) => k + 1);
     void getIdeaEvidence(workspaceId, ideaId)
       .then((data) => {
         setEvidence(data.items);
@@ -946,6 +949,12 @@ export function IdeaDetailPage() {
                   )}
                 </div>
               ))}
+
+              <ResearchHistoryPanel
+                workspaceId={workspaceId}
+                ideaId={ideaId}
+                refreshKey={historyRefreshKey}
+              />
             </div>
           )}
 

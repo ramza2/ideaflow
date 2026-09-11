@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -43,11 +43,14 @@ from app.schemas.research import (
     IdeaEvidenceItem,
     IdeaEvidenceResponse,
     IdeaResearchLatestResponse,
+    IdeaResearchRunDetailResponse,
+    IdeaResearchRunHistoryResponse,
     SanitizationNotePublic,
     WebEvidencePublic,
     WebResearchFailurePublic,
     WebResearchLatestResponse,
     WebResearchPreviewRequest,
+    WebResearchRunHistoryItem,
     WebResearchRunPublic,
 )
 from app.services import ai_session as ai_session_service
@@ -757,6 +760,148 @@ def get_latest_idea_research_run(
         return IdeaResearchLatestResponse(run=None)
     # Evidence is loaded separately via GET .../evidence — keep this payload light.
     return IdeaResearchLatestResponse(run=to_public(db, run, include_evidence=False))
+
+
+def _idea_ready_research_runs_base(idea_id: UUID):
+    """READY runs for CONFIRMED sessions linked to an Idea (history source)."""
+    return (
+        select(WebResearchRun)
+        .join(IdeaAiSession, IdeaAiSession.id == WebResearchRun.session_id)
+        .where(
+            IdeaAiSession.result_idea_id == idea_id,
+            IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+            WebResearchRun.status == WebResearchRunStatus.READY.value,
+        )
+    )
+
+
+def list_idea_research_runs(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    idea_id: UUID,
+    user_id: UUID,
+    limit: int = 20,
+    offset: int = 0,
+) -> IdeaResearchRunHistoryResponse:
+    """List READY research runs for an Idea (read ACL) — lightweight history.
+
+    FAILED / in-progress runs are excluded. Ordering matches latest selection:
+    completed_at DESC NULLS LAST, created_at DESC.
+    Evidence payloads are not included; only counts.
+    """
+    from app.services import idea as idea_service
+
+    idea, _share = idea_service.get_readable_idea(
+        db,
+        workspace_id=workspace_id,
+        idea_id=idea_id,
+        user_id=user_id,
+    )
+
+    base = _idea_ready_research_runs_base(idea.id)
+    total = int(db.scalar(select(func.count()).select_from(base.subquery())) or 0)
+
+    evidence_count_sq = (
+        select(
+            WebEvidence.research_run_id.label("research_run_id"),
+            func.count(WebEvidence.id).label("evidence_count"),
+        )
+        .group_by(WebEvidence.research_run_id)
+        .subquery()
+    )
+
+    rows = list(
+        db.execute(
+            select(
+                WebResearchRun,
+                func.coalesce(evidence_count_sq.c.evidence_count, 0),
+            )
+            .join(IdeaAiSession, IdeaAiSession.id == WebResearchRun.session_id)
+            .outerjoin(
+                evidence_count_sq,
+                evidence_count_sq.c.research_run_id == WebResearchRun.id,
+            )
+            .where(
+                IdeaAiSession.result_idea_id == idea.id,
+                IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+                WebResearchRun.status == WebResearchRunStatus.READY.value,
+            )
+            .order_by(
+                WebResearchRun.completed_at.desc().nulls_last(),
+                WebResearchRun.created_at.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+
+    latest_id = rows[0][0].id if rows and offset == 0 else None
+    if latest_id is None and total > 0:
+        latest_row = db.execute(
+            base.order_by(
+                WebResearchRun.completed_at.desc().nulls_last(),
+                WebResearchRun.created_at.desc(),
+            ).limit(1)
+        ).scalar_one_or_none()
+        latest_id = latest_row.id if latest_row is not None else None
+
+    items: list[WebResearchRunHistoryItem] = []
+    for run, evidence_count in rows:
+        queries = run.queries_to_send if isinstance(run.queries_to_send, list) else []
+        items.append(
+            WebResearchRunHistoryItem(
+                id=run.id,
+                status=WebResearchRunStatus(run.status),
+                created_at=run.created_at,
+                completed_at=run.completed_at,
+                evidence_count=int(evidence_count),
+                query_count=len(queries),
+                is_latest=latest_id is not None and run.id == latest_id,
+            )
+        )
+    return IdeaResearchRunHistoryResponse(items=items, total=total)
+
+
+def get_idea_research_run(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    idea_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+) -> IdeaResearchRunDetailResponse:
+    """Return one READY research run for an Idea (read ACL) with evidence.
+
+    Verifies the run belongs to a CONFIRMED session for this Idea — no
+    cross-Idea / cross-workspace leak via run_id alone.
+    """
+    from app.services import idea as idea_service
+
+    idea, _share = idea_service.get_readable_idea(
+        db,
+        workspace_id=workspace_id,
+        idea_id=idea_id,
+        user_id=user_id,
+    )
+
+    run = db.execute(
+        select(WebResearchRun)
+        .join(IdeaAiSession, IdeaAiSession.id == WebResearchRun.session_id)
+        .where(
+            WebResearchRun.id == run_id,
+            IdeaAiSession.result_idea_id == idea.id,
+            IdeaAiSession.status == IdeaAiSessionStatus.CONFIRMED.value,
+            WebResearchRun.status == WebResearchRunStatus.READY.value,
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise AppError(
+            "Research run not found.",
+            code="RESEARCH_RUN_NOT_FOUND",
+            status_code=404,
+        )
+    return IdeaResearchRunDetailResponse(run=to_public(db, run, include_evidence=True))
 
 
 def url_hash(url: str) -> str:
