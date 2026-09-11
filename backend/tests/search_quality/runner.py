@@ -303,7 +303,7 @@ def run_mode_query(
         }
         ideas = [by_id[i] for i in ordered_ids if i in by_id]
     elif mode == "semantic":
-        ideas, _ = idea_search.list_semantic_ideas(
+        ideas, _, _dist = idea_search.list_semantic_ideas(
             db,
             workspace_id=ctx.workspace_id,
             user_id=ctx.user_id,
@@ -314,7 +314,7 @@ def run_mode_query(
             provider_factory=provider_factory,
         )
     elif mode == "hybrid":
-        ideas, _ = idea_search.list_hybrid_ideas(
+        ideas, _, _meta = idea_search.list_hybrid_ideas(
             db,
             workspace_id=ctx.workspace_id,
             user_id=ctx.user_id,

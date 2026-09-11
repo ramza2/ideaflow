@@ -543,6 +543,7 @@ def _to_list_item(
     stages: dict[UUID, WorkspaceStage],
     categories: dict[UUID, WorkspaceCategory],
     tags_by_idea: dict[UUID, list[Tag]],
+    search_explanation=None,
 ) -> IdeaListItem:
     author = users[idea.author_id]
     stage = stages[idea.stage_id]
@@ -566,6 +567,7 @@ def _to_list_item(
         created_at=idea.created_at,
         updated_at=idea.updated_at,
         current_user_access=idea_access.compute_access(idea, user_id, share),
+        search_explanation=search_explanation,
     )
 
 
@@ -701,6 +703,7 @@ def _finalize_list_response(
     total: int,
     limit: int,
     offset: int,
+    explanations: dict | None = None,
 ) -> IdeaListResponse:
     users, stages, categories, tags_by_idea = _load_related(db, rows)
     shares = {
@@ -713,6 +716,7 @@ def _finalize_list_response(
         ).all()
     } if rows else {}
 
+    explain_map = explanations or {}
     items = [
         _to_list_item(
             idea,
@@ -722,6 +726,7 @@ def _finalize_list_response(
             stages=stages,
             categories=categories,
             tags_by_idea=tags_by_idea,
+            search_explanation=explain_map.get(idea.id),
         )
         for idea in rows
     ]
@@ -772,8 +777,20 @@ def list_ideas(
         )
     )
 
+    explanations = None
+    if q and q.strip() and rows:
+        from app.services.search_explain import explain_keyword_page
+
+        explanations = explain_keyword_page(rows, q.strip(), offset=offset)
+
     return _finalize_list_response(
-        db, rows, user_id=user_id, total=total, limit=limit, offset=offset
+        db,
+        rows,
+        user_id=user_id,
+        total=total,
+        limit=limit,
+        offset=offset,
+        explanations=explanations,
     )
 
 

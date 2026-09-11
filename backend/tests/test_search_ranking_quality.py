@@ -221,7 +221,7 @@ def test_exact_meeting_minutes_in_hybrid_top3(db: Session, monkeypatch: pytest.M
     _enable_embedding(monkeypatch)
     settings = get_settings()
     ws, owner, by_code = _seed_mini_corpus(db, settings)
-    ideas, _ = idea_search.list_hybrid_ideas(
+    ideas, _, _meta = idea_search.list_hybrid_ideas(
         db,
         workspace_id=ws.id,
         user_id=owner.id,
@@ -237,7 +237,7 @@ def test_medical_paraphrase_in_hybrid_top3(db: Session, monkeypatch: pytest.Monk
     _enable_embedding(monkeypatch)
     settings = get_settings()
     ws, owner, by_code = _seed_mini_corpus(db, settings)
-    ideas, _ = idea_search.list_hybrid_ideas(
+    ideas, _, _meta = idea_search.list_hybrid_ideas(
         db,
         workspace_id=ws.id,
         user_id=owner.id,
@@ -255,7 +255,7 @@ def test_inventory_natural_language_in_hybrid_top3(
     _enable_embedding(monkeypatch)
     settings = get_settings()
     ws, owner, by_code = _seed_mini_corpus(db, settings)
-    ideas, _ = idea_search.list_hybrid_ideas(
+    ideas, _, _meta = idea_search.list_hybrid_ideas(
         db,
         workspace_id=ws.id,
         user_id=owner.id,
@@ -285,7 +285,7 @@ def test_hybrid_rrf_k_override_does_not_break_acl(
     )
     db.add(outsider)
     db.commit()
-    ideas, total = idea_search.list_hybrid_ideas(
+    ideas, total, _meta = idea_search.list_hybrid_ideas(
         db,
         workspace_id=ws.id,
         user_id=outsider.id,
