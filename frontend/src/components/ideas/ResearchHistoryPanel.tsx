@@ -131,6 +131,10 @@ export function ResearchHistoryPanel({
   const historyReqSeqRef = useRef(0);
   const detailReqSeqRef = useRef(0);
   const compareReqSeqRef = useRef(0);
+  // Tracks last-seen READY refreshKey so history-only refresh does not close Compare.
+  const prevRefreshKeyRef = useRef(refreshKey);
+  const refreshKeyRef = useRef(refreshKey);
+  refreshKeyRef.current = refreshKey;
 
   const fetchHistory = useCallback(async () => {
     if (!workspaceId || !ideaId) return;
@@ -157,8 +161,8 @@ export function ResearchHistoryPanel({
     }
   }, [workspaceId, ideaId]);
 
+  // Idea/workspace identity change → full reset (history/detail/compare).
   useEffect(() => {
-    // Invalidate in-flight history/detail/compare when Idea/workspace changes.
     historyReqSeqRef.current += 1;
     detailReqSeqRef.current += 1;
     compareReqSeqRef.current += 1;
@@ -171,13 +175,26 @@ export function ResearchHistoryPanel({
     setDetailRun(null);
     setDetailError(null);
     setDetailLoading(false);
+    setDetailVersion(null);
     setCompareOpen(false);
     setLeftRun(null);
     setRightRun(null);
+    setLeftVersion(null);
+    setRightVersion(null);
     setCompareError(null);
     setCompareLoading(false);
+    // Absorb current refreshKey so the READY-refresh effect does not double-fetch
+    // when idea switch and refreshKey update land in the same commit.
+    prevRefreshKeyRef.current = refreshKeyRef.current;
     void fetchHistory();
-  }, [workspaceId, ideaId, refreshKey, fetchHistory]);
+  }, [workspaceId, ideaId, fetchHistory]);
+
+  // New READY (refreshKey) → history refetch only; keep Compare/detail snapshot open.
+  useEffect(() => {
+    if (prevRefreshKeyRef.current === refreshKey) return;
+    prevRefreshKeyRef.current = refreshKey;
+    void fetchHistory();
+  }, [refreshKey, fetchHistory]);
 
   const versioned = useMemo(
     () =>
@@ -487,7 +504,7 @@ export function ResearchHistoryPanel({
                         v{rightVersion} · 비교 기준
                       </p>
                       <p className="text-xs text-[#9ca3af]">
-                        {formatCompletedAt(rightRun.completed_at)} 완료 · 비교 시점 최신
+                        {formatCompletedAt(rightRun.completed_at)} 완료
                       </p>
                     </div>
                   </div>

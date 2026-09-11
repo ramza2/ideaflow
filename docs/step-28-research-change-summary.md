@@ -76,10 +76,15 @@ Forbidden: severity scores, “대폭 변경”, change rates, LLM prose.
 Compare fetches **past run + latest-at-open** once and keeps that pair while
 the dialog is open.
 
-* Dialog right label: `vN · 비교 기준` / “비교 시점 최신”
-* History list badge: still `최신` (live)
-* New READY while dialog open → **no** auto-refetch / re-pair
+* Dialog right label: `vN · 비교 기준` (completed-at only; not a live “최신” badge)
+* History list badge: still `최신` (live after READY refresh)
+* `refreshKey` (new READY) → **history refetch only**; Compare stays open with the same left/right pair
+* `workspaceId` / `ideaId` change → full reset (close Compare/detail, invalidate all request seqs)
+* New READY while dialog open → **no** auto-refetch / re-pair of Compare
 * Close + reopen → new latest
+
+`prevRefreshKeyRef` absorbs the current `refreshKey` on identity change so a
+same-commit idea switch + READY bump does not double-fetch history.
 
 ## UI layout
 
