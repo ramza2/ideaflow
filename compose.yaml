@@ -1,5 +1,11 @@
 name: ideaflow
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -10,7 +16,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - ideaflow_pgdata:/var/lib/postgresql/data
-    # Loopback-only publish for local pytest / DB tools.
+    # Loopback-only publish for local pytest / DB tools. Do not publish on 0.0.0.0.
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -23,6 +29,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+    logging: *default-logging
     networks:
       - ideaflow
 
@@ -60,6 +67,9 @@ services:
       ]
     env_file:
       - .env
+    environment:
+      # Optional deploy identity (set by deploy.sh when git is available).
+      BUILD_GIT_SHA: ${BUILD_GIT_SHA:-}
     expose:
       - "8000"
     stop_grace_period: 15s
@@ -80,6 +90,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    logging: *default-logging
     networks:
       - ideaflow
 
@@ -103,6 +114,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+    logging: *default-logging
     networks:
       - ideaflow
 

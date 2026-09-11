@@ -5,6 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Optional deploy identity for /api/v1/health (also passed into backend compose env).
+if [[ -z "${BUILD_GIT_SHA:-}" ]] && command -v git >/dev/null 2>&1; then
+  BUILD_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || true)"
+fi
+export BUILD_GIT_SHA="${BUILD_GIT_SHA:-}"
+
 DO_BUILD=1
 FORCE_RECREATE=0
 MIGRATE_ONLY=0

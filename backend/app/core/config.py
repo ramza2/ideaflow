@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     app_name: str = Field(default="IdeaFlow API", alias="APP_NAME")
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
+    # Optional short git SHA for deploy identity (not required for startup).
+    build_git_sha: str = Field(default="", alias="BUILD_GIT_SHA")
     api_v1_prefix: str = Field(default="/api/v1", alias="API_V1_PREFIX")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     cors_origins: str = Field(

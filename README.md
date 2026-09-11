@@ -38,8 +38,11 @@ cd ideaflow
 
 첫 실행 시 interactive setup wizard가 `.env` 생성, migration, 초기 `SYSTEM_ADMIN` 생성까지 진행합니다.
 
+- **Production readiness:** [docs/production-deployment.md](docs/production-deployment.md) · [docs/production-operations.md](docs/production-operations.md) · [docs/production-checklist.md](docs/production-checklist.md)
 - **Direct (mini PC / LAN):** [docs/deployment.md](docs/deployment.md)
 - **Traefik (GPU server):** [docs/deployment.md#traefik-deployment](docs/deployment.md#traefik-deployment)
+- Backup / restore: `./scripts/backup-postgres.sh`, `./scripts/restore-postgres.sh`
+- Smoke: `./scripts/smoke-production.sh`
 
 고급 사용자는 `cp deploy/.env.example .env` 후 수동 설정도 가능합니다.
 
