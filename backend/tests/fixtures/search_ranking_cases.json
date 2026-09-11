@@ -1,0 +1,282 @@
+{
+  "version": 1,
+  "description": "Step 25 search ranking evaluation cases (labeled against SR-* corpus codes).",
+  "relevance_scale": {
+    "3": "highly relevant",
+    "2": "relevant",
+    "1": "somewhat relevant",
+    "0": "irrelevant"
+  },
+  "cases": [
+    {
+      "id": "exact-meeting",
+      "query": "회의록",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-MEET-01",
+      "relevance": {
+        "SR-MEET-01": 3,
+        "SR-MEET-02": 2
+      }
+    },
+    {
+      "id": "exact-inventory",
+      "query": "재고",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-INV-01",
+      "relevance": {
+        "SR-INV-01": 3,
+        "SR-INV-02": 3
+      }
+    },
+    {
+      "id": "exact-hospital",
+      "query": "병원",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-MED-WRITE-01",
+      "relevance": {
+        "SR-MED-WRITE-01": 3,
+        "SR-MED-WRITE-02": 2,
+        "SR-AUTO-01": 3,
+        "SR-MED-SEARCH-01": 1
+      }
+    },
+    {
+      "id": "exact-ocr",
+      "query": "OCR",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-OCR-01",
+      "relevance": {
+        "SR-OCR-01": 3,
+        "SR-OCR-02": 3
+      }
+    },
+    {
+      "id": "exact-automation",
+      "query": "자동화",
+      "category": "exact_keyword",
+      "expected_top_idea": null,
+      "relevance": {
+        "SR-MEET-01": 2,
+        "SR-OCR-01": 3,
+        "SR-AUTO-01": 3,
+        "SR-AUTO-02": 3,
+        "SR-MED-WRITE-01": 1
+      }
+    },
+    {
+      "id": "exact-crm",
+      "query": "CRM",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-CRM-01",
+      "relevance": {
+        "SR-CRM-01": 3
+      }
+    },
+    {
+      "id": "para-medical-write-1",
+      "query": "진료 기록 자동화",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-MED-WRITE-01",
+      "relevance": {
+        "SR-MED-WRITE-01": 3,
+        "SR-MED-WRITE-02": 2,
+        "SR-AUTO-01": 2
+      }
+    },
+    {
+      "id": "para-medical-write-2",
+      "query": "의료 문서 작성 보조",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-MED-WRITE-02",
+      "relevance": {
+        "SR-MED-WRITE-02": 3,
+        "SR-MED-WRITE-01": 3,
+        "SR-AI-DOC-01": 1
+      }
+    },
+    {
+      "id": "para-hospital-reduce",
+      "query": "병원 기록 작성 줄이기",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-MED-WRITE-01",
+      "relevance": {
+        "SR-MED-WRITE-01": 3,
+        "SR-MED-WRITE-02": 2,
+        "SR-AUTO-01": 2
+      }
+    },
+    {
+      "id": "para-meeting-service",
+      "query": "회의 내용을 자동으로 정리하는 서비스",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-MEET-01",
+      "relevance": {
+        "SR-MEET-01": 3,
+        "SR-MEET-02": 2
+      }
+    },
+    {
+      "id": "para-stock-alert",
+      "query": "재고가 떨어지기 전에 알려주는 시스템",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-INV-01",
+      "relevance": {
+        "SR-INV-01": 3,
+        "SR-INV-02": 1
+      }
+    },
+    {
+      "id": "nl-doctor-docs",
+      "query": "의사가 반복해서 작성하는 문서를 줄이는 방법",
+      "category": "natural_language",
+      "expected_top_idea": "SR-MED-WRITE-01",
+      "relevance": {
+        "SR-MED-WRITE-01": 3,
+        "SR-MED-WRITE-02": 2,
+        "SR-AUTO-01": 2
+      }
+    },
+    {
+      "id": "nl-meeting-auto",
+      "query": "회의 내용을 자동으로 정리하는 서비스",
+      "category": "natural_language",
+      "expected_top_idea": "SR-MEET-01",
+      "relevance": {
+        "SR-MEET-01": 3,
+        "SR-MEET-02": 2
+      }
+    },
+    {
+      "id": "nl-inventory-alert",
+      "query": "재고가 떨어지기 전에 알려주는 시스템",
+      "category": "natural_language",
+      "expected_top_idea": "SR-INV-01",
+      "relevance": {
+        "SR-INV-01": 3,
+        "SR-INV-02": 1
+      }
+    },
+    {
+      "id": "nl-ocr-paper",
+      "query": "종이 서류를 스캔해서 데이터로 바꾸는 방법",
+      "category": "natural_language",
+      "expected_top_idea": "SR-OCR-01",
+      "relevance": {
+        "SR-OCR-01": 3,
+        "SR-OCR-02": 2,
+        "SR-AI-DOC-01": 1
+      }
+    },
+    {
+      "id": "nl-delivery",
+      "query": "도심 배송 경로를 줄여 운송비를 낮추는 아이디어",
+      "category": "natural_language",
+      "expected_top_idea": "SR-LOG-01",
+      "relevance": {
+        "SR-LOG-01": 3
+      }
+    },
+    {
+      "id": "amb-patient-search",
+      "query": "환자 기록 검색",
+      "category": "ambiguous",
+      "expected_top_idea": "SR-MED-SEARCH-01",
+      "relevance": {
+        "SR-MED-SEARCH-01": 3,
+        "SR-MED-WRITE-01": 1,
+        "SR-MED-WRITE-02": 1
+      }
+    },
+    {
+      "id": "amb-patient-write",
+      "query": "환자 기록 자동 작성",
+      "category": "ambiguous",
+      "expected_top_idea": "SR-MED-WRITE-01",
+      "relevance": {
+        "SR-MED-WRITE-01": 3,
+        "SR-MED-WRITE-02": 2,
+        "SR-MED-SEARCH-01": 1
+      }
+    },
+    {
+      "id": "amb-expense",
+      "query": "영수증 처리",
+      "category": "ambiguous",
+      "expected_top_idea": null,
+      "relevance": {
+        "SR-OCR-02": 3,
+        "SR-FIN-01": 2
+      }
+    },
+    {
+      "id": "multi-hospital-auto",
+      "query": "병원 업무 자동화",
+      "category": "multi_topic",
+      "expected_top_idea": "SR-AUTO-01",
+      "relevance": {
+        "SR-AUTO-01": 3,
+        "SR-MED-WRITE-01": 2,
+        "SR-MED-WRITE-02": 2,
+        "SR-AUTO-02": 1
+      }
+    },
+    {
+      "id": "multi-ai-doc",
+      "query": "AI 문서 처리",
+      "category": "multi_topic",
+      "expected_top_idea": "SR-AI-DOC-01",
+      "relevance": {
+        "SR-AI-DOC-01": 3,
+        "SR-AI-DOC-02": 2,
+        "SR-OCR-01": 1
+      }
+    },
+    {
+      "id": "multi-internal-eff",
+      "query": "내부 업무 효율화",
+      "category": "multi_topic",
+      "expected_top_idea": "SR-AUTO-02",
+      "relevance": {
+        "SR-AUTO-02": 3,
+        "SR-AUTO-01": 2,
+        "SR-GEN-01": 1
+      }
+    },
+    {
+      "id": "exact-logistics",
+      "query": "물류",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-LOG-01",
+      "relevance": {
+        "SR-LOG-01": 3
+      }
+    },
+    {
+      "id": "exact-hr",
+      "query": "채용",
+      "category": "exact_keyword",
+      "expected_top_idea": "SR-HR-01",
+      "relevance": {
+        "SR-HR-01": 3
+      }
+    },
+    {
+      "id": "para-learning",
+      "query": "개인별 맞춤 퀴즈로 공부하는 서비스",
+      "category": "paraphrase",
+      "expected_top_idea": "SR-EDU-01",
+      "relevance": {
+        "SR-EDU-01": 3
+      }
+    },
+    {
+      "id": "nl-retail",
+      "query": "매장에서 손님 움직임을 보고 진열을 개선하려면",
+      "category": "natural_language",
+      "expected_top_idea": "SR-RET-01",
+      "relevance": {
+        "SR-RET-01": 3
+      }
+    }
+  ]
+}

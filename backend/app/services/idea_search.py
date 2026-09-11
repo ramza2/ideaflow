@@ -233,16 +233,24 @@ def _rrf_merge(
     semantic_ids: list[UUID],
     *,
     ideas_by_id: dict[UUID, Idea],
+    rrf_k: int = RRF_K,
 ) -> list[Idea]:
+    """Reciprocal Rank Fusion with 1-based ranks.
+
+    score(d) = Σ 1 / (rrf_k + rank_list(d)) over keyword and semantic lists.
+    Tie-break: higher updated_at, then stable UUID string order.
+    """
+    if rrf_k < 1:
+        raise ValueError("rrf_k must be >= 1")
     scores: dict[UUID, float] = {}
     for rank, idea_id in enumerate(keyword_ids, start=1):
         if idea_id not in ideas_by_id:
             continue
-        scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (RRF_K + rank)
+        scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (rrf_k + rank)
     for rank, idea_id in enumerate(semantic_ids, start=1):
         if idea_id not in ideas_by_id:
             continue
-        scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (RRF_K + rank)
+        scores[idea_id] = scores.get(idea_id, 0.0) + 1.0 / (rrf_k + rank)
 
     ranked = sorted(
         scores.keys(),
@@ -272,13 +280,18 @@ def list_hybrid_ideas(
     offset: int = 0,
     settings: Settings | None = None,
     provider_factory=None,
+    rrf_k: int | None = None,
+    candidate_limit: int | None = None,
 ) -> tuple[list[Idea], int]:
     cfg = _require_semantic_enabled(db, settings)
     limit, offset = _normalize_list_pagination(limit, offset)
     _validate_hybrid_result_window(offset, limit)
     factory = provider_factory or get_embedding_provider
     query_vector = _embed_query(q, settings=cfg, provider_factory=factory)
-    pool = HYBRID_MAX_RESULT_WINDOW
+    # Production default keeps the full hybrid window (300). Optional overrides
+    # exist for offline ranking experiments only.
+    pool = HYBRID_MAX_RESULT_WINDOW if candidate_limit is None else max(1, min(candidate_limit, HYBRID_MAX_RESULT_WINDOW))
+    fusion_k = RRF_K if rrf_k is None else rrf_k
 
     keyword_ids = _keyword_ranked_ids(
         db,
@@ -335,7 +348,7 @@ def list_hybrid_ideas(
     valid_ids = set(ideas_by_id)
     keyword_ids = [idea_id for idea_id in keyword_ids if idea_id in valid_ids]
     semantic_ids = [idea_id for idea_id in semantic_ids if idea_id in valid_ids]
-    merged = _rrf_merge(keyword_ids, semantic_ids, ideas_by_id=ideas_by_id)
+    merged = _rrf_merge(keyword_ids, semantic_ids, ideas_by_id=ideas_by_id, rrf_k=fusion_k)
     total = len(merged)
     page = merged[offset : offset + limit]
     return page, total
