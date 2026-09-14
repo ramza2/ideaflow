@@ -257,3 +257,44 @@ def test_enable_thinking_true_sends_true() -> None:
     )
     provider.structure_idea(IdeaStructuringRequest(input_text="x"))
     assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_refine_idea_next_actions_alias_is_normalized() -> None:
+    from app.llm.refine_schemas import IdeaRefinementRequest
+    from app.models.enums import IdeaRefineDirection
+
+    refine_payload = {
+        "decision": "READY_FOR_REVIEW",
+        "draft_patch": {
+            "next_actions": [
+                "사용자 인터뷰 진행",
+                "PoC 구현",
+                "검증 성공 기준 정의",
+            ]
+        },
+        "field_provenance": {},
+        "clarifying_questions": [],
+        "research_recommended": False,
+        "research_topics": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {
+            "choices": [{"message": {"content": json.dumps(refine_payload, ensure_ascii=False)}}],
+        }
+        return httpx.Response(200, json=body)
+
+    provider = OpenAICompatibleLlmProvider(
+        make_settings(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = provider.refine_idea(
+        IdeaRefinementRequest(
+            direction=IdeaRefineDirection.NEXT_ACTIONS,
+            source_context={"title": "병원 청소 품질 AI 판정"},
+        )
+    )
+    assert result.decision.value == "READY_FOR_REVIEW"
+    assert result.draft_patch == {
+        "minimum_validation": "사용자 인터뷰 진행\nPoC 구현\n검증 성공 기준 정의"
+    }

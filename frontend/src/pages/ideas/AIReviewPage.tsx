@@ -39,6 +39,7 @@ import {
   useAiSession,
 } from "../../ai/useAiSession";
 import { WebSearchApprovalPanel } from "../../components/ai/WebSearchApprovalPanel";
+import { buildFallbackResearchQueries } from "../../utils/buildFallbackResearchQueries";
 import {
   REFINE_STEPPER_STEPS,
   refineDirectionLabel,
@@ -778,10 +779,22 @@ export function AIReviewPage() {
   }
 
   function openResearchPanel() {
-    const defaults =
-      researchQueries.length > 0
-        ? researchQueries
-        : (session?.research_topics ?? []).slice(0, 5);
+    let defaults: string[];
+    if (researchQueries.length > 0) {
+      // Preserve in-progress user edits (including a previously opened empty row).
+      defaults = researchQueries;
+    } else {
+      const topics = (session?.research_topics ?? [])
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      if (topics.length > 0) {
+        defaults = topics;
+      } else {
+        const fallbackSource = draft ?? session?.source_idea_snapshot ?? null;
+        defaults = buildFallbackResearchQueries(fallbackSource);
+      }
+    }
     setResearchQueries(defaults.length > 0 ? defaults : [""]);
     setPreviewRun(
       researchRun?.status === "AWAITING_APPROVAL" ? researchRun : null,

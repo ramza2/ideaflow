@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -331,3 +332,92 @@ def test_ready_result_rejects_unset_null_injection_for_sparse_semantics() -> Non
     )
     assert "background" not in result.draft_patch
     assert set(result.draft_patch.keys()) == {"major_features"}
+
+
+def test_next_actions_prompt_forbids_alias_fields() -> None:
+    from app.llm.refine_prompts import DIRECTION_GUIDANCE, build_refine_user_prompt
+
+    guidance = DIRECTION_GUIDANCE[IdeaRefineDirection.NEXT_ACTIONS.value]
+    for banned in ("next_actions", "next_steps", "action_items", "todo", "tasks"):
+        assert banned in guidance
+    assert "minimum_validation" in guidance
+    assert "challenges" in guidance
+    assert "major_features" in guidance
+
+    prompt = build_refine_user_prompt(
+        direction=IdeaRefineDirection.NEXT_ACTIONS.value,
+        source_context={"title": "병원 청소 품질 AI 판정"},
+    )
+    assert "next_actions" in prompt
+    assert "minimum_validation" in prompt
+    # Other directions keep their original guidance (no NEXT_ACTIONS alias ban list).
+    other = DIRECTION_GUIDANCE[IdeaRefineDirection.EXPAND_DETAIL.value]
+    assert "next_actions" not in other
+
+
+def test_next_actions_alias_array_maps_to_minimum_validation() -> None:
+    payload = {
+        "decision": "READY_FOR_REVIEW",
+        "draft_patch": {
+            "next_actions": [
+                "사용자 인터뷰 진행",
+                "PoC 구현",
+                "검증 성공 기준 정의",
+            ]
+        },
+        "field_provenance": {},
+        "clarifying_questions": [],
+        "research_recommended": False,
+        "research_topics": [],
+    }
+    result = parse_refinement_result(
+        json.dumps(payload, ensure_ascii=False),
+        direction=IdeaRefineDirection.NEXT_ACTIONS,
+    )
+    assert result.draft_patch == {
+        "minimum_validation": "사용자 인터뷰 진행\nPoC 구현\n검증 성공 기준 정의"
+    }
+    assert "next_actions" not in result.draft_patch
+
+
+def test_next_actions_keeps_existing_minimum_validation() -> None:
+    payload = {
+        "decision": "READY_FOR_REVIEW",
+        "draft_patch": {
+            "minimum_validation": "기존 정상 값",
+            "next_actions": ["A", "B"],
+        },
+    }
+    result = parse_refinement_result(
+        json.dumps(payload, ensure_ascii=False),
+        direction=IdeaRefineDirection.NEXT_ACTIONS,
+    )
+    assert result.draft_patch["minimum_validation"] == "기존 정상 값"
+    assert "next_actions" not in result.draft_patch
+
+
+def test_next_actions_alias_rejected_for_other_directions() -> None:
+    payload = {
+        "decision": "READY_FOR_REVIEW",
+        "draft_patch": {"next_actions": ["A"]},
+    }
+    with pytest.raises(LlmResponseValidationError):
+        parse_refinement_result(
+            json.dumps(payload, ensure_ascii=False),
+            direction=IdeaRefineDirection.EXPAND_DETAIL,
+        )
+    with pytest.raises(LlmResponseValidationError):
+        parse_refinement_result(json.dumps(payload, ensure_ascii=False))
+
+
+def test_next_actions_rejects_object_and_number_alias_payloads() -> None:
+    for bad in ({"step": 1}, 3, [1, 2], [{"x": 1}]):
+        payload = {
+            "decision": "READY_FOR_REVIEW",
+            "draft_patch": {"next_actions": bad},
+        }
+        with pytest.raises(LlmResponseValidationError):
+            parse_refinement_result(
+                json.dumps(payload, ensure_ascii=False),
+                direction=IdeaRefineDirection.NEXT_ACTIONS,
+            )

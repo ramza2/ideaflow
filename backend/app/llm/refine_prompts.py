@@ -34,7 +34,13 @@ DIRECTION_GUIDANCE: dict[str, str] = {
     ),
     IdeaRefineDirection.NEXT_ACTIONS.value: (
         "현재 아이디어를 한 단계 진행하기 위한 현실적인 다음 작업을 구체화한다. "
-        "자동 실행을 제안하지 않는다."
+        "자동 실행을 제안하지 않는다. "
+        "NEXT_ACTIONS 선택 시 next_actions, next_steps, action_items, todo, tasks 같은 "
+        "별도의 새 field를 절대 만들지 않는다. "
+        "실행할 다음 단계는 기존 허용 field 중 의미가 가장 가까운 곳에 반영한다: "
+        "당장 수행할 검증/실행 단계 → minimum_validation, "
+        "선결 과제/위험/막힘 요소 → challenges, "
+        "구현해야 할 구체 항목 → major_features."
     ),
 }
 

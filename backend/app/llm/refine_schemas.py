@@ -342,7 +342,89 @@ def strip_json_fence(text: str) -> str:
     return stripped
 
 
-def parse_refinement_result(content: str) -> IdeaRefinementResult:
+_NEXT_ACTIONS_ALIAS_KEYS: tuple[str, ...] = (
+    "next_actions",
+    "next_steps",
+    "action_items",
+    "todo",
+    "tasks",
+)
+
+
+def _coerce_next_actions_alias_value(value: Any) -> str | None:
+    """Return multiline text for string/string[] aliases; None if empty.
+
+    Returns a sentinel empty string marker via raising for invalid types — callers
+    must treat False-y differently. Invalid types raise ValueError.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("next_actions aliases must be string or string list")
+            text = item.strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts) if parts else None
+    raise ValueError("next_actions aliases must be string or string list")
+
+
+def _minimum_validation_already_set(patch: dict[str, Any]) -> bool:
+    existing = patch.get("minimum_validation")
+    if isinstance(existing, str) and existing.strip():
+        return True
+    if isinstance(existing, list):
+        return any(isinstance(item, str) and item.strip() for item in existing)
+    return False
+
+
+def normalize_next_actions_aliases(data: dict[str, Any]) -> dict[str, Any]:
+    """NEXT_ACTIONS-only: map common alias keys onto minimum_validation.
+
+    Does not loosen global unknown-field policy. Invalid alias value types are left
+    in place so strict validation still fails with LLM_RESPONSE_INVALID.
+    Existing minimum_validation is never overwritten.
+    """
+    patch_raw = data.get("draft_patch")
+    if not isinstance(patch_raw, dict):
+        return data
+
+    patch = dict(patch_raw)
+    present = [key for key in _NEXT_ACTIONS_ALIAS_KEYS if key in patch]
+    if not present:
+        return data
+
+    collected: list[str] = []
+    for key in present:
+        value = patch[key]
+        try:
+            coerced = _coerce_next_actions_alias_value(value)
+        except ValueError:
+            # Keep invalid alias so strict schema rejects the response.
+            return data
+        del patch[key]
+        if not coerced:
+            continue
+        for line in coerced.split("\n"):
+            if line and line not in collected:
+                collected.append(line)
+
+    if collected and not _minimum_validation_already_set(patch):
+        patch["minimum_validation"] = "\n".join(collected)
+
+    out = dict(data)
+    out["draft_patch"] = patch
+    return out
+
+
+def parse_refinement_result(
+    content: str,
+    *,
+    direction: str | IdeaRefineDirection | None = None,
+) -> IdeaRefinementResult:
     cleaned = strip_json_fence(content)
     try:
         data = json.loads(cleaned)
@@ -350,6 +432,13 @@ def parse_refinement_result(content: str) -> IdeaRefinementResult:
         raise LlmResponseValidationError("LLM response is not valid JSON") from exc
     if not isinstance(data, dict):
         raise LlmResponseValidationError("LLM response must be a JSON object")
+
+    direction_value = (
+        direction.value if isinstance(direction, IdeaRefineDirection) else direction
+    )
+    if direction_value == IdeaRefineDirection.NEXT_ACTIONS.value:
+        data = normalize_next_actions_aliases(data)
+
     try:
         return IdeaRefinementResult.model_validate(data)
     except Exception as exc:  # noqa: BLE001

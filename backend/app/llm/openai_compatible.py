@@ -260,7 +260,7 @@ class OpenAICompatibleLlmProvider:
             len(content_bytes),
             hashlib.sha256(content_bytes).hexdigest()[:12],
         )
-        return parse_idea_refinement_result(content)
+        return parse_idea_refinement_result(content, direction=request.direction)
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code
