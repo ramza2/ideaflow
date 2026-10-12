@@ -27,6 +27,7 @@ from app.models.enums import (
 from app.models.idea import Idea
 from app.models.integration_runtime import IntegrationConfigAudit, IntegrationRuntimeConfig
 from app.models.user import User
+from app.embeddings.canonical import embedding_model_identity
 from app.services import embedding_service
 
 logger = logging.getLogger(__name__)
@@ -603,7 +604,7 @@ def _schedule_embedding_backfill(db: Session, settings: Settings) -> None:
 def _embedding_identity_from_settings(settings: Settings) -> dict[str, Any]:
     return {
         "provider": settings.embedding_provider,
-        "model_name": settings.embedding_model_name,
+        "model_name": embedding_model_identity(settings.embedding_model_name),
         "enabled": bool(settings.embedding_enabled),
     }
 
@@ -613,7 +614,9 @@ def _embedding_identity_from_overlay(
 ) -> dict[str, Any]:
     return {
         "provider": config.get("provider", base.embedding_provider),
-        "model_name": config.get("model_name", base.embedding_model_name),
+        "model_name": embedding_model_identity(
+            str(config.get("model_name", base.embedding_model_name))
+        ),
         "enabled": (
             bool(config["enabled"])
             if "enabled" in config

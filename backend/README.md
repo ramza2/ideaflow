@@ -12,7 +12,7 @@
 - **AI Session + AiJob + OpenAI-compatible LLM provider (Step 7)**
   - `IdeaAiSession` / `AiJob` (PostgreSQL queue)
   - In-process worker (`FOR UPDATE SKIP LOCKED`, lease, retry/backoff)
-  - Qwen3-14B via configurable OpenAI-compatible HTTP adapter (`httpx`)
+  - Qwen3 via configurable OpenAI-compatible HTTP adapter (`httpx`)
   - Clarification / retry / confirm → existing Idea service (exactly-once)
 
 Frontend AI workflow pages remain **mock** until Step 8. Web Search is Step 9.
@@ -39,9 +39,9 @@ Use repository-root `.env` (or real environment variables). Example:
 DATABASE_URL=postgresql+psycopg://ideaflow:ideaflow@localhost:5432/ideaflow
 AUTH_COOKIE_SECURE=false
 AI_WORKER_ENABLED=true
-LLM_API_URL=https://alzi-llm.openlink.kr
+LLM_API_URL=https://model-gateway.example.invalid
 LLM_CHAT_COMPLETIONS_PATH=/v1/chat/completions
-LLM_MODEL_NAME=Qwen3-14B
+LLM_MODEL_NAME=qwen3-14b
 LLM_API_KEY=
 LLM_ENABLE_THINKING=false
 ```

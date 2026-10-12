@@ -5,6 +5,19 @@ from __future__ import annotations
 from app.core.config import Settings, get_settings
 from app.models.idea import Idea
 
+# ModelOps uses the gateway alias while existing rows may still carry the
+# legacy served-model name. Both identify the same 1024-d BGE-M3 vectors.
+_EMBEDDING_MODEL_IDENTITIES = {
+    "BAAI/bge-m3": "bge-m3",
+    "bge-m3": "bge-m3",
+}
+
+
+def embedding_model_identity(model_name: str | None) -> str:
+    normalized = (model_name or "").strip()
+    return _EMBEDDING_MODEL_IDENTITIES.get(normalized, normalized)
+
+
 # Field order for truncation priority (most important first).
 _TRUNCATION_FIELD_ORDER: list[tuple[str, str]] = [
     ("title", "Title"),
@@ -119,6 +132,7 @@ def is_embedding_current(
     cfg = settings or get_settings()
     return (
         stored_hash == current_hash
-        and stored_model == cfg.embedding_model_name
+        and embedding_model_identity(stored_model)
+        == embedding_model_identity(cfg.embedding_model_name)
         and stored_dimension == cfg.embedding_dimension
     )

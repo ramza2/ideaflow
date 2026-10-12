@@ -60,13 +60,21 @@ def test_non_content_fields_do_not_change_embedding_fields_set() -> None:
 def test_is_embedding_current_requires_model_and_dimension() -> None:
     settings = Settings(
         _env_file=None,
-        EMBEDDING_MODEL_NAME="BAAI/bge-m3",
+        EMBEDDING_MODEL_NAME="bge-m3",
         EMBEDDING_DIMENSION=1024,
     )
     h = "abc"
+    # Legacy rows remain compatible with the gateway alias.
     assert is_embedding_current(
         stored_hash=h,
         stored_model="BAAI/bge-m3",
+        stored_dimension=1024,
+        current_hash=h,
+        settings=settings,
+    )
+    assert is_embedding_current(
+        stored_hash=h,
+        stored_model="bge-m3",
         stored_dimension=1024,
         current_hash=h,
         settings=settings,
@@ -75,6 +83,13 @@ def test_is_embedding_current_requires_model_and_dimension() -> None:
         stored_hash=h,
         stored_model="other-model",
         stored_dimension=1024,
+        current_hash=h,
+        settings=settings,
+    )
+    assert not is_embedding_current(
+        stored_hash=h,
+        stored_model="bge-m3",
+        stored_dimension=768,
         current_hash=h,
         settings=settings,
     )
