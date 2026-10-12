@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     auth_cookie_samesite: str = Field(default="lax", alias="AUTH_COOKIE_SAMESITE")
 
     # LLM (OpenAI-compatible)
-    llm_api_url: str = Field(default="https://alzi-llm.openlink.kr", alias="LLM_API_URL")
+    llm_api_url: str = Field(default="", alias="LLM_API_URL")
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
-    llm_model_name: str = Field(default="Qwen3-14B", alias="LLM_MODEL_NAME")
+    llm_model_name: str = Field(default="qwen3-14b", alias="LLM_MODEL_NAME")
     llm_chat_completions_path: str = Field(
         default="/v1/chat/completions", alias="LLM_CHAT_COMPLETIONS_PATH"
     )
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     embedding_provider: str = Field(default="openai_compatible", alias="EMBEDDING_PROVIDER")
     embedding_api_url: str = Field(default="", alias="EMBEDDING_API_URL")
     embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
-    embedding_model_name: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL_NAME")
+    embedding_model_name: str = Field(default="bge-m3", alias="EMBEDDING_MODEL_NAME")
     embedding_path: str = Field(default="/v1/embeddings", alias="EMBEDDING_PATH")
     embedding_dimension: int = Field(default=EMBEDDING_DIMENSION, alias="EMBEDDING_DIMENSION")
     embedding_timeout_seconds: float = Field(default=30.0, alias="EMBEDDING_TIMEOUT_SECONDS")
