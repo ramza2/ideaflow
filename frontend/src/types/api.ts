@@ -134,6 +134,7 @@ export interface IdeaListItem {
   created_at: string;
   updated_at: string;
   current_user_access: IdeaAccess;
+  is_favorite: boolean;
   /** Present only when an active search query is used. */
   search_explanation?: SearchExplanation | null;
 }
@@ -238,6 +239,7 @@ export interface IdeaListParams {
   visibility?: IdeaVisibility;
   author_id?: string;
   assignee_id?: string;
+  favorite_only?: boolean;
   limit?: number;
   offset?: number;
   search_mode?: IdeaSearchMode;

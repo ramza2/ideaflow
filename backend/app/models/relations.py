@@ -80,6 +80,29 @@ class IdeaShare(UUIDPrimaryKeyMixin, Base):
     )
 
 
+class IdeaFavorite(Base):
+    """Per-user Idea favorite/bookmark state."""
+
+    __tablename__ = "idea_favorites"
+    __table_args__ = (Index("ix_idea_favorites_user_id", "user_id"),)
+
+    idea_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ideas.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class IdeaParticipant(Base):
     """Collaboration membership — not an ACL table.
 

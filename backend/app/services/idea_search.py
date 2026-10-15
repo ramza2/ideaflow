@@ -116,6 +116,7 @@ def list_semantic_ideas(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_only: bool = False,
     limit: int = 50,
     offset: int = 0,
     settings: Settings | None = None,
@@ -143,6 +144,7 @@ def list_semantic_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_user_id=user_id if favorite_only else None,
     )
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
@@ -167,6 +169,7 @@ def _keyword_ranked_ids(
     visibility: str | None,
     author_id: UUID | None,
     assignee_id: UUID | None,
+    favorite_only: bool,
     candidate_limit: int,
 ) -> list[UUID]:
     base = _build_keyword_query(
@@ -181,6 +184,7 @@ def _keyword_ranked_ids(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_only=favorite_only,
     )
     rows = list(
         db.scalars(
@@ -204,6 +208,7 @@ def _semantic_ranked_ids(
     visibility: str | None,
     author_id: UUID | None,
     assignee_id: UUID | None,
+    favorite_only: bool,
     candidate_limit: int,
     settings: Settings,
 ) -> list[tuple[UUID, float]]:
@@ -224,6 +229,7 @@ def _semantic_ranked_ids(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_user_id=user_id if favorite_only else None,
     )
     rows = list(db.execute(base.order_by(distance.asc(), Idea.id.asc()).limit(candidate_limit)))
     return [(row[0], float(row[1])) for row in rows]
@@ -295,6 +301,7 @@ def list_hybrid_ideas(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_only: bool = False,
     limit: int = 50,
     offset: int = 0,
     settings: Settings | None = None,
@@ -324,6 +331,7 @@ def list_hybrid_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_only=favorite_only,
         candidate_limit=pool,
     )
     semantic_entries = _semantic_ranked_ids(
@@ -339,6 +347,7 @@ def list_hybrid_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_only=favorite_only,
         candidate_limit=pool,
         settings=cfg,
     )
@@ -363,6 +372,7 @@ def list_hybrid_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_user_id=user_id if favorite_only else None,
     )
     ideas = list(db.scalars(final_stmt))
     ideas_by_id = {idea.id: idea for idea in ideas}
@@ -398,6 +408,7 @@ def list_ideas_with_search_mode(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_only: bool = False,
     limit: int = 50,
     offset: int = 0,
     settings: Settings | None = None,
@@ -429,6 +440,7 @@ def list_ideas_with_search_mode(
             visibility=visibility,
             author_id=author_id,
             assignee_id=assignee_id,
+            favorite_only=favorite_only,
             limit=limit,
             offset=offset,
         )
@@ -448,6 +460,7 @@ def list_ideas_with_search_mode(
             visibility=visibility,
             author_id=author_id,
             assignee_id=assignee_id,
+            favorite_only=favorite_only,
             limit=limit,
             offset=offset,
             settings=settings,
@@ -480,6 +493,7 @@ def list_ideas_with_search_mode(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_only=favorite_only,
         limit=limit,
         offset=offset,
         settings=settings,

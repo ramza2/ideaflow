@@ -174,6 +174,7 @@ class IdeaListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     current_user_access: str
+    is_favorite: bool = False
     # Present only for active search (q set). Omitted/null on plain list/detail.
     search_explanation: SearchExplanation | None = None
 

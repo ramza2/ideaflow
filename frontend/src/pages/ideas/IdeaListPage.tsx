@@ -9,7 +9,10 @@ import {
   LayoutList,
   Download,
   Plus,
+  Star,
   StarOff,
+  Link2,
+  Trash2,
   MoreHorizontal,
   Sparkles,
   X,
@@ -17,7 +20,7 @@ import {
   ChevronRight,
   HelpCircle,
 } from "lucide-react";
-import { listIdeas } from "../../api/ideas";
+import { deleteIdea, listIdeas, setIdeaFavorite } from "../../api/ideas";
 import { listCategories, listMembers, listStages } from "../../api/workspaces";
 import { ApiError, apiErrorMessage } from "../../api/client";
 import { useAuth } from "../../auth/AuthProvider";
@@ -25,6 +28,14 @@ import { Button } from "../../components/common/Button";
 import { ApiPriorityBadge, StageLabelBadge } from "../../components/common/Badge";
 import { Avatar } from "../../components/common/Avatar";
 import { EmptyState } from "../../components/common/EmptyState";
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../app/components/ui/dropdown-menu";
 import { IdeaCreateMenu } from "../../components/ideas/IdeaCreateMenu";
 import { SearchExplanationBadges } from "../../components/ideas/SearchExplanationBadges";
 import { toast } from "../../components/common/Toast";
@@ -37,15 +48,15 @@ import type {
   StagePublic,
 } from "../../types/api";
 
-type Tab = "all" | "mine" | "assigned";
+type Tab = "all" | "mine" | "assigned" | "favorite";
 type ViewMode = "list" | "card";
 
-const TABS: { id: Tab | "participating" | "favorite"; label: string; disabled?: boolean }[] = [
+const TABS: { id: Tab | "participating"; label: string; disabled?: boolean }[] = [
   { id: "all", label: "전체" },
   { id: "mine", label: "내가 작성" },
   { id: "participating", label: "참여 중", disabled: true },
   { id: "assigned", label: "담당" },
-  { id: "favorite", label: "즐겨찾기", disabled: true },
+  { id: "favorite", label: "즐겨찾기" },
 ];
 
 const PRIORITY_OPTIONS: { value: IdeaPriority | ""; label: string }[] = [
@@ -149,6 +160,8 @@ export function IdeaListPage() {
   const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
   const [activeFilters, setActiveFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams));
   const [searchNotice, setSearchNotice] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<IdeaListItem | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const requestSeqRef = useRef(0);
 
   // URL is source of truth for pagination offset
@@ -257,6 +270,9 @@ export function IdeaListPage() {
     if (activeFilters.priority) params.priority = activeFilters.priority;
     if (activeFilters.category_id) params.category_id = activeFilters.category_id;
 
+    if (tab === "favorite") {
+      params.favorite_only = true;
+    }
     if (tab === "mine") {
       params.author_id = user.id;
     } else if (tab === "assigned") {
@@ -404,11 +420,134 @@ export function IdeaListPage() {
   function handleDisabledTab(id: string) {
     if (id === "participating") {
       toast.info("참여자 기능은 추후 제공됩니다");
-      return;
     }
-    if (id === "favorite") {
-      toast.info("즐겨찾기 기능은 추후 제공됩니다");
+  }
+
+  async function handleToggleFavorite(idea: IdeaListItem) {
+    const nextFavorite = !idea.is_favorite;
+    try {
+      await setIdeaFavorite(workspaceId, idea.id, nextFavorite);
+      if (tab === "favorite" && !nextFavorite) {
+        const wasLastOnPage = items.length === 1 && offset > 0;
+        if (wasLastOnPage) {
+          syncSearchParams({
+            offset: Math.max(0, offset - PAGE_SIZE),
+            q: urlQuery,
+            filters: activeFilters,
+            searchMode,
+          });
+        } else {
+          setItems((prev) => prev.filter((item) => item.id !== idea.id));
+        }
+        setTotal((prev) => Math.max(0, prev - 1));
+      } else {
+        setItems((prev) =>
+          prev.map((item) =>
+            item.id === idea.id ? { ...item, is_favorite: nextFavorite } : item,
+          ),
+        );
+      }
+      toast.success(nextFavorite ? "즐겨찾기에 추가했습니다" : "즐겨찾기에서 해제했습니다");
+    } catch (err) {
+      toast.error(apiErrorMessage(err));
     }
+  }
+
+  async function handleCopyIdeaLink(idea: IdeaListItem) {
+    const url = `${window.location.origin}/w/${workspaceId}/ideas/${idea.id}`;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = url;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand("copy");
+        textarea.remove();
+        if (!copied) throw new Error("copy failed");
+      }
+      toast.success("아이디어 링크를 복사했습니다");
+    } catch {
+      toast.error("링크를 복사하지 못했습니다");
+    }
+  }
+
+  async function handleDeleteConfirm() {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
+    try {
+      await deleteIdea(workspaceId, deleteTarget.id);
+      const wasLastOnPage = items.length === 1 && offset > 0;
+      if (wasLastOnPage) {
+        syncSearchParams({
+          offset: Math.max(0, offset - PAGE_SIZE),
+          q: urlQuery,
+          filters: activeFilters,
+          searchMode,
+        });
+      } else {
+        setItems((prev) => prev.filter((item) => item.id !== deleteTarget.id));
+      }
+      setTotal((prev) => Math.max(0, prev - 1));
+      setDeleteTarget(null);
+      toast.success("아이디어를 삭제했습니다");
+    } catch (err) {
+      toast.error(apiErrorMessage(err));
+    } finally {
+      setDeleteLoading(false);
+    }
+  }
+
+  function renderIdeaActions(idea: IdeaListItem) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`${idea.title} 작업 메뉴`}
+            onClick={(e) => e.stopPropagation()}
+            className="w-7 h-7 flex items-center justify-center rounded-md text-[#9ca3af] hover:text-[#6b6b80] hover:bg-[#f0f0f5]"
+          >
+            <MoreHorizontal className="w-4 h-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="min-w-40 bg-white border-[rgba(0,0,0,0.08)] shadow-lg"
+        >
+          <DropdownMenuItem
+            onSelect={() => void handleToggleFavorite(idea)}
+            className="cursor-pointer"
+          >
+            {idea.is_favorite ? <StarOff /> : <Star />}
+            {idea.is_favorite ? "즐겨찾기 해제" : "즐겨찾기에 추가"}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={() => void handleCopyIdeaLink(idea)}
+            className="cursor-pointer"
+          >
+            <Link2 />
+            링크 복사
+          </DropdownMenuItem>
+          {idea.current_user_access === "OWNER" && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => setDeleteTarget(idea)}
+                className="cursor-pointer"
+              >
+                <Trash2 />
+                삭제
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
   }
 
   const stageLabel = (id: string) => stages.find((s) => s.id === id)?.label ?? id;
@@ -433,7 +572,12 @@ export function IdeaListPage() {
             title: "담당 중인 아이디어가 없습니다",
             description: "담당자로 지정된 아이디어가 없습니다.",
           }
-        : {
+        : tab === "favorite"
+          ? {
+              title: "즐겨찾기한 아이디어가 없습니다",
+              description: "아이디어의 작업 메뉴에서 즐겨찾기에 추가해 보세요.",
+            }
+          : {
             title: "등록된 아이디어가 없습니다",
             description: "첫 번째 아이디어를 등록해 보세요.",
           };
@@ -704,14 +848,25 @@ export function IdeaListPage() {
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          title="즐겨찾기 기능은 추후 제공됩니다"
+                          title={idea.is_favorite ? "즐겨찾기 해제" : "즐겨찾기에 추가"}
+                          aria-label={idea.is_favorite ? "즐겨찾기 해제" : "즐겨찾기에 추가"}
                           onClick={(e) => {
                             e.stopPropagation();
-                            toast.info("즐겨찾기 기능은 추후 제공됩니다");
+                            void handleToggleFavorite(idea);
                           }}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-[#9ca3af]"
+                          className={clsx(
+                            "transition-opacity shrink-0",
+                            idea.is_favorite
+                              ? "opacity-100 text-[#f59e0b]"
+                              : "opacity-0 group-hover:opacity-100 text-[#9ca3af]",
+                          )}
                         >
-                          <StarOff className="w-3 h-3" />
+                          <Star
+                            className={clsx(
+                              "w-3 h-3",
+                              idea.is_favorite && "fill-current",
+                            )}
+                          />
                         </button>
                         <p className="text-sm font-medium text-[#111118] truncate">{idea.title}</p>
                       </div>
@@ -726,9 +881,7 @@ export function IdeaListPage() {
                     <div><Avatar user={author} size="xs" /></div>
                     <div>{assignee ? <Avatar user={assignee} size="xs" /> : null}</div>
                     <span className="text-xs text-[#9ca3af]">{new Date(idea.updated_at).toLocaleDateString("ko")}</span>
-                    <button type="button" onClick={(e) => e.stopPropagation()} className="w-7 h-7 flex items-center justify-center rounded-md text-[#9ca3af] hover:text-[#6b6b80] hover:bg-[#f0f0f5]">
-                      <MoreHorizontal className="w-4 h-4" />
-                    </button>
+                    {renderIdeaActions(idea)}
                   </div>
                 );
               })}
@@ -742,9 +895,14 @@ export function IdeaListPage() {
                 <div
                   key={idea.id}
                   onClick={() => navigate(`/w/${workspaceId}/ideas/${idea.id}`)}
-                  className="bg-white rounded-xl border border-[rgba(0,0,0,0.07)] p-4 hover:border-[rgba(0,0,0,0.12)] hover:shadow-sm cursor-pointer transition-all"
+                  className="relative group bg-white rounded-xl border border-[rgba(0,0,0,0.07)] p-4 hover:border-[rgba(0,0,0,0.12)] hover:shadow-sm cursor-pointer transition-all"
                 >
-                  <StageLabelBadge label={idea.stage.label} />
+                  <div className="absolute top-3 right-3" onClick={(e) => e.stopPropagation()}>
+                    {renderIdeaActions(idea)}
+                  </div>
+                  <div className="pr-8">
+                    <StageLabelBadge label={idea.stage.label} />
+                  </div>
                   <p className="text-sm font-semibold text-[#111118] mb-1 line-clamp-2 mt-2">{idea.title}</p>
                   <p className="text-xs text-[#6b6b80] mb-3 line-clamp-2">{idea.one_line_definition ?? ""}</p>
                   {urlQuery.trim() ? (
@@ -782,6 +940,24 @@ export function IdeaListPage() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onClose={() => {
+          if (!deleteLoading) setDeleteTarget(null);
+        }}
+        onConfirm={() => void handleDeleteConfirm()}
+        title="아이디어를 삭제하시겠습니까?"
+        description={
+          deleteTarget
+            ? `"${deleteTarget.title}" 아이디어가 목록과 검색 결과에서 삭제됩니다.`
+            : undefined
+        }
+        confirmLabel="삭제"
+        cancelLabel="취소"
+        variant="danger"
+        loading={deleteLoading}
+      />
 
       {filterOpen && (
         <div className="fixed inset-0 z-40 flex justify-end">
