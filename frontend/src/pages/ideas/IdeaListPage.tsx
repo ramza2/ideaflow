@@ -110,6 +110,11 @@ function parseSearchMode(raw: string | null): IdeaSearchMode {
   return envDefaultSearchMode();
 }
 
+function parseTab(raw: string | null): Tab {
+  if (raw === "mine" || raw === "assigned" || raw === "favorite") return raw;
+  return "all";
+}
+
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
     stage_id: params.get("stage_id") ?? "",
@@ -130,11 +135,13 @@ function buildListSearchParams(input: {
   searchMode: IdeaSearchMode;
   filters: Filters;
   offset: number;
+  tab: Tab;
 }): URLSearchParams {
   const params = new URLSearchParams();
   if (input.q) params.set("q", input.q);
   // Always persist the chosen mode so ENV defaults cannot override after F5.
   params.set("search_mode", input.searchMode);
+  if (input.tab !== "all") params.set("tab", input.tab);
   if (input.filters.stage_id) params.set("stage_id", input.filters.stage_id);
   if (input.filters.priority) params.set("priority", input.filters.priority);
   if (input.filters.category_id) params.set("category_id", input.filters.category_id);
@@ -149,7 +156,7 @@ export function IdeaListPage() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [tab, setTab] = useState<Tab>("all");
+  const tab = parseTab(searchParams.get("tab"));
   const [view, setView] = useState<ViewMode>("list");
   // URL q is the persisted search Source of Truth for API requests.
   const urlQuery = searchParams.get("q") ?? "";
@@ -198,6 +205,7 @@ export function IdeaListPage() {
       searchMode?: IdeaSearchMode;
       filters?: Filters;
       offset?: number;
+      tab?: Tab;
     }) => {
       const q = next.q !== undefined ? next.q : (searchParams.get("q") ?? "");
       const mode =
@@ -207,8 +215,16 @@ export function IdeaListPage() {
       const f = next.filters ?? filtersFromSearchParams(searchParams);
       const nextOffset =
         next.offset !== undefined ? next.offset : offsetFromSearchParams(searchParams);
+      const nextTab =
+        next.tab !== undefined ? next.tab : parseTab(searchParams.get("tab"));
       setSearchParams(
-        buildListSearchParams({ q, searchMode: mode, filters: f, offset: nextOffset }),
+        buildListSearchParams({
+          q,
+          searchMode: mode,
+          filters: f,
+          offset: nextOffset,
+          tab: nextTab,
+        }),
         { replace: true },
       );
     },
@@ -233,6 +249,7 @@ export function IdeaListPage() {
           searchMode: parseSearchMode(prev.get("search_mode")),
           filters: filtersFromSearchParams(prev),
           offset: 0,
+          tab: parseTab(prev.get("tab")),
         });
       }, { replace: true });
     }, 300);
@@ -630,12 +647,12 @@ export function IdeaListPage() {
                   handleDisabledTab(t.id);
                   return;
                 }
-                setTab(t.id as Tab);
                 syncSearchParams({
                   offset: 0,
                   q: urlQuery,
                   filters: activeFilters,
                   searchMode,
+                  tab: t.id as Tab,
                 });
               }}
               className={clsx(
