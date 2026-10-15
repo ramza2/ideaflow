@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import delete, exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -18,7 +18,7 @@ from app.models.enums import (
     WorkspaceMemberStatus,
 )
 from app.models.idea import Idea
-from app.models.relations import IdeaShare, IdeaTag
+from app.models.relations import IdeaFavorite, IdeaShare, IdeaTag
 from app.models.user import User
 from app.models.workspace import Tag, WorkspaceCategory, WorkspaceMember, WorkspaceStage
 from app.schemas.idea import (
@@ -485,6 +485,25 @@ def update_idea(
 
 def soft_delete_idea(db: Session, idea: Idea) -> None:
     idea.deleted_at = utcnow()
+    db.execute(delete(IdeaFavorite).where(IdeaFavorite.idea_id == idea.id))
+    db.flush()
+
+
+def set_idea_favorite(
+    db: Session,
+    idea: Idea,
+    *,
+    user_id: UUID,
+    favorite: bool,
+) -> None:
+    """Idempotently set per-user favorite state for a readable Idea."""
+    key = (idea.id, user_id)
+    existing = db.get(IdeaFavorite, key)
+    if favorite:
+        if existing is None:
+            db.add(IdeaFavorite(idea_id=idea.id, user_id=user_id))
+    elif existing is not None:
+        db.delete(existing)
     db.flush()
 
 
@@ -543,6 +562,7 @@ def _to_list_item(
     stages: dict[UUID, WorkspaceStage],
     categories: dict[UUID, WorkspaceCategory],
     tags_by_idea: dict[UUID, list[Tag]],
+    is_favorite: bool = False,
     search_explanation=None,
 ) -> IdeaListItem:
     author = users[idea.author_id]
@@ -567,6 +587,7 @@ def _to_list_item(
         created_at=idea.created_at,
         updated_at=idea.updated_at,
         current_user_access=idea_access.compute_access(idea, user_id, share),
+        is_favorite=is_favorite,
         search_explanation=search_explanation,
     )
 
@@ -579,6 +600,15 @@ def to_detail(
     share: IdeaShare | None,
 ) -> IdeaDetail:
     users, stages, categories, tags_by_idea = _load_related(db, [idea])
+    is_favorite = (
+        db.scalar(
+            select(IdeaFavorite.idea_id).where(
+                IdeaFavorite.idea_id == idea.id,
+                IdeaFavorite.user_id == user_id,
+            )
+        )
+        is not None
+    )
     base = _to_list_item(
         idea,
         user_id=user_id,
@@ -587,6 +617,7 @@ def to_detail(
         stages=stages,
         categories=categories,
         tags_by_idea=tags_by_idea,
+        is_favorite=is_favorite,
     )
     return IdeaDetail(
         **base.model_dump(),
@@ -647,6 +678,7 @@ def _apply_list_filters(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_user_id: UUID | None = None,
 ):
     if stage_id is not None:
         stmt = stmt.where(Idea.stage_id == stage_id)
@@ -662,6 +694,15 @@ def _apply_list_filters(
         stmt = stmt.where(Idea.author_id == author_id)
     if assignee_id is not None:
         stmt = stmt.where(Idea.assignee_id == assignee_id)
+    if favorite_user_id is not None:
+        stmt = stmt.where(
+            exists(
+                select(IdeaFavorite.idea_id).where(
+                    IdeaFavorite.idea_id == Idea.id,
+                    IdeaFavorite.user_id == favorite_user_id,
+                )
+            )
+        )
     return stmt
 
 
@@ -678,6 +719,7 @@ def _build_keyword_query(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_only: bool = False,
 ):
     del db
     base = select(Idea).where(Idea.workspace_id == workspace_id)
@@ -692,6 +734,7 @@ def _build_keyword_query(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_user_id=user_id if favorite_only else None,
     )
 
 
@@ -716,6 +759,18 @@ def _finalize_list_response(
         ).all()
     } if rows else {}
 
+    favorite_ids = (
+        set(
+            db.scalars(
+                select(IdeaFavorite.idea_id).where(
+                    IdeaFavorite.user_id == user_id,
+                    IdeaFavorite.idea_id.in_([i.id for i in rows]),
+                )
+            ).all()
+        )
+        if rows
+        else set()
+    )
     explain_map = explanations or {}
     items = [
         _to_list_item(
@@ -726,6 +781,7 @@ def _finalize_list_response(
             stages=stages,
             categories=categories,
             tags_by_idea=tags_by_idea,
+            is_favorite=idea.id in favorite_ids,
             search_explanation=explain_map.get(idea.id),
         )
         for idea in rows
@@ -746,6 +802,7 @@ def list_ideas(
     visibility: str | None = None,
     author_id: UUID | None = None,
     assignee_id: UUID | None = None,
+    favorite_only: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> IdeaListResponse:
@@ -765,6 +822,7 @@ def list_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_user_id=user_id if favorite_only else None,
     )
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0

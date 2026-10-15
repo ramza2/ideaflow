@@ -634,6 +634,58 @@ def test_hybrid_acl_race_revalidates_final_fetch(
     assert payload["total"] == 0
 
 
+def test_favorite_only_applies_to_semantic_and_hybrid_search(
+    client: TestClient,
+    db: Session,
+) -> None:
+    owner, pw = _user(db)
+    ws = _team(db, owner)
+    favorite = _create_idea(
+        db,
+        ws,
+        owner,
+        title="favorite meeting automation",
+        problem="meeting notes automation and action items",
+    )
+    other = _create_idea(
+        db,
+        ws,
+        owner,
+        title="other meeting automation",
+        problem="meeting notes automation and action items",
+    )
+
+    from app.embeddings.canonical import build_idea_embedding_text
+
+    for idea in (favorite, other):
+        _store_embedding(
+            db,
+            idea,
+            text=build_idea_embedding_text(idea, load_idea_tag_names(db, idea.id)),
+        )
+
+    headers = _login(client, owner.email, pw)
+    favorite_url = f"/api/v1/workspaces/{ws.id}/ideas/{favorite.id}/favorite"
+    assert client.put(favorite_url, headers=headers).status_code == 204
+
+    for mode in ("semantic", "hybrid"):
+        r = client.get(
+            f"/api/v1/workspaces/{ws.id}/ideas",
+            params={
+                "q": "meeting automation",
+                "search_mode": mode,
+                "favorite_only": "true",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+        payload = r.json()
+        ids = [item["id"] for item in payload["items"]]
+        assert str(favorite.id) in ids
+        assert str(other.id) not in ids
+        assert all(item["is_favorite"] is True for item in payload["items"])
+
+
 def test_hybrid_result_window_within_limit(client: TestClient, db: Session) -> None:
     owner, pw = _user(db)
     ws = _team(db, owner)

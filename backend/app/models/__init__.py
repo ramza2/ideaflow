@@ -41,7 +41,7 @@ from app.models.enums import (
     WebResearchRunStatus,
 )
 from app.models.idea import Idea
-from app.models.relations import IdeaParticipant, IdeaShare, IdeaTag
+from app.models.relations import IdeaFavorite, IdeaParticipant, IdeaShare, IdeaTag
 from app.models.user import User
 from app.models.workspace import (
     Tag,
@@ -69,6 +69,7 @@ __all__ = [
     "IdeaFeasibility",
     "IdeaVisibility",
     "IdeaTag",
+    "IdeaFavorite",
     "IdeaShare",
     "IdeaSharePermission",
     "IdeaParticipant",

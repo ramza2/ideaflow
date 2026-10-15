@@ -52,6 +52,7 @@ def list_ideas(
     visibility: Annotated[str | None, Query()] = None,
     author_id: Annotated[UUID | None, Query()] = None,
     assignee_id: Annotated[UUID | None, Query()] = None,
+    favorite_only: Annotated[bool, Query()] = False,
     search_mode: Annotated[str, Query()] = "keyword",
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -69,6 +70,7 @@ def list_ideas(
         visibility=visibility,
         author_id=author_id,
         assignee_id=assignee_id,
+        favorite_only=favorite_only,
         limit=limit,
         offset=offset,
     )
@@ -220,6 +222,66 @@ def patch_idea(
         db.refresh(idea)
         share = idea_access.get_idea_share(db, idea.id, ctx.user.id)
         return idea_service.to_detail(db, idea, user_id=ctx.user.id, share=share)
+    except AppError:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.put("/{idea_id}/favorite", status_code=status.HTTP_204_NO_CONTENT)
+def favorite_idea(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> None:
+    del auth
+    try:
+        idea, _share = idea_service.get_readable_idea(
+            db,
+            workspace_id=ctx.workspace.id,
+            idea_id=idea_id,
+            user_id=ctx.user.id,
+        )
+        idea_service.set_idea_favorite(
+            db,
+            idea,
+            user_id=ctx.user.id,
+            favorite=True,
+        )
+        db.commit()
+    except AppError:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.delete("/{idea_id}/favorite", status_code=status.HTTP_204_NO_CONTENT)
+def unfavorite_idea(
+    idea_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    ctx: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> None:
+    del auth
+    try:
+        idea, _share = idea_service.get_readable_idea(
+            db,
+            workspace_id=ctx.workspace.id,
+            idea_id=idea_id,
+            user_id=ctx.user.id,
+        )
+        idea_service.set_idea_favorite(
+            db,
+            idea,
+            user_id=ctx.user.id,
+            favorite=False,
+        )
+        db.commit()
     except AppError:
         db.rollback()
         raise

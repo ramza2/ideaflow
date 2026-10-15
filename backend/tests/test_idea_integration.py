@@ -25,7 +25,7 @@ from app.models.enums import (
     WorkspaceType,
 )
 from app.models.idea import Idea
-from app.models.relations import IdeaShare
+from app.models.relations import IdeaFavorite, IdeaShare
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceCategory, WorkspaceMember, WorkspaceStage
 from app.schemas.idea import IdeaCreate
@@ -579,6 +579,86 @@ def test_share_replace(client: TestClient, db: Session) -> None:
     assert by_user[str(c.id)] == "EDIT"
 
 
+def test_favorite_is_per_user_filterable_and_idempotent(
+    client: TestClient, db: Session
+) -> None:
+    owner, owner_pw = _user(db)
+    member, member_pw = _user(db)
+    ws = _team_with_defaults(db, owner)
+    _add_member(db, ws, member)
+
+    _login(client, owner.email, owner_pw)
+    headers = _headers(client)
+    favorite_id = client.post(
+        _ideas_url(ws.id),
+        json={"title": "즐겨찾기 대상", "visibility": "WORKSPACE"},
+        headers=headers,
+    ).json()["id"]
+    other_id = client.post(
+        _ideas_url(ws.id),
+        json={"title": "일반 아이디어", "visibility": "WORKSPACE"},
+        headers=headers,
+    ).json()["id"]
+
+    initial = client.get(f"{_ideas_url(ws.id)}/{favorite_id}")
+    assert initial.status_code == 200
+    assert initial.json()["is_favorite"] is False
+
+    favorite_url = f"{_ideas_url(ws.id)}/{favorite_id}/favorite"
+    assert client.put(favorite_url, headers=headers).status_code == 204
+    assert client.put(favorite_url, headers=headers).status_code == 204
+
+    detail = client.get(f"{_ideas_url(ws.id)}/{favorite_id}")
+    assert detail.json()["is_favorite"] is True
+    filtered = client.get(_ideas_url(ws.id), params={"favorite_only": "true"}).json()
+    assert filtered["total"] == 1
+    assert [item["id"] for item in filtered["items"]] == [favorite_id]
+    assert filtered["items"][0]["is_favorite"] is True
+    assert all(item["id"] != other_id for item in filtered["items"])
+
+    # Favorite state belongs to the current user, not the Idea globally.
+    _login(client, member.email, member_pw)
+    member_detail = client.get(f"{_ideas_url(ws.id)}/{favorite_id}")
+    assert member_detail.status_code == 200
+    assert member_detail.json()["is_favorite"] is False
+    assert client.get(
+        _ideas_url(ws.id), params={"favorite_only": "true"}
+    ).json()["total"] == 0
+
+    member_headers = _headers(client)
+    assert client.put(favorite_url, headers=member_headers).status_code == 204
+    assert client.get(f"{_ideas_url(ws.id)}/{favorite_id}").json()["is_favorite"] is True
+    assert client.delete(favorite_url, headers=member_headers).status_code == 204
+    assert client.delete(favorite_url, headers=member_headers).status_code == 204
+    assert client.get(f"{_ideas_url(ws.id)}/{favorite_id}").json()["is_favorite"] is False
+
+
+def test_favorite_respects_read_acl(client: TestClient, db: Session) -> None:
+    owner, owner_pw = _user(db)
+    other, other_pw = _user(db)
+    ws = _team_with_defaults(db, owner)
+    _add_member(db, ws, other)
+
+    _login(client, owner.email, owner_pw)
+    private_id = client.post(
+        _ideas_url(ws.id),
+        json={"title": "비공개 즐겨찾기", "visibility": "PRIVATE"},
+        headers=_headers(client),
+    ).json()["id"]
+
+    _login(client, other.email, other_pw)
+    r = client.put(
+        f"{_ideas_url(ws.id)}/{private_id}/favorite",
+        headers=_headers(client),
+    )
+    assert r.status_code == 404
+    assert db.scalar(
+        select(func.count())
+        .select_from(IdeaFavorite)
+        .where(IdeaFavorite.idea_id == uuid.UUID(private_id))
+    ) == 0
+
+
 def test_soft_delete(client: TestClient, db: Session) -> None:
     author, password = _user(db)
     ws = _team_with_defaults(db, author)
@@ -589,12 +669,22 @@ def test_soft_delete(client: TestClient, db: Session) -> None:
         headers=_headers(client),
     ).json()["id"]
     code = client.get(f"{_ideas_url(ws.id)}/{idea_id}").json()["idea_code"]
+    headers = _headers(client)
+    favorite_url = f"{_ideas_url(ws.id)}/{idea_id}/favorite"
+    assert client.put(favorite_url, headers=headers).status_code == 204
+    assert db.scalar(
+        select(func.count())
+        .select_from(IdeaFavorite)
+        .where(IdeaFavorite.idea_id == uuid.UUID(idea_id))
+    ) == 1
 
-    assert (
-        client.delete(f"{_ideas_url(ws.id)}/{idea_id}", headers=_headers(client)).status_code
-        == 204
-    )
+    assert client.delete(f"{_ideas_url(ws.id)}/{idea_id}", headers=headers).status_code == 204
     assert client.get(f"{_ideas_url(ws.id)}/{idea_id}").status_code == 404
+    assert db.scalar(
+        select(func.count())
+        .select_from(IdeaFavorite)
+        .where(IdeaFavorite.idea_id == uuid.UUID(idea_id))
+    ) == 0
     assert all(i["id"] != idea_id for i in client.get(_ideas_url(ws.id)).json()["items"])
     assert all(
         i["id"] != idea_id

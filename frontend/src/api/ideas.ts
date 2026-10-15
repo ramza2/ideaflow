@@ -33,6 +33,7 @@ function buildQuery(params: IdeaListParams = {}): string {
   if (params.visibility) search.set("visibility", params.visibility);
   if (params.author_id) search.set("author_id", params.author_id);
   if (params.assignee_id) search.set("assignee_id", params.assignee_id);
+  if (params.favorite_only) search.set("favorite_only", "true");
   if (params.limit != null) search.set("limit", String(params.limit));
   if (params.offset != null) search.set("offset", String(params.offset));
   const qs = search.toString();
@@ -76,6 +77,20 @@ export async function updateIdea(
     body: payload,
     csrf: true,
   });
+}
+
+export async function setIdeaFavorite(
+  workspaceId: string,
+  ideaId: string,
+  favorite: boolean,
+): Promise<void> {
+  await apiRequest<void>(
+    `/workspaces/${workspaceId}/ideas/${ideaId}/favorite`,
+    {
+      method: favorite ? "PUT" : "DELETE",
+      csrf: true,
+    },
+  );
 }
 
 export async function deleteIdea(
