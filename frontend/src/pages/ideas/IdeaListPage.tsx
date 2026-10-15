@@ -516,6 +516,7 @@ export function IdeaListPage() {
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
+          onClick={(e) => e.stopPropagation()}
           className="min-w-40 bg-white border-[rgba(0,0,0,0.08)] shadow-lg"
         >
           <DropdownMenuItem
