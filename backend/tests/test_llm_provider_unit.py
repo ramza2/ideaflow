@@ -75,6 +75,8 @@ READY_JSON = {
 
 
 def _ok_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/v1/token-count":
+        return httpx.Response(404, json={"error": "unsupported"})
     body = {
         "choices": [{"message": {"content": json.dumps(READY_JSON)}}],
     }
@@ -279,6 +281,8 @@ def test_refine_idea_next_actions_alias_is_normalized() -> None:
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/token-count":
+            return httpx.Response(404, json={"error": "unsupported"})
         body = {
             "choices": [{"message": {"content": json.dumps(refine_payload, ensure_ascii=False)}}],
         }
