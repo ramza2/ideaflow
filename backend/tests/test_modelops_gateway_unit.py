@@ -338,6 +338,87 @@ def test_route_change_recounts_before_chat() -> None:
     assert chat_bodies[0]["max_tokens"] == 2500
 
 
+def test_route_change_after_chat_discards_result_and_rebudgets() -> None:
+    route_version = 1
+    chat_calls = 0
+    count_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal route_version, chat_calls, count_calls
+        if request.url.path == "/v1/token-count":
+            count_calls += 1
+            if route_version == 1:
+                return httpx.Response(
+                    200,
+                    json=_token_count_response(
+                        100,
+                        context_window=8192,
+                        deployment_id="dep-a",
+                        route_id="route-a",
+                        routing_version=1,
+                    ),
+                )
+            return httpx.Response(
+                200,
+                json=_token_count_response(
+                    100,
+                    context_window=12288,
+                    deployment_id="dep-b",
+                    route_id="route-b",
+                    routing_version=2,
+                ),
+            )
+        if request.url.path.endswith("/capabilities"):
+            if route_version == 1:
+                return httpx.Response(
+                    200,
+                    json=_capability_response(
+                        context_window=8192,
+                        deployment_id="dep-a",
+                        route_id="route-a",
+                        routing_version=1,
+                    ),
+                )
+            return httpx.Response(
+                200,
+                json=_capability_response(
+                    context_window=12288,
+                    deployment_id="dep-b",
+                    route_id="route-b",
+                    routing_version=2,
+                ),
+            )
+        if request.url.path == "/v1/chat/completions":
+            chat_calls += 1
+            title = "discarded old route" if chat_calls == 1 else "accepted new route"
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {**_ready_payload(), "draft": {**_ready_payload()["draft"], "title": title}}
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 100},
+            }
+            if chat_calls == 1:
+                route_version = 2
+            return httpx.Response(200, json=payload)
+        raise AssertionError(request.url.path)
+
+    provider = OpenAICompatibleLlmProvider(
+        _settings(), client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    result = provider.structure_idea(IdeaStructuringRequest(input_text="route changes after chat"))
+
+    assert result.draft.title == "accepted new route"
+    assert chat_calls == 2
+    assert count_calls == 2
+
+
 def test_finish_reason_length_reduces_input_and_never_parses_truncated_json() -> None:
     count_messages: list[list[dict]] = []
     chat_messages: list[list[dict]] = []
