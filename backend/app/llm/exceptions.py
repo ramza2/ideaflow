@@ -71,6 +71,18 @@ class LlmUnavailableError(LlmError):
     safe_message = "AI 처리 중 일시적인 오류가 발생했습니다."
 
 
+class LlmContextBudgetError(LlmError):
+    code = "LLM_CONTEXT_BUDGET_EXCEEDED"
+    retryable = False
+    safe_message = "AI 입력이 현재 모델의 처리 한도를 초과했습니다. 입력 내용을 줄여 다시 시도해 주세요."
+
+
+class LlmOutputLengthError(LlmError):
+    code = "LLM_OUTPUT_LENGTH_EXCEEDED"
+    retryable = False
+    safe_message = "AI 응답이 길이 제한으로 중단되었습니다. 입력 내용을 줄여 다시 시도해 주세요."
+
+
 class LlmResearchRefineInputTooLargeError(LlmError):
     code = "AI_RESEARCH_REFINE_INPUT_TOO_LARGE"
     retryable = False
