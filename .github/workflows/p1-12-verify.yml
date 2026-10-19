@@ -1,0 +1,29 @@
+name: P1-12 Verify
+
+on:
+  push:
+    branches:
+      - cursor/modelops-p1-12-adaptive-budget
+
+jobs:
+  backend-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: >-
+          pytest -q
+          tests/test_adaptive_budget_unit.py
+          tests/test_llm_provider_unit.py
+          tests/test_modelops_gateway_unit.py
+          tests/test_web_research_refine_evidence_unit.py
+          tests/test_refine_schema_unit.py
