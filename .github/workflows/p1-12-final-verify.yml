@@ -1,0 +1,189 @@
+name: P1-12 Final Verify
+
+on:
+  push:
+    branches:
+      - cursor/modelops-p1-12-adaptive-budget
+
+jobs:
+  backend-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: >-
+          pytest -q
+          tests/test_adaptive_budget_unit.py
+          tests/test_llm_provider_unit.py
+          tests/test_modelops_gateway_unit.py
+          tests/test_web_research_refine_evidence_unit.py
+          tests/test_refine_schema_unit.py
+
+  backend-storage-regression:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ideaflow
+          POSTGRES_PASSWORD: ideaflow
+          POSTGRES_DB: ideaflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ideaflow -d ideaflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://ideaflow:ideaflow@127.0.0.1:5432/ideaflow_test
+      DATABASE_URL: postgresql+psycopg://ideaflow:ideaflow@127.0.0.1:5432/ideaflow_guard
+      AI_WORKER_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Prepare dedicated test DB
+        env:
+          DATABASE_URL: postgresql+psycopg://ideaflow:ideaflow@127.0.0.1:5432/ideaflow_test
+        run: |
+          python - <<'PY'
+          import psycopg
+          with psycopg.connect("postgresql://ideaflow:ideaflow@127.0.0.1:5432/ideaflow_test") as conn:
+              conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+          PY
+          alembic upgrade head
+      - name: Storage regression
+        run: >-
+          pytest -q
+          tests/test_ai_session_integration.py::test_worker_success
+          tests/test_ai_session_integration.py::test_confirm_and_idempotency
+          tests/test_ai_refine_integration.py::test_refine_worker_merges_patch_onto_source_snapshot
+          tests/test_ai_refine_integration.py::test_apply_refinement_updates_source_idea_and_is_idempotent
+          tests/test_web_research_integration.py::test_research_success_updates_session
+          tests/test_web_research_integration.py::test_refine_passes_budgeted_evidence_to_llm
+
+  live-gateway-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      LLM_API_URL: https://modelops-gateway.openlink.kr
+      LLM_MODEL_NAME: qwen3-14b
+      LLM_CHAT_COMPLETIONS_PATH: /v1/chat/completions
+      LLM_ENABLE_THINKING: "false"
+      AI_WORKER_ENABLED: "false"
+      DATABASE_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .
+      - name: Exercise final IdeaFlow provider against live ModelOps
+        run: |
+          python - <<'PY'
+          import uuid
+
+          from app.core.config import Settings
+          from app.llm.openai_compatible import OpenAICompatibleLlmProvider
+          from app.llm.refine_schemas import IdeaRefinementRequest
+          from app.llm.research_schemas import (
+              EvidenceInput,
+              EvidenceRefinementRequest,
+              validate_refinement_result,
+          )
+          from app.llm.schemas import IdeaStructuringRequest
+          from app.models.enums import IdeaRefineDirection
+
+          provider = OpenAICompatibleLlmProvider(Settings(_env_file=None))
+          try:
+              structure = provider.structure_idea(
+                  IdeaStructuringRequest(
+                      input_text="웹 조사 근거로 사내 아이디어 초안을 보완하고 검토 가능한 형태로 정리한다."
+                  )
+              )
+              print("FINAL STRUCTURE PASS", structure.decision.value)
+
+              refine = provider.refine_idea(
+                  IdeaRefinementRequest(
+                      direction=IdeaRefineDirection.TECHNICAL_IMPLEMENTATION,
+                      source_context={
+                          "title": "아이디어 조사 보완 기능",
+                          "one_line_definition": "웹 근거로 아이디어 초안을 보완한다.",
+                          "background": "기존 등록 초안에 시장 및 기술 근거가 부족할 수 있다.",
+                          "core_concept": "검색 근거를 수집하고 LLM이 근거 기반으로 초안을 보완한다.",
+                          "feasibility": "UNKNOWN",
+                      },
+                  )
+              )
+              feasibility = refine.draft_patch.get("feasibility")
+              if feasibility is not None:
+                  value = feasibility.value if hasattr(feasibility, "value") else str(feasibility)
+                  if value not in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
+                      raise AssertionError(value)
+              print(
+                  "FINAL TECHNICAL REFINE PASS",
+                  refine.decision.value,
+                  "feasibility_present=" + str(feasibility is not None),
+              )
+
+              evidence_id = uuid.uuid4()
+              research_request = EvidenceRefinementRequest(
+                  input_text="synthetic final smoke",
+                  base_draft={
+                      "title": "아이디어 조사 보완 기능",
+                      "background": "기존 등록 초안에 외부 근거가 부족하다.",
+                      "problem": "검토자가 외부 현황을 별도로 조사해야 한다.",
+                  },
+                  evidence=[
+                      EvidenceInput(
+                          evidence_id=evidence_id,
+                          title="Synthetic evidence",
+                          source="final smoke",
+                          snippet="웹 조사 근거를 사용한 변경 필드는 실제 전송된 근거 식별자와 연결해야 한다.",
+                      )
+                  ],
+              )
+              research = provider.refine_idea_with_evidence(research_request)
+              valid_ids = {str(ev.evidence_id) for ev in research_request.evidence}
+              validate_refinement_result(
+                  research,
+                  base_draft=research_request.base_draft,
+                  user_edited_fields=[],
+                  valid_evidence_ids=valid_ids,
+              )
+              returned_ids = {
+                  eid for ids in research.evidence_links.values() for eid in ids
+              }
+              if not returned_ids.issubset(valid_ids):
+                  raise AssertionError("unknown evidence id")
+              print(
+                  "FINAL WEB_RESEARCH PASS",
+                  "evidence_sent=" + str(len(research_request.evidence)),
+                  "evidence_link_ids=" + str(len(returned_ids)),
+              )
+          finally:
+              provider.close()
+          PY
