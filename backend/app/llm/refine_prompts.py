@@ -7,14 +7,16 @@ from typing import Any
 
 from app.models.enums import IdeaRefineDirection
 
-IDEA_REFINE_PROMPT_VERSION = "v1"
+IDEA_REFINE_PROMPT_VERSION = "v2"
 
 DIRECTION_GUIDANCE: dict[str, str] = {
     IdeaRefineDirection.EXPAND_DETAIL.value: (
         "추상적인 설명을 구체화한다. 주요 기능, 시나리오, 난제를 더 명확히 작성한다."
     ),
     IdeaRefineDirection.TECHNICAL_IMPLEMENTATION.value: (
-        "구현 구조, 핵심 기술 요소, 기술 난제, 검증 방법, 구현 가능성을 중심으로 발전시킨다."
+        "구현 구조, 핵심 기술 요소, 기술 난제, 검증 방법, 구현 가능성을 중심으로 발전시킨다. "
+        "feasibility를 변경할 경우 HIGH, MEDIUM, LOW, UNKNOWN 중 하나만 사용하고 "
+        "설명문은 feasibility가 아니라 challenges 또는 minimum_validation 같은 텍스트 field에 작성한다."
     ),
     IdeaRefineDirection.BUSINESS_PERSPECTIVE.value: (
         "사용자 가치, 도입 이유, 기대 효과, 사업 적용 관점을 중심으로 발전시킨다. "
@@ -146,6 +148,9 @@ REFINE_SYSTEM_PROMPT = """당신은 IdeaFlow의 등록된 아이디어 발전 �
 13. WEB_EVIDENCE provenance를 사용하지 않는다. (이번 호출은 Web Search 미사용)
 14. stage_id, visibility, shares, assignee_id, next_review_date, author, idea_code,
     original_text, workspace_id는 반환하지 않는다.
+15. priority를 반환할 경우 HIGH, MEDIUM, LOW 중 하나만 사용한다.
+16. feasibility를 반환할 경우 HIGH, MEDIUM, LOW, UNKNOWN 중 하나만 사용한다.
+    priority/feasibility에는 설명문을 넣지 않는다.
 
 decision은 READY_FOR_REVIEW 또는 NEEDS_CLARIFICATION 만 허용한다.
 

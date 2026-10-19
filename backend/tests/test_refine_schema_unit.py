@@ -57,6 +57,50 @@ def test_invalid_feasibility_rejected() -> None:
         )
 
 
+def test_descriptive_feasibility_sentence_rejected() -> None:
+    with pytest.raises(LlmResponseValidationError):
+        parse_refinement_result(
+            json.dumps(
+                {
+                    "decision": "READY_FOR_REVIEW",
+                    "draft_patch": {
+                        "feasibility": "기술적으로 구현 가능하며 기존 시스템과 통합이 용이하다."
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
+def test_technical_implementation_prompt_constrains_feasibility_enum() -> None:
+    from app.llm.refine_prompts import (
+        DIRECTION_GUIDANCE,
+        IDEA_REFINE_PROMPT_VERSION,
+        REFINE_SYSTEM_PROMPT,
+        build_refine_user_prompt,
+    )
+
+    assert IDEA_REFINE_PROMPT_VERSION == "v2"
+    guidance = DIRECTION_GUIDANCE[IdeaRefineDirection.TECHNICAL_IMPLEMENTATION.value]
+    for value in ("HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+        assert value in guidance
+        assert value in REFINE_SYSTEM_PROMPT
+    assert "설명문" in guidance
+    assert "feasibility" in guidance
+    assert "challenges" in guidance
+    assert "minimum_validation" in guidance
+
+    prompt = build_refine_user_prompt(
+        direction=IdeaRefineDirection.TECHNICAL_IMPLEMENTATION.value,
+        source_context={
+            "title": "아이디어 조사 보완 기능",
+            "core_concept": "웹 근거 기반 아이디어 보완",
+        },
+    )
+    assert "HIGH, MEDIUM, LOW, UNKNOWN" in prompt
+    assert "설명문" in prompt
+
+
 def test_tags_object_rejected() -> None:
     with pytest.raises(LlmResponseValidationError):
         parse_refinement_result(
