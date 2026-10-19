@@ -65,7 +65,7 @@ jobs:
 
               refine = provider.refine_idea(
                   IdeaRefinementRequest(
-                      direction=IdeaRefineDirection.TECHNICAL_IMPLEMENTATION,
+                      direction=IdeaRefineDirection.EXPAND_DETAIL,
                       source_context={
                           "title": "아이디어 조사 보완 기능",
                           "one_line_definition": "웹 근거로 아이디어 초안을 보완한다.",
