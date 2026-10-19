@@ -188,6 +188,27 @@ class OpenAICompatibleLlmProvider:
                 continue
 
             if token_count is not None:
+                # Count -> Chat is not route-pinned by ModelOps. Re-read the
+                # observational capability after Chat and discard/re-budget if
+                # ACTIVE routing changed anywhere across the pair.
+                capability = self._get_capability()
+                if not self._same_route(token_count, capability):
+                    if parity_retries >= _MAX_ROUTE_PARITY_RETRIES:
+                        raise LlmUnavailableError()
+                    parity_retries += 1
+                    logger.warning(
+                        "llm_route_changed_after_chat provider=%s model=%s phase=%s "
+                        "count_deployment=%s count_route=%s count_version=%s retry=%s",
+                        self.provider_name,
+                        self.model_name,
+                        phase,
+                        token_count.deployment_id,
+                        token_count.route_id,
+                        token_count.routing_version,
+                        parity_retries,
+                    )
+                    continue
+
                 chat_prompt_tokens = self._extract_usage_prompt_tokens(payload)
                 if (
                     chat_prompt_tokens is not None
