@@ -28,7 +28,7 @@ def test_phase_ratios_respect_existing_hard_caps() -> None:
 
 def test_dynamic_budget_never_exceeds_verified_context() -> None:
     decision = compute_phase_budget(
-        prompt_tokens=3200,
+        prompt_tokens=3300,
         context_window=5000,
         hard_output_cap=2500,
         policy=STRUCTURE_POLICY,
