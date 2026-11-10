@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { Eye, EyeOff, Lightbulb, Sparkles, ArrowRight } from "lucide-react";
+import { Eye, EyeOff, Lightbulb, Sparkles, ArrowRight, LogOut } from "lucide-react";
 import { Button } from "../../components/common/Button";
 import { Input } from "../../components/common/Input";
 import * as authApi from "../../api/auth";
@@ -9,13 +9,31 @@ import { useAuth } from "../../auth/AuthProvider";
 
 export function ChangePasswordPage() {
   const navigate = useNavigate();
-  const { refreshUser } = useAuth();
+  const { refreshUser, logout } = useAuth();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [switchingAccount, setSwitchingAccount] = useState(false);
+
+  async function handleSwitchAccount() {
+    setError(null);
+    setSwitchingAccount(true);
+    try {
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError("로그아웃에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+      }
+    } finally {
+      setSwitchingAccount(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -112,10 +130,24 @@ export function ChangePasswordPage() {
               variant="primary"
               size="lg"
               loading={submitting}
+              disabled={switchingAccount}
               className="w-full"
               icon={<ArrowRight className="w-4 h-4" />}
             >
               비밀번호 변경
+            </Button>
+
+            <Button
+              type="button"
+              variant="secondary"
+              size="lg"
+              loading={switchingAccount}
+              disabled={submitting}
+              className="w-full"
+              icon={<LogOut className="w-4 h-4" />}
+              onClick={handleSwitchAccount}
+            >
+              다른 계정으로 로그인
             </Button>
           </form>
         </div>
